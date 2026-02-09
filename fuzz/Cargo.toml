@@ -1,0 +1,20 @@
+[package]
+name = "tune-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.tune]
+path = ".."
+
+[[bin]]
+name = "playback_commands"
+path = "fuzz_targets/playback_commands.rs"
+test = false
+doc = false
