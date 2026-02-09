@@ -102,10 +102,11 @@ pub fn run() -> Result<()> {
             KeyCode::Down => core.select_next(),
             KeyCode::Up => core.select_prev(),
             KeyCode::Enter => {
-                if let Some(path) = core.activate_selected() {
-                    if let Err(err) = audio.play(&path) {
-                        core.status = format!("playback error: {err:#}");
-                    }
+                if let Some(err) = core
+                    .activate_selected()
+                    .and_then(|path| audio.play(&path).err())
+                {
+                    core.status = format!("playback error: {err:#}");
                 }
             }
             KeyCode::Left | KeyCode::Backspace => core.navigate_back(),
@@ -120,11 +121,12 @@ pub fn run() -> Result<()> {
                 core.dirty = true;
             }
             KeyCode::Char('n') => {
-                if let Some(path) = core.next_track_path() {
-                    if let Err(err) = audio.play(&path) {
-                        core.status = format!("playback error: {err:#}");
-                        core.dirty = true;
-                    }
+                if let Some(err) = core
+                    .next_track_path()
+                    .and_then(|path| audio.play(&path).err())
+                {
+                    core.status = format!("playback error: {err:#}");
+                    core.dirty = true;
                 }
             }
             KeyCode::Char('m') => core.cycle_mode(),
@@ -253,11 +255,12 @@ fn run_command(core: &mut TuneCore, audio: &mut dyn AudioEngine, raw: &str) {
                 "add" => core.add_selected_to_playlist(name),
                 "play" => {
                     core.load_playlist_queue(name);
-                    if let Some(path) = core.next_track_path() {
-                        if let Err(err) = audio.play(&path) {
-                            core.status = format!("playback error: {err:#}");
-                            core.dirty = true;
-                        }
+                    if let Some(err) = core
+                        .next_track_path()
+                        .and_then(|path| audio.play(&path).err())
+                    {
+                        core.status = format!("playback error: {err:#}");
+                        core.dirty = true;
                     }
                 }
                 _ => {
