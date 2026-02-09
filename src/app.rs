@@ -43,6 +43,7 @@ pub fn run() -> Result<()> {
 
     let result: Result<()> = loop {
         pump_tray_events(&mut core);
+        maybe_auto_advance_track(&mut core, &mut *audio);
 
         if core.dirty || last_tick.elapsed() > Duration::from_millis(250) {
             terminal.draw(|frame| {
@@ -171,6 +172,23 @@ pub fn run() -> Result<()> {
     result?;
     save_result?;
     Ok(())
+}
+
+fn maybe_auto_advance_track(core: &mut TuneCore, audio: &mut dyn AudioEngine) {
+    if audio.current_track().is_none() || audio.is_paused() || !audio.is_finished() {
+        return;
+    }
+
+    if let Some(path) = core.next_track_path() {
+        if let Err(err) = audio.play(&path) {
+            core.status = format!("playback error: {err:#}");
+            core.dirty = true;
+        }
+    } else {
+        audio.stop();
+        core.status = String::from("Reached end of queue");
+        core.dirty = true;
+    }
 }
 
 fn handle_mouse(core: &mut TuneCore, mouse: MouseEvent, library_rect: ratatui::prelude::Rect) {
@@ -534,7 +552,84 @@ fn to_wide(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audio::AudioEngine;
     use crate::model::PersistedState;
+    use crate::model::Track;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    struct TestAudioEngine {
+        paused: bool,
+        current: Option<PathBuf>,
+        finished: bool,
+        played: Vec<PathBuf>,
+        stopped: bool,
+    }
+
+    impl TestAudioEngine {
+        fn finished_with_current(path: &str) -> Self {
+            Self {
+                paused: false,
+                current: Some(PathBuf::from(path)),
+                finished: true,
+                played: Vec::new(),
+                stopped: false,
+            }
+        }
+    }
+
+    impl AudioEngine for TestAudioEngine {
+        fn play(&mut self, path: &Path) -> Result<()> {
+            self.current = Some(path.to_path_buf());
+            self.finished = false;
+            self.played.push(path.to_path_buf());
+            Ok(())
+        }
+
+        fn pause(&mut self) {
+            self.paused = true;
+        }
+
+        fn resume(&mut self) {
+            self.paused = false;
+        }
+
+        fn stop(&mut self) {
+            self.stopped = true;
+            self.current = None;
+            self.finished = false;
+        }
+
+        fn is_paused(&self) -> bool {
+            self.paused
+        }
+
+        fn current_track(&self) -> Option<&Path> {
+            self.current.as_deref()
+        }
+
+        fn position(&self) -> Option<Duration> {
+            None
+        }
+
+        fn duration(&self) -> Option<Duration> {
+            None
+        }
+
+        fn volume(&self) -> f32 {
+            1.0
+        }
+
+        fn set_volume(&mut self, _volume: f32) {}
+
+        fn output_name(&self) -> Option<String> {
+            Some(String::from("test"))
+        }
+
+        fn is_finished(&self) -> bool {
+            self.finished
+        }
+    }
 
     #[test]
     fn unknown_command_is_reported() {
@@ -556,5 +651,51 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("music folder")
         }));
+    }
+
+    #[test]
+    fn auto_advance_plays_next_track_when_finished() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("a"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("b.mp3"),
+                title: String::from("b"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.queue = vec![0, 1];
+        core.current_queue_index = Some(0);
+
+        let mut audio = TestAudioEngine::finished_with_current("a.mp3");
+        maybe_auto_advance_track(&mut core, &mut audio);
+
+        assert_eq!(audio.played, vec![PathBuf::from("b.mp3")]);
+        assert_eq!(core.current_queue_index, Some(1));
+    }
+
+    #[test]
+    fn auto_advance_stops_when_queue_ends() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![Track {
+            path: PathBuf::from("a.mp3"),
+            title: String::from("a"),
+            artist: None,
+            album: None,
+        }];
+        core.queue = vec![0];
+        core.current_queue_index = Some(0);
+
+        let mut audio = TestAudioEngine::finished_with_current("a.mp3");
+        maybe_auto_advance_track(&mut core, &mut audio);
+
+        assert!(audio.stopped);
+        assert_eq!(core.status, "Reached end of queue");
     }
 }

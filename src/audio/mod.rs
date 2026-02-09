@@ -16,6 +16,7 @@ pub trait AudioEngine {
     fn volume(&self) -> f32;
     fn set_volume(&mut self, volume: f32);
     fn output_name(&self) -> Option<String>;
+    fn is_finished(&self) -> bool;
 }
 
 pub struct WasapiAudioEngine {
@@ -102,6 +103,10 @@ impl AudioEngine for WasapiAudioEngine {
         self.stream.config().channel_count().checked_sub(0)?;
         Some("System default output (WASAPI/CPAL)".to_string())
     }
+
+    fn is_finished(&self) -> bool {
+        self.current.is_some() && !self.sink.is_paused() && self.sink.empty()
+    }
 }
 
 pub struct NullAudioEngine {
@@ -171,5 +176,9 @@ impl AudioEngine for NullAudioEngine {
 
     fn output_name(&self) -> Option<String> {
         Some("Null audio engine".to_string())
+    }
+
+    fn is_finished(&self) -> bool {
+        false
     }
 }
