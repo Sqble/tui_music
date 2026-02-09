@@ -141,7 +141,7 @@ pub fn draw(
     let command_title = if command_mode {
         "Command (:help)"
     } else {
-        "Keys: Enter open/play, Backspace back, n next, m mode, t minimize, +/- volume, : command"
+        "Keys: Enter open/play, Backspace back, n next, m mode, t minimize, +/- volume, : command, Ctrl+C quit"
     };
 
     let command = Paragraph::new(if command_mode {

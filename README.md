@@ -28,7 +28,7 @@ cargo run --release
 - `r`: rescan folders
 - `s`: save state
 - `:`: command mode
-- `q`: quit
+- `Ctrl+C`: quit
 
 ## Command Mode
 
