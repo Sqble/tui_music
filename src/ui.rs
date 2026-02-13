@@ -303,6 +303,11 @@ pub fn draw(
         .as_ref()
         .and_then(|path| core.album_for_path(path))
         .unwrap_or("-");
+    let selected_length = selected_path
+        .as_ref()
+        .and_then(|path| core.duration_seconds_for_path(path))
+        .map(|seconds| format_duration(Duration::from_secs(u64::from(seconds))))
+        .unwrap_or_else(|| String::from("--:--"));
 
     let queue_position = now_playing
         .and_then(|path| core.queue_position_for_path(path))
@@ -353,6 +358,10 @@ pub fn draw(
         )),
         Line::from(Span::styled(
             format!("Album   {selected_album}"),
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            format!("Length  {selected_length}"),
             Style::default().fg(colors.muted),
         )),
     ];
@@ -530,8 +539,8 @@ fn progress_bar(ratio: Option<f64>, width: usize) -> String {
     let filled = (clamped * width as f64).round() as usize;
     let mut bar = String::with_capacity(width + 2);
     bar.push('[');
-    bar.push_str(&"#".repeat(filled));
-    bar.push_str(&"-".repeat(width.saturating_sub(filled)));
+    bar.push_str(&"█".repeat(filled));
+    bar.push_str(&"░".repeat(width.saturating_sub(filled)));
     bar.push(']');
     bar
 }

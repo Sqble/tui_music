@@ -4,6 +4,7 @@ use crate::model::{PersistedState, PlaybackMode, Playlist, Theme, Track};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -74,6 +75,7 @@ pub struct TuneCore {
     pub selected_browser: usize,
     pub dirty: bool,
     pub status: String,
+    duration_lookup: RefCell<HashMap<String, Option<u32>>>,
     shuffle_order: Vec<usize>,
     shuffle_cursor: usize,
     shuffle_rng: SmallRng,
@@ -103,6 +105,7 @@ impl TuneCore {
             selected_browser: 0,
             dirty: true,
             status: String::from("Ready"),
+            duration_lookup: RefCell::new(HashMap::new()),
             shuffle_order: Vec::new(),
             shuffle_cursor: 0,
             shuffle_rng: SmallRng::from_os_rng(),
@@ -527,6 +530,21 @@ impl TuneCore {
         self.tracks
             .get(idx)
             .and_then(|track| track.album.as_deref())
+    }
+
+    pub fn duration_seconds_for_path(&self, path: &Path) -> Option<u32> {
+        let key = normalized_path_key(path);
+        if let Some(cached) = self.duration_lookup.borrow().get(&key).copied() {
+            return cached;
+        }
+
+        let idx = self.track_index(path)?;
+        let duration = self
+            .tracks
+            .get(idx)
+            .and_then(|track| library::duration_seconds(&track.path));
+        self.duration_lookup.borrow_mut().insert(key, duration);
+        duration
     }
 
     pub fn next_track_path(&mut self) -> Option<PathBuf> {

@@ -109,6 +109,56 @@ fn symphonia_metadata(path: &Path) -> TrackMetadata {
     }
 }
 
+pub fn duration_seconds(path: &Path) -> Option<u32> {
+    let stripped = crate::config::strip_windows_verbatim_prefix(path);
+
+    let Ok(file) = File::open(&stripped) else {
+        return None;
+    };
+    let source = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+
+    let mut hint = Hint::new();
+    if let Some(extension) = stripped.extension().and_then(OsStr::to_str) {
+        hint.with_extension(extension);
+    }
+
+    let Ok(probed) = get_probe().format(
+        &hint,
+        source,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    ) else {
+        return None;
+    };
+
+    probed
+        .format
+        .default_track()
+        .and_then(|track| codec_duration_seconds(&track.codec_params))
+}
+
+fn codec_duration_seconds(codec_params: &symphonia::core::codecs::CodecParameters) -> Option<u32> {
+    if let (Some(time_base), Some(frame_count)) = (codec_params.time_base, codec_params.n_frames) {
+        let time = time_base.calc_time(frame_count);
+        let mut seconds = time.seconds as u32;
+        if time.frac >= 0.5 {
+            seconds = seconds.saturating_add(1);
+        }
+        return Some(seconds);
+    }
+
+    if let (Some(frame_count), Some(sample_rate)) =
+        (codec_params.n_frames, codec_params.sample_rate)
+    {
+        if sample_rate > 0 {
+            let seconds = ((frame_count as f64) / (sample_rate as f64)).round();
+            return Some(seconds.clamp(0.0, u32::MAX as f64) as u32);
+        }
+    }
+
+    None
+}
+
 fn id3v2_fallback(path: &Path) -> TrackMetadata {
     let mut file = match File::open(path) {
         Ok(f) => f,
