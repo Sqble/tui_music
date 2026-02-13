@@ -13,11 +13,14 @@ Performance-oriented terminal music player for Windows-first workflows.
 - Single-instance behavior on Windows (new launches focus/restore existing app)
 - Automatic track advance when a song ends, including while minimized to tray
 - Persistent state in `%USERPROFILE%\\.config\\tunetui\\state.json`
+- Stats sidecar in `%USERPROFILE%\\.config\\tunetui\\stats.json` with listen events and aggregates
 - Keyboard-driven TUI with actions panel
 - Right-aligned status tabs with `E` cycling (Library, Lyrics, Stats, Online)
+- Stats tab with totals, ASCII charts, top songs, and recent listen log
 - Audio driver recovery and output speaker selection from actions panel
 - Selected output speaker persists across launches with fallback to default when unavailable
-- Playback settings in actions panel: loudness normalization, crossfade, and themes (Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy)
+- Playback settings in actions panel: loudness normalization, crossfade, stats tracking toggle, and themes (Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy)
+- Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
 - Add directory from actions panel via typed path or external folder picker
 - Remove directory from actions panel
 - Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
@@ -42,6 +45,11 @@ cargo run --release
 - `r`: rescan folders
 - `s`: save state
 - `/`: actions panel
+- `Tab`: cycle header sections (Library/Lyrics/Stats/Online)
+- `Left/Right` (Stats tab): move filter focus
+- `Enter` (Stats tab): cycle focused range/sort filter
+- `Type/Backspace` (Stats tab): live edit artist/album/search filters
+- `Shift+Up` (Stats tab): jump back to top filters
 - `Ctrl+C`: quit
 
 ## Fuzzing

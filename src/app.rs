@@ -1,11 +1,12 @@
 use crate::audio::{AudioEngine, NullAudioEngine, WasapiAudioEngine};
 use crate::config;
-use crate::core::TuneCore;
+use crate::core::{HeaderSection, StatsFilterFocus, TuneCore};
 use crate::model::{PlaybackMode, Theme};
+use crate::stats::{self, ListenSessionRecord, StatsStore};
 use anyhow::Result;
 use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
-    MouseEvent, MouseEventKind,
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -29,6 +30,131 @@ const APP_CONSOLE_TITLE: &str = "TuneTUI";
 const MAX_VOLUME: f32 = 2.5;
 const VOLUME_STEP_COARSE: f32 = 0.05;
 const VOLUME_STEP_FINE: f32 = 0.01;
+
+#[derive(Debug, Clone)]
+struct ActiveListenSession {
+    track_path: PathBuf,
+    title: String,
+    artist: Option<String>,
+    album: Option<String>,
+    started_at_epoch_seconds: i64,
+    playing_started_at: Option<Instant>,
+    listened: Duration,
+    last_position: Option<Duration>,
+    duration: Option<Duration>,
+}
+
+#[derive(Debug, Default)]
+struct ListenTracker {
+    active: Option<ActiveListenSession>,
+}
+
+impl ListenTracker {
+    fn reset(&mut self) {
+        self.active = None;
+    }
+
+    fn tick(&mut self, core: &TuneCore, audio: &dyn AudioEngine, stats: &mut StatsStore) -> bool {
+        let mut wrote_event = false;
+        let current_track = audio.current_track().map(Path::to_path_buf);
+        let paused = audio.is_paused();
+
+        let should_finalize = self
+            .active
+            .as_ref()
+            .is_some_and(|active| current_track.as_ref() != Some(&active.track_path));
+        if should_finalize {
+            wrote_event = self.finalize_active(stats) || wrote_event;
+        }
+
+        if current_track.is_none() {
+            return wrote_event;
+        }
+
+        if self.active.is_none() {
+            let path = current_track.expect("checked some");
+            let now = Instant::now();
+            self.active = Some(ActiveListenSession {
+                title: core.title_for_path(&path).unwrap_or_else(|| {
+                    path.file_stem()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("-")
+                        .to_string()
+                }),
+                artist: core.artist_for_path(&path).map(ToOwned::to_owned),
+                album: core.album_for_path(&path).map(ToOwned::to_owned),
+                track_path: path,
+                started_at_epoch_seconds: stats::now_epoch_seconds(),
+                playing_started_at: (!paused).then_some(now),
+                listened: Duration::ZERO,
+                last_position: audio.position(),
+                duration: audio.duration(),
+            });
+            return wrote_event;
+        }
+
+        if let Some(active) = self.active.as_mut() {
+            active.last_position = audio.position().or(active.last_position);
+            active.duration = audio.duration().or(active.duration);
+            if paused {
+                if let Some(started) = active.playing_started_at.take() {
+                    active.listened = active.listened.saturating_add(started.elapsed());
+                }
+            } else if active.playing_started_at.is_none() {
+                active.playing_started_at = Some(Instant::now());
+            }
+        }
+
+        wrote_event
+    }
+
+    fn finalize_active(&mut self, stats: &mut StatsStore) -> bool {
+        let mut active = match self.active.take() {
+            Some(active) => active,
+            None => return false,
+        };
+
+        if let Some(started) = active.playing_started_at.take() {
+            active.listened = active.listened.saturating_add(started.elapsed());
+        }
+
+        let listened_seconds = duration_to_recorded_seconds(active.listened);
+        let completed =
+            active
+                .duration
+                .zip(active.last_position)
+                .is_some_and(|(duration, position)| {
+                    position >= duration
+                        || duration.saturating_sub(position) <= Duration::from_secs(1)
+                });
+
+        stats.record_listen(ListenSessionRecord {
+            track_path: active.track_path,
+            title: active.title,
+            artist: active.artist,
+            album: active.album,
+            started_at_epoch_seconds: active.started_at_epoch_seconds,
+            listened_seconds,
+            completed,
+            duration_seconds: active.duration.map(|duration| duration.as_secs() as u32),
+        });
+        listened_seconds > 0
+    }
+}
+
+fn duration_to_recorded_seconds(duration: Duration) -> u32 {
+    if duration.is_zero() {
+        return 0;
+    }
+    let secs = duration.as_secs();
+    let has_subsec = duration.subsec_nanos() > 0;
+    let rounded = if has_subsec {
+        secs.saturating_add(1)
+    } else {
+        secs
+    };
+    rounded.min(u64::from(u32::MAX)) as u32
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ActionPanelState {
@@ -84,6 +210,7 @@ impl ActionPanelState {
                     String::from("Audio driver settings"),
                     String::from("Theme"),
                     String::from("Save state"),
+                    String::from("Clear listen history (backup)"),
                     String::from("Minimize to tray"),
                     String::from("Close panel"),
                 ],
@@ -226,6 +353,8 @@ pub fn run() -> Result<()> {
     let state = config::load_state()?;
     let preferred_output = state.selected_output_device.clone();
     let mut core = TuneCore::from_persisted(state);
+    let mut stats_store = stats::load_stats().unwrap_or_default();
+    let mut listen_tracker = ListenTracker::default();
 
     let mut audio: Box<dyn AudioEngine> = match WasapiAudioEngine::new() {
         Ok(engine) => Box::new(engine),
@@ -245,17 +374,57 @@ pub fn run() -> Result<()> {
     let mut action_panel = ActionPanelState::Closed;
     let mut last_tick = Instant::now();
     let mut library_rect = ratatui::prelude::Rect::default();
+    let mut stats_enabled_last = core.stats_enabled;
 
     let result: Result<()> = loop {
         pump_tray_events(&mut core);
         audio.tick();
+        if core.stats_enabled && listen_tracker.tick(&core, &*audio, &mut stats_store) {
+            let _ = stats::save_stats(&stats_store);
+        }
+        if stats_enabled_last
+            && !core.stats_enabled
+            && listen_tracker.finalize_active(&mut stats_store)
+        {
+            let _ = stats::save_stats(&stats_store);
+        }
+        if core.clear_stats_requested {
+            listen_tracker.reset();
+            stats_store.clear_history();
+            if let Err(err) = stats::save_stats(&stats_store) {
+                core.status = format!("Failed to clear listen history: {err}");
+            } else {
+                core.status = String::from("Listen history cleared (backup saved)");
+            }
+            core.clear_stats_requested = false;
+            core.dirty = true;
+        }
+        stats_enabled_last = core.stats_enabled;
         maybe_auto_advance_track(&mut core, &mut *audio);
 
         if core.dirty || last_tick.elapsed() > Duration::from_millis(250) {
             terminal.draw(|frame| {
                 library_rect = crate::ui::library_rect(frame.area());
                 let panel_view = action_panel.to_view(&core, &*audio);
-                crate::ui::draw(frame, &core, &*audio, panel_view.as_ref())
+                let stats_snapshot = (core.header_section == HeaderSection::Stats).then(|| {
+                    stats_store.query(
+                        &crate::stats::StatsQuery {
+                            range: core.stats_range,
+                            sort: core.stats_sort,
+                            artist_filter: core.stats_artist_filter.clone(),
+                            album_filter: core.stats_album_filter.clone(),
+                            search: core.stats_search.clone(),
+                        },
+                        stats::now_epoch_seconds(),
+                    )
+                });
+                crate::ui::draw(
+                    frame,
+                    &core,
+                    &*audio,
+                    panel_view.as_ref(),
+                    stats_snapshot.as_ref(),
+                )
             })?;
             core.dirty = false;
             last_tick = Instant::now();
@@ -281,6 +450,10 @@ pub fn run() -> Result<()> {
 
         if action_panel.is_open() {
             handle_action_panel_input(&mut core, &mut *audio, &mut action_panel, key.code);
+            continue;
+        }
+
+        if handle_stats_inline_input(&mut core, key) {
             continue;
         }
 
@@ -329,7 +502,7 @@ pub fn run() -> Result<()> {
                 core.cycle_mode();
                 auto_save_state(&mut core, &*audio);
             }
-            KeyCode::Char('e') => core.cycle_header_section(),
+            KeyCode::Tab => core.cycle_header_section(),
             KeyCode::Char('t') => {
                 minimize_to_tray();
                 core.status = String::from("Minimized to tray");
@@ -384,6 +557,9 @@ pub fn run() -> Result<()> {
     )?;
     cleanup_tray();
     terminal.show_cursor()?;
+    if listen_tracker.finalize_active(&mut stats_store) {
+        let _ = stats::save_stats(&stats_store);
+    }
     let save_result = save_state_with_audio(&mut core, &*audio);
     result?;
     save_result?;
@@ -484,6 +660,226 @@ fn maybe_auto_advance_track(core: &mut TuneCore, audio: &mut dyn AudioEngine) {
         audio.stop();
         core.status = String::from("Reached end of queue");
         core.dirty = true;
+    }
+}
+
+fn handle_stats_inline_input(core: &mut TuneCore, key: KeyEvent) -> bool {
+    if core.header_section != HeaderSection::Stats {
+        return false;
+    }
+
+    if key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::SHIFT) {
+        core.stats_scroll = 0;
+        core.stats_focus = StatsFilterFocus::Range(core_range_index(core.stats_range));
+        core.status = String::from("Stats view reset to filters");
+        core.dirty = true;
+        return true;
+    }
+
+    match key.code {
+        KeyCode::Left => {
+            if core.stats_scroll > 0 && matches!(core.stats_focus, StatsFilterFocus::Search) {
+                stats_scroll_up(core);
+                return true;
+            }
+            move_stats_focus_or_value(core, false)
+        }
+        KeyCode::Right => {
+            if matches!(core.stats_focus, StatsFilterFocus::Search) {
+                stats_scroll_down(core);
+                return true;
+            }
+            move_stats_focus_or_value(core, true)
+        }
+        KeyCode::Up => {
+            if core.stats_scroll > 0 && matches!(core.stats_focus, StatsFilterFocus::Search) {
+                stats_scroll_up(core);
+                return true;
+            }
+            move_stats_row(core, false)
+        }
+        KeyCode::Down => {
+            if matches!(core.stats_focus, StatsFilterFocus::Search) {
+                stats_scroll_down(core);
+                return true;
+            }
+            move_stats_row(core, true)
+        }
+        KeyCode::Enter => {
+            match core.stats_focus {
+                StatsFilterFocus::Range(index) => {
+                    let next = (index + 1) % 4;
+                    core.stats_focus = StatsFilterFocus::Range(next);
+                    set_stats_range_by_index(core, next);
+                }
+                StatsFilterFocus::Sort(index) => {
+                    let next = 1_u8.saturating_sub(index.min(1));
+                    core.stats_focus = StatsFilterFocus::Sort(next);
+                    set_stats_sort_by_index(core, next);
+                }
+                StatsFilterFocus::Artist | StatsFilterFocus::Album | StatsFilterFocus::Search => {}
+            }
+            true
+        }
+        KeyCode::Backspace => {
+            let target = match core.stats_focus {
+                StatsFilterFocus::Artist => Some(&mut core.stats_artist_filter),
+                StatsFilterFocus::Album => Some(&mut core.stats_album_filter),
+                StatsFilterFocus::Search => Some(&mut core.stats_search),
+                StatsFilterFocus::Range(_) | StatsFilterFocus::Sort(_) => None,
+            };
+
+            if let Some(text) = target {
+                if !text.is_empty() {
+                    text.pop();
+                    core.status = format!("{} filter updated", core.stats_focus.label());
+                    core.dirty = true;
+                }
+                return true;
+            }
+
+            true
+        }
+        KeyCode::Char(ch) => {
+            let target = match core.stats_focus {
+                StatsFilterFocus::Artist => Some(&mut core.stats_artist_filter),
+                StatsFilterFocus::Album => Some(&mut core.stats_album_filter),
+                StatsFilterFocus::Search => Some(&mut core.stats_search),
+                StatsFilterFocus::Range(_) | StatsFilterFocus::Sort(_) => None,
+            };
+
+            if let Some(text) = target {
+                text.push(ch);
+                core.status = format!("{} filter updated", core.stats_focus.label());
+                core.dirty = true;
+                return true;
+            }
+
+            false
+        }
+        KeyCode::Delete => {
+            match core.stats_focus {
+                StatsFilterFocus::Artist => core.stats_artist_filter.clear(),
+                StatsFilterFocus::Album => core.stats_album_filter.clear(),
+                StatsFilterFocus::Search => core.stats_search.clear(),
+                StatsFilterFocus::Range(_) | StatsFilterFocus::Sort(_) => return false,
+            }
+            core.status = format!("{} filter cleared", core.stats_focus.label());
+            core.dirty = true;
+            true
+        }
+        _ => false,
+    }
+}
+
+fn stats_scroll_down(core: &mut TuneCore) {
+    core.stats_scroll = core.stats_scroll.saturating_add(1);
+    core.dirty = true;
+}
+
+fn stats_scroll_up(core: &mut TuneCore) {
+    core.stats_scroll = core.stats_scroll.saturating_sub(1);
+    core.dirty = true;
+}
+
+fn move_stats_focus_or_value(core: &mut TuneCore, forward: bool) -> bool {
+    match core.stats_focus {
+        StatsFilterFocus::Range(index) => {
+            let next = if forward {
+                (index + 1) % 4
+            } else {
+                (index + 3) % 4
+            };
+            core.stats_focus = StatsFilterFocus::Range(next);
+            set_stats_range_by_index(core, next);
+            true
+        }
+        StatsFilterFocus::Sort(index) => {
+            let next = 1_u8.saturating_sub(index.min(1));
+            core.stats_focus = StatsFilterFocus::Sort(next);
+            set_stats_sort_by_index(core, next);
+            true
+        }
+        StatsFilterFocus::Artist | StatsFilterFocus::Album | StatsFilterFocus::Search => {
+            move_stats_row(core, forward)
+        }
+    }
+}
+
+fn move_stats_row(core: &mut TuneCore, forward: bool) -> bool {
+    core.stats_focus = match core.stats_focus {
+        StatsFilterFocus::Range(_) => {
+            if forward {
+                StatsFilterFocus::Sort(core_sort_index(core.stats_sort))
+            } else {
+                StatsFilterFocus::Search
+            }
+        }
+        StatsFilterFocus::Sort(_) => {
+            if forward {
+                StatsFilterFocus::Artist
+            } else {
+                StatsFilterFocus::Range(core_range_index(core.stats_range))
+            }
+        }
+        StatsFilterFocus::Artist => {
+            if forward {
+                StatsFilterFocus::Album
+            } else {
+                StatsFilterFocus::Sort(core_sort_index(core.stats_sort))
+            }
+        }
+        StatsFilterFocus::Album => {
+            if forward {
+                StatsFilterFocus::Search
+            } else {
+                StatsFilterFocus::Artist
+            }
+        }
+        StatsFilterFocus::Search => {
+            if forward {
+                StatsFilterFocus::Range(core_range_index(core.stats_range))
+            } else {
+                StatsFilterFocus::Album
+            }
+        }
+    };
+    core.dirty = true;
+    true
+}
+
+fn set_stats_range_by_index(core: &mut TuneCore, index: u8) {
+    core.stats_range = match index {
+        0 => crate::stats::StatsRange::Today,
+        1 => crate::stats::StatsRange::Days7,
+        2 => crate::stats::StatsRange::Days30,
+        _ => crate::stats::StatsRange::Lifetime,
+    };
+    core.dirty = true;
+}
+
+fn set_stats_sort_by_index(core: &mut TuneCore, index: u8) {
+    core.stats_sort = if index == 0 {
+        crate::stats::StatsSort::Plays
+    } else {
+        crate::stats::StatsSort::ListenTime
+    };
+    core.dirty = true;
+}
+
+fn core_range_index(range: crate::stats::StatsRange) -> u8 {
+    match range {
+        crate::stats::StatsRange::Today => 0,
+        crate::stats::StatsRange::Days7 => 1,
+        crate::stats::StatsRange::Days30 => 2,
+        crate::stats::StatsRange::Lifetime => 3,
+    }
+}
+
+fn core_sort_index(sort: crate::stats::StatsSort) -> u8 {
+    match sort {
+        crate::stats::StatsSort::Plays => 0,
+        crate::stats::StatsSort::ListenTime => 1,
     }
 }
 
@@ -640,6 +1036,10 @@ fn playback_settings_options(core: &TuneCore) -> Vec<String> {
             "Song crossfade: {}",
             crossfade_label(core.crossfade_seconds)
         ),
+        format!(
+            "Stats tracking: {}",
+            if core.stats_enabled { "On" } else { "Off" }
+        ),
         String::from("Back"),
     ]
 }
@@ -776,7 +1176,7 @@ fn handle_action_panel_input(
 
     let option_count = match panel {
         ActionPanelState::Closed => 0,
-        ActionPanelState::Root { .. } => 15,
+        ActionPanelState::Root { .. } => 16,
         ActionPanelState::Mode { .. } => 4,
         ActionPanelState::PlaylistPlay { .. }
         | ActionPanelState::PlaylistAdd { .. }
@@ -784,7 +1184,7 @@ fn handle_action_panel_input(
         ActionPanelState::PlaylistCreate { .. } => 1,
         ActionPanelState::AudioSettings { .. } => 3,
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
-        ActionPanelState::PlaybackSettings { .. } => 3,
+        ActionPanelState::PlaybackSettings { .. } => 4,
         ActionPanelState::ThemeSettings { .. } => 6,
         ActionPanelState::AddDirectory { .. } => 2,
         ActionPanelState::RemoveDirectory { .. } => sorted_folder_paths(core).len().max(1),
@@ -909,6 +1309,12 @@ fn handle_action_panel_input(
                     panel.close();
                 }
                 13 => {
+                    core.clear_stats_requested = true;
+                    core.status = String::from("Clearing listen history...");
+                    core.dirty = true;
+                    panel.close();
+                }
+                14 => {
                     minimize_to_tray();
                     core.status = String::from("Minimized to tray");
                     core.dirty = true;
@@ -1060,6 +1466,15 @@ fn handle_action_panel_input(
                     core.crossfade_seconds = next_crossfade_seconds(core.crossfade_seconds);
                     audio.set_crossfade_seconds(core.crossfade_seconds);
                     core.status = format!("Crossfade: {}", crossfade_label(core.crossfade_seconds));
+                    core.dirty = true;
+                    auto_save_state(core, &*audio);
+                }
+                2 => {
+                    core.stats_enabled = !core.stats_enabled;
+                    core.status = format!(
+                        "Stats tracking: {}",
+                        if core.stats_enabled { "On" } else { "Off" }
+                    );
                     core.dirty = true;
                     auto_save_state(core, &*audio);
                 }
@@ -1768,6 +2183,65 @@ mod tests {
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert_eq!(core.crossfade_seconds, 2);
         assert_eq!(audio.crossfade_seconds(), 2);
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(!core.stats_enabled);
+    }
+
+    #[test]
+    fn stats_left_on_range_cycles_back() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = crate::core::HeaderSection::Stats;
+        core.stats_focus = crate::core::StatsFilterFocus::Range(2);
+        core.stats_range = crate::stats::StatsRange::Days30;
+
+        assert!(handle_stats_inline_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)
+        ));
+        assert_eq!(core.stats_range, crate::stats::StatsRange::Days7);
+        assert!(matches!(
+            core.stats_focus,
+            crate::core::StatsFilterFocus::Range(1)
+        ));
+    }
+
+    #[test]
+    fn stats_left_from_search_scrolls_up_when_scrolled() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = crate::core::HeaderSection::Stats;
+        core.stats_focus = crate::core::StatsFilterFocus::Search;
+        core.stats_scroll = 3;
+
+        assert!(handle_stats_inline_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)
+        ));
+        assert_eq!(core.stats_scroll, 2);
+        assert!(matches!(
+            core.stats_focus,
+            crate::core::StatsFilterFocus::Search
+        ));
+    }
+
+    #[test]
+    fn stats_shift_up_resets_scroll_to_top() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = crate::core::HeaderSection::Stats;
+        core.stats_focus = crate::core::StatsFilterFocus::Search;
+        core.stats_range = crate::stats::StatsRange::Days7;
+        core.stats_scroll = 9;
+
+        assert!(handle_stats_inline_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)
+        ));
+        assert_eq!(core.stats_scroll, 0);
+        assert!(matches!(
+            core.stats_focus,
+            crate::core::StatsFilterFocus::Range(1)
+        ));
     }
 
     #[test]
@@ -1806,12 +2280,14 @@ mod tests {
         core.loudness_normalization = true;
         core.crossfade_seconds = 4;
         core.theme = Theme::Galaxy;
+        core.stats_enabled = false;
         let audio = TestAudioEngine::new();
 
         let state = persisted_state_with_audio(&core, &audio);
         assert!(state.loudness_normalization);
         assert_eq!(state.crossfade_seconds, 4);
         assert_eq!(state.theme, Theme::Galaxy);
+        assert!(!state.stats_enabled);
     }
 
     #[test]

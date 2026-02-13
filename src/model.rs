@@ -61,6 +61,12 @@ pub struct PersistedState {
     pub theme: Theme,
     #[serde(default)]
     pub selected_output_device: Option<String>,
+    #[serde(default = "default_stats_enabled")]
+    pub stats_enabled: bool,
+}
+
+fn default_stats_enabled() -> bool {
+    true
 }
 
 impl Default for PersistedState {
@@ -73,6 +79,7 @@ impl Default for PersistedState {
             crossfade_seconds: 0,
             theme: Theme::default(),
             selected_output_device: None,
+            stats_enabled: default_stats_enabled(),
         }
     }
 }

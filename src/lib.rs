@@ -4,4 +4,5 @@ pub mod config;
 pub mod core;
 pub mod library;
 pub mod model;
+pub mod stats;
 pub mod ui;

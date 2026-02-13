@@ -9,6 +9,7 @@ use std::sync::OnceLock;
 
 const APP_DIR: &str = "tunetui";
 const STATE_FILE: &str = "state.json";
+const STATS_FILE: &str = "stats.json";
 
 pub fn config_root() -> Result<PathBuf> {
     #[cfg(test)]
@@ -46,6 +47,10 @@ pub fn ensure_config_dir() -> Result<PathBuf> {
     let root = config_root()?;
     fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
     Ok(root)
+}
+
+pub fn stats_path() -> Result<PathBuf> {
+    Ok(config_root()?.join(STATS_FILE))
 }
 
 pub fn load_state() -> Result<PersistedState> {

@@ -1,6 +1,7 @@
 use crate::config;
 use crate::library;
 use crate::model::{PersistedState, PlaybackMode, Playlist, Theme, Track};
+use crate::stats::{StatsRange, StatsSort};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
@@ -25,6 +26,27 @@ pub enum HeaderSection {
     Lyrics,
     Stats,
     Online,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatsFilterFocus {
+    Range(u8),
+    Sort(u8),
+    Artist,
+    Album,
+    Search,
+}
+
+impl StatsFilterFocus {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Range(_) => "Range",
+            Self::Sort(_) => "Sort",
+            Self::Artist => "Artist",
+            Self::Album => "Album",
+            Self::Search => "Search",
+        }
+    }
 }
 
 impl HeaderSection {
@@ -75,6 +97,15 @@ pub struct TuneCore {
     pub selected_browser: usize,
     pub dirty: bool,
     pub status: String,
+    pub stats_enabled: bool,
+    pub stats_range: StatsRange,
+    pub stats_sort: StatsSort,
+    pub stats_artist_filter: String,
+    pub stats_album_filter: String,
+    pub stats_search: String,
+    pub stats_focus: StatsFilterFocus,
+    pub stats_scroll: u16,
+    pub clear_stats_requested: bool,
     duration_lookup: RefCell<HashMap<String, Option<u32>>>,
     shuffle_order: Vec<usize>,
     shuffle_cursor: usize,
@@ -105,6 +136,15 @@ impl TuneCore {
             selected_browser: 0,
             dirty: true,
             status: String::from("Ready"),
+            stats_enabled: state.stats_enabled,
+            stats_range: StatsRange::Days30,
+            stats_sort: StatsSort::Plays,
+            stats_artist_filter: String::new(),
+            stats_album_filter: String::new(),
+            stats_search: String::new(),
+            stats_focus: StatsFilterFocus::Range(2),
+            stats_scroll: 0,
+            clear_stats_requested: false,
             duration_lookup: RefCell::new(HashMap::new()),
             shuffle_order: Vec::new(),
             shuffle_cursor: 0,
@@ -124,6 +164,7 @@ impl TuneCore {
             crossfade_seconds: self.crossfade_seconds,
             theme: self.theme,
             selected_output_device: None,
+            stats_enabled: self.stats_enabled,
         }
     }
 
@@ -494,6 +535,23 @@ impl TuneCore {
     pub fn cycle_header_section(&mut self) {
         self.header_section = self.header_section.next();
         self.set_status(&format!("Section: {}", self.header_section.label()));
+    }
+
+    pub fn cycle_stats_range(&mut self) {
+        self.stats_range = self.stats_range.next();
+        self.set_status(&format!("Stats range: {}", self.stats_range.label()));
+    }
+
+    pub fn toggle_stats_sort(&mut self) {
+        self.stats_sort = self.stats_sort.toggle();
+        self.set_status(&format!("Stats sort: {}", self.stats_sort.label()));
+    }
+
+    pub fn clear_stats_filters(&mut self) {
+        self.stats_artist_filter.clear();
+        self.stats_album_filter.clear();
+        self.stats_search.clear();
+        self.set_status("Stats filters cleared");
     }
 
     pub fn current_path(&self) -> Option<&Path> {
