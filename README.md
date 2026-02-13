@@ -8,6 +8,7 @@ Performance-oriented terminal music player for Windows-first workflows.
 - Folder-based music library with recursive scan
 - Playlist create/add/play flows
 - Playback modes: normal, shuffle, loop playlist, loop single track
+- Main library queue order uses metadata titles (not file names)
 - Automatic track advance when a song ends, including while minimized to tray
 - Persistent state in `%USERPROFILE%\\.config\\tunetui\\state.json`
 - Keyboard-driven TUI and command mode

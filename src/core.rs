@@ -48,14 +48,13 @@ pub struct TuneCore {
 impl TuneCore {
     pub fn from_persisted(state: PersistedState) -> Self {
         let tracks = library::scan_many(&state.folders);
-        let queue = (0..tracks.len()).collect();
         let track_lookup = build_track_lookup(&tracks);
         let mut core = Self {
             folders: state.folders,
             tracks,
             track_lookup,
             playlists: state.playlists,
-            queue,
+            queue: Vec::new(),
             selected_track: 0,
             current_queue_index: None,
             playback_mode: state.playback_mode,
@@ -69,7 +68,7 @@ impl TuneCore {
             shuffle_cursor: 0,
             shuffle_rng: SmallRng::from_os_rng(),
         };
-        core.rebuild_shuffle_order();
+        core.rebuild_main_queue();
         core.refresh_browser_entries();
         core
     }
@@ -213,7 +212,7 @@ impl TuneCore {
                         self.queue.clear();
                     }
                 } else {
-                    self.queue = (0..self.tracks.len()).collect();
+                    self.queue = self.metadata_sorted_library_queue();
                 }
                 self.rebuild_shuffle_order();
                 self.current_queue_index = self
@@ -354,9 +353,15 @@ impl TuneCore {
 
     fn rebuild_main_queue(&mut self) {
         self.track_lookup = build_track_lookup(&self.tracks);
-        self.queue = (0..self.tracks.len()).collect();
+        self.queue = self.metadata_sorted_library_queue();
         self.rebuild_shuffle_order();
         self.dirty = true;
+    }
+
+    fn metadata_sorted_library_queue(&self) -> Vec<usize> {
+        let mut queue: Vec<usize> = (0..self.tracks.len()).collect();
+        queue.sort_by_cached_key(|idx| self.tracks[*idx].title.to_ascii_lowercase());
+        queue
     }
 
     fn selected_browser_track_path(&self) -> Option<PathBuf> {
@@ -778,6 +783,72 @@ mod tests {
         }
 
         assert_eq!(seen.len(), 4);
+    }
+
+    #[test]
+    fn main_queue_is_sorted_by_metadata_title() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("Zulu"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("b.mp3"),
+                title: String::from("alpha"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("c.mp3"),
+                title: String::from("Mike"),
+                artist: None,
+                album: None,
+            },
+        ];
+
+        core.reset_main_queue();
+
+        let queued_titles: Vec<&str> = core
+            .queue
+            .iter()
+            .map(|idx| core.tracks[*idx].title.as_str())
+            .collect();
+        assert_eq!(queued_titles, vec!["alpha", "Mike", "Zulu"]);
+    }
+
+    #[test]
+    fn activating_library_track_uses_metadata_sorted_queue() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("Zulu"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("b.mp3"),
+                title: String::from("Alpha"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.browser_entries = vec![BrowserEntry {
+            kind: BrowserEntryKind::Track,
+            path: PathBuf::from("b.mp3"),
+            label: String::from("Alpha"),
+        }];
+        core.selected_browser = 0;
+
+        let selected = core.activate_selected().expect("track selected");
+
+        assert_eq!(selected, PathBuf::from("b.mp3"));
+        assert_eq!(core.queue, vec![1, 0]);
+        assert_eq!(core.current_queue_index, Some(0));
     }
 
     proptest::proptest! {

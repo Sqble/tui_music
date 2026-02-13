@@ -1,0 +1,8 @@
+
+ui rework with background panels and colored text
+linux build 
+config with audio normalization option, stat tracking enabled option, theme - accessed in the same style menu as the other one for adding things to playlists
+higher precision volume adjustment
+song crossfade 
+stat tracking, 
+listen together with another person even on another network (through ssh)
