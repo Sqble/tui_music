@@ -20,6 +20,7 @@ pub trait AudioEngine {
     fn current_track(&self) -> Option<&Path>;
     fn position(&self) -> Option<Duration>;
     fn duration(&self) -> Option<Duration>;
+    fn seek_to(&mut self, position: Duration) -> Result<()>;
     fn volume(&self) -> f32;
     fn set_volume(&mut self, volume: f32);
     fn output_name(&self) -> Option<String>;
@@ -313,6 +314,19 @@ impl AudioEngine for WasapiAudioEngine {
         self.track_duration
     }
 
+    fn seek_to(&mut self, position: Duration) -> Result<()> {
+        if self.current.is_none() {
+            return Err(anyhow::anyhow!("no active track"));
+        }
+
+        self.clear_next();
+        self.sink
+            .try_seek(position)
+            .map_err(|err| anyhow::anyhow!("failed to seek current track: {err:?}"))?;
+        self.sink.set_volume(self.effective_volume());
+        Ok(())
+    }
+
     fn volume(&self) -> f32 {
         self.volume
     }
@@ -468,6 +482,13 @@ impl AudioEngine for NullAudioEngine {
 
     fn duration(&self) -> Option<Duration> {
         None
+    }
+
+    fn seek_to(&mut self, _position: Duration) -> Result<()> {
+        if self.current.is_none() {
+            return Err(anyhow::anyhow!("no active track"));
+        }
+        Ok(())
     }
 
     fn volume(&self) -> f32 {

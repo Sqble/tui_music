@@ -38,3 +38,12 @@ DJ tools scripting language in editor
 + online docs
 
 live EQ with it showing playback like Pro-Q3 as you edit it
+
+
+====
+not tracking in github issues:
+
+pipe dream
+mic input singing on key training along to the song 
+based on f0 from extracted vox like a karaoke mode with a scoring system
+

@@ -427,7 +427,7 @@ pub fn draw(
     let key_hint = if core.header_section == HeaderSection::Stats {
         "Keys: Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top, Tab tabs"
     } else {
-        "Keys: Enter play, Backspace back, n next, b previous, m cycle mode, / actions, t tray, Ctrl+C quit"
+        "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(key_hint, Style::default().fg(colors.muted)),
@@ -546,29 +546,29 @@ fn draw_stats_section(
     let mut left_lines = vec![Line::from(vec![
         Span::styled("Range ", Style::default().fg(colors.muted)),
         stats_choice_box(
+            "All",
+            core.stats_range == StatsRange::Lifetime,
+            matches!(core.stats_focus, StatsFilterFocus::Range(0)),
+            &colors,
+        ),
+        Span::raw(" "),
+        stats_choice_box(
             "Today",
             core.stats_range == StatsRange::Today,
-            matches!(core.stats_focus, StatsFilterFocus::Range(0)),
+            matches!(core.stats_focus, StatsFilterFocus::Range(1)),
             &colors,
         ),
         Span::raw(" "),
         stats_choice_box(
             "7d",
             core.stats_range == StatsRange::Days7,
-            matches!(core.stats_focus, StatsFilterFocus::Range(1)),
+            matches!(core.stats_focus, StatsFilterFocus::Range(2)),
             &colors,
         ),
         Span::raw(" "),
         stats_choice_box(
             "30d",
             core.stats_range == StatsRange::Days30,
-            matches!(core.stats_focus, StatsFilterFocus::Range(2)),
-            &colors,
-        ),
-        Span::raw(" "),
-        stats_choice_box(
-            "All",
-            core.stats_range == StatsRange::Lifetime,
             matches!(core.stats_focus, StatsFilterFocus::Range(3)),
             &colors,
         ),
@@ -577,15 +577,15 @@ fn draw_stats_section(
     left_lines.push(Line::from(vec![
         Span::styled("Sort  ", Style::default().fg(colors.muted)),
         stats_choice_box(
-            "Plays",
-            core.stats_sort == StatsSort::Plays,
+            "Listen",
+            core.stats_sort == StatsSort::ListenTime,
             matches!(core.stats_focus, StatsFilterFocus::Sort(0)),
             &colors,
         ),
         Span::raw(" "),
         stats_choice_box(
-            "Listen",
-            core.stats_sort == StatsSort::ListenTime,
+            "Plays",
+            core.stats_sort == StatsSort::Plays,
             matches!(core.stats_focus, StatsFilterFocus::Sort(1)),
             &colors,
         ),
@@ -626,7 +626,6 @@ fn draw_stats_section(
     )));
     left_lines.push(Line::from(""));
 
-    left_lines.push(Line::from(""));
     left_lines.push(Line::from(Span::styled(
         format!("Trend by {}", snapshot.trend.unit.label()),
         Style::default()
@@ -634,7 +633,7 @@ fn draw_stats_section(
             .add_modifier(Modifier::BOLD),
     )));
     let graph_width = horizontal[0].width.saturating_sub(10).clamp(16, 48) as usize;
-    for line in render_square_trend_graph(&snapshot.trend, graph_width, 10) {
+    for line in render_square_trend_graph(&snapshot.trend, core.stats_sort, graph_width, 10) {
         left_lines.push(Line::from(Span::styled(
             line,
             Style::default().fg(colors.text),
@@ -782,7 +781,12 @@ fn unicode_bar(value: u64, max_value: u64, width: usize) -> String {
     out
 }
 
-fn render_square_trend_graph(trend: &TrendSeries, width: usize, height: usize) -> Vec<String> {
+fn render_square_trend_graph(
+    trend: &TrendSeries,
+    sort: StatsSort,
+    width: usize,
+    height: usize,
+) -> Vec<String> {
     if width < 8 || height < 4 {
         return vec![String::from("(graph unavailable)")];
     }
@@ -795,10 +799,19 @@ fn render_square_trend_graph(trend: &TrendSeries, width: usize, height: usize) -
         .iter()
         .enumerate()
         .map(|(x, value)| {
-            let ratio = (*value as f64) / (max_value as f64);
+            let max_height = height.saturating_sub(1) as u64;
+            let scaled = if *value == 0 {
+                0
+            } else {
+                value
+                    .saturating_mul(max_height)
+                    .saturating_add(max_value.saturating_sub(1))
+                    / max_value
+            }
+            .max(u64::from(*value > 0));
             let y = height
                 .saturating_sub(1)
-                .saturating_sub((ratio * (height.saturating_sub(1) as f64)).round() as usize);
+                .saturating_sub((scaled as usize).min(height.saturating_sub(1)));
             (x, y.min(height.saturating_sub(1)))
         })
         .collect();
@@ -824,7 +837,7 @@ fn render_square_trend_graph(trend: &TrendSeries, width: usize, height: usize) -
             / (height.saturating_sub(1).max(1) as f64)
             * (max_value as f64)) as u64;
         let label = if row_index % 2 == 0 {
-            short_duration_label(row_value)
+            short_metric_label(row_value, sort)
         } else {
             String::new()
         };
@@ -896,11 +909,24 @@ fn plot_samples(input: &[u64], width: usize) -> Vec<u64> {
     if width <= 1 {
         return vec![input[0]];
     }
+    if input.len() <= width {
+        return (0..width)
+            .map(|index| {
+                let pos = (index as f64) * ((input.len().saturating_sub(1)) as f64)
+                    / ((width.saturating_sub(1)) as f64);
+                input[pos.round() as usize]
+            })
+            .collect();
+    }
+
     (0..width)
         .map(|index| {
-            let pos = (index as f64) * ((input.len().saturating_sub(1)) as f64)
-                / ((width.saturating_sub(1)) as f64);
-            input[pos.round() as usize]
+            let start = (index * input.len()) / width;
+            let mut end = ((index + 1) * input.len()) / width;
+            if end <= start {
+                end = (start + 1).min(input.len());
+            }
+            input[start..end].iter().copied().max().unwrap_or(0)
         })
         .collect()
 }
@@ -980,11 +1006,16 @@ fn local_utc_offset() -> UtcOffset {
     *LOCAL_OFFSET.get_or_init(|| UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC))
 }
 
-fn short_duration_label(seconds: u64) -> String {
-    if seconds >= 60 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{}s", seconds)
+fn short_metric_label(value: u64, sort: StatsSort) -> String {
+    match sort {
+        StatsSort::Plays => format!("{value}p"),
+        StatsSort::ListenTime => {
+            if value >= 60 {
+                format!("{}m", value / 60)
+            } else {
+                format!("{}s", value)
+            }
+        }
     }
 }
 
@@ -1178,7 +1209,7 @@ fn timeline_line(
     let volume_ratio = audio.volume().clamp(0.0, 1.0) as f64;
 
     format!(
-        "{} / {} {}  |  Vol {} {:>3}%  +/- adjust  Shift fine",
+        "{} / {} {}  |  Vol {} {:>3}%  +/- adjust  Shift fine  |  A/D scrub",
         format_duration(elapsed),
         total
             .map(format_duration)

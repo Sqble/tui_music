@@ -88,6 +88,7 @@ pub struct TuneCore {
     pub playback_mode: PlaybackMode,
     pub loudness_normalization: bool,
     pub crossfade_seconds: u16,
+    pub scrub_seconds: u16,
     pub theme: Theme,
     pub header_section: HeaderSection,
     pub browser_path: Option<PathBuf>,
@@ -127,6 +128,7 @@ impl TuneCore {
             playback_mode: state.playback_mode,
             loudness_normalization: state.loudness_normalization,
             crossfade_seconds: state.crossfade_seconds,
+            scrub_seconds: normalize_scrub_seconds(state.scrub_seconds),
             theme: state.theme,
             header_section: HeaderSection::Library,
             browser_path: None,
@@ -137,12 +139,12 @@ impl TuneCore {
             dirty: true,
             status: String::from("Ready"),
             stats_enabled: state.stats_enabled,
-            stats_range: StatsRange::Days30,
-            stats_sort: StatsSort::Plays,
+            stats_range: StatsRange::Lifetime,
+            stats_sort: StatsSort::ListenTime,
             stats_artist_filter: String::new(),
             stats_album_filter: String::new(),
             stats_search: String::new(),
-            stats_focus: StatsFilterFocus::Range(2),
+            stats_focus: StatsFilterFocus::Range(0),
             stats_scroll: 0,
             clear_stats_requested: false,
             duration_lookup: RefCell::new(HashMap::new()),
@@ -162,6 +164,7 @@ impl TuneCore {
             playback_mode: self.playback_mode,
             loudness_normalization: self.loudness_normalization,
             crossfade_seconds: self.crossfade_seconds,
+            scrub_seconds: self.scrub_seconds,
             theme: self.theme,
             selected_output_device: None,
             stats_enabled: self.stats_enabled,
@@ -300,6 +303,12 @@ impl TuneCore {
         let added = paths.len();
         playlist.tracks.extend(paths);
         self.set_status(&format!("Added {added} track(s) to playlist"));
+    }
+
+    pub fn add_track_to_playlist(&mut self, name: &str, path: &Path) {
+        let playlist = self.playlists.entry(name.to_string()).or_default();
+        playlist.tracks.push(path.to_path_buf());
+        self.set_status("Added now playing track to playlist");
     }
 
     pub fn remove_selected_from_current_playlist(&mut self) {
@@ -1040,6 +1049,13 @@ fn build_track_lookup(tracks: &[Track]) -> HashMap<String, usize> {
         map.insert(normalized_path_key(&track.path), idx);
     }
     map
+}
+
+fn normalize_scrub_seconds(seconds: u16) -> u16 {
+    match seconds {
+        5 | 10 | 15 | 30 | 60 => seconds,
+        _ => 5,
+    }
 }
 
 #[cfg(test)]

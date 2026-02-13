@@ -1,0 +1,18 @@
+modern music players these days are centered around streaming services and web UI interfaces that hog ram and CPU usage. TuneTUI aims to provide a solution to this. It is a local music player Text User Interface (TUI) that runs in the command line by typing `tune` after installation, or by just running the portable tune.exe
+
+the main features of tuneTUI include:
+
+library tab with dynamic queue system, adding individual folders and a magnitude of ways to arrange a song queue, such as playlists, playing just a directory, or playing from a queue of all songs. There is shuffling and looping mode support and configs for crossfade, song scrub length, loudness normalization, audio device, and theme. 
+
+stats tab with realtime listening statistics by listening time and play count. view live graphs and charts of your playtime and filter and sort it a variety of ways such as timeframe, artist, album, and song name. 
+
+lyrics tab for line by line lyrics as the song plays, aswell as support for live metadata editing including the lyrics and song data. 
+
+Online tab for listening to songs with your friends where you establish a p2p connection and can add to a shared queue and control playback together or have one user control and just playing their music while another listens along. 
+
+todo:
+
+live graph updates
+song listening data is lost if program is executed - we need to save it periodically as you listen,
+that way the live graph updates is fixed too
+

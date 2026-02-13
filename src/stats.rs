@@ -72,8 +72,8 @@ pub struct StatsQuery {
 impl Default for StatsQuery {
     fn default() -> Self {
         Self {
-            range: StatsRange::Days30,
-            sort: StatsSort::Plays,
+            range: StatsRange::Lifetime,
+            sort: StatsSort::ListenTime,
             artist_filter: String::new(),
             album_filter: String::new(),
             search: String::new(),
@@ -91,6 +91,8 @@ pub struct ListenSessionRecord {
     pub listened_seconds: u32,
     pub completed: bool,
     pub duration_seconds: Option<u32>,
+    pub counted_play_override: Option<bool>,
+    pub allow_short_listen: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -212,15 +214,20 @@ impl StatsStore {
     }
 
     pub fn record_listen(&mut self, record: ListenSessionRecord) {
-        if record.listened_seconds < MIN_TRACKED_LISTEN_SECONDS {
+        let counted_play = record.counted_play_override.unwrap_or_else(|| {
+            should_count_as_play(
+                record.listened_seconds,
+                record.completed,
+                record.duration_seconds,
+            )
+        });
+        if record.listened_seconds < MIN_TRACKED_LISTEN_SECONDS
+            && !counted_play
+            && !record.allow_short_listen
+        {
             return;
         }
 
-        let counted_play = is_counted_play(
-            record.listened_seconds,
-            record.completed,
-            record.duration_seconds,
-        );
         let key = track_key(&record.track_path);
 
         let totals = self.track_totals.entry(key).or_default();
@@ -260,7 +267,7 @@ impl StatsStore {
         let mut by_track: HashMap<String, TrackStatsRow> = HashMap::new();
         let mut total_plays = 0_u64;
         let mut total_listen_seconds = 0_u64;
-        let mut recent = Vec::new();
+        let mut recent: HashMap<String, ListenEvent> = HashMap::new();
 
         for event in &self.events {
             if let Some(start) = range_start {
@@ -303,14 +310,16 @@ impl StatsStore {
             }
 
             let key = track_key(&event.track_path);
-            let row = by_track.entry(key).or_insert_with(|| TrackStatsRow {
-                track_path: event.track_path.clone(),
-                title: event.title.clone(),
-                artist: event.artist.clone(),
-                album: event.album.clone(),
-                play_count: 0,
-                listen_seconds: 0,
-            });
+            let row = by_track
+                .entry(key.clone())
+                .or_insert_with(|| TrackStatsRow {
+                    track_path: event.track_path.clone(),
+                    title: event.title.clone(),
+                    artist: event.artist.clone(),
+                    album: event.album.clone(),
+                    play_count: 0,
+                    listen_seconds: 0,
+                });
             row.listen_seconds = row
                 .listen_seconds
                 .saturating_add(u64::from(event.listened_seconds));
@@ -321,14 +330,26 @@ impl StatsStore {
             total_listen_seconds =
                 total_listen_seconds.saturating_add(u64::from(event.listened_seconds));
 
-            recent.push(event.clone());
+            let recent_key = format!("{}|{}", key, event.started_at_epoch_seconds);
+            match recent.get_mut(&recent_key) {
+                Some(aggregate) => {
+                    aggregate.listened_seconds = aggregate
+                        .listened_seconds
+                        .saturating_add(event.listened_seconds);
+                    aggregate.counted_play |= event.counted_play;
+                }
+                None => {
+                    recent.insert(recent_key, event.clone());
+                }
+            }
         }
 
         let mut rows: Vec<TrackStatsRow> = by_track.into_values().collect();
         rows.sort_by(|a, b| compare_rows(a, b, query.sort));
 
+        let mut recent: Vec<ListenEvent> = recent.into_values().collect();
         recent.sort_by(|a, b| b.started_at_epoch_seconds.cmp(&a.started_at_epoch_seconds));
-        let trend = build_trend_series(query.range, now_epoch_seconds, &recent);
+        let trend = build_trend_series(query.range, query.sort, now_epoch_seconds, &recent);
         recent.truncate(12);
 
         StatsSnapshot {
@@ -343,6 +364,7 @@ impl StatsStore {
 
 fn build_trend_series(
     range: StatsRange,
+    sort: StatsSort,
     now_epoch_seconds: i64,
     events: &[ListenEvent],
 ) -> TrendSeries {
@@ -391,7 +413,11 @@ fn build_trend_series(
     for event in events {
         let index = ((event.started_at_epoch_seconds.saturating_sub(start)) / step_seconds)
             .clamp(0, (bucket_len as i64) - 1) as usize;
-        buckets[index] = buckets[index].saturating_add(u64::from(event.listened_seconds));
+        let bucket_value = match sort {
+            StatsSort::Plays => u64::from(event.counted_play),
+            StatsSort::ListenTime => u64::from(event.listened_seconds),
+        };
+        buckets[index] = buckets[index].saturating_add(bucket_value);
     }
 
     let end_epoch_seconds =
@@ -461,7 +487,11 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
     target.is_none()
 }
 
-fn is_counted_play(listened_seconds: u32, completed: bool, duration_seconds: Option<u32>) -> bool {
+pub(crate) fn should_count_as_play(
+    listened_seconds: u32,
+    completed: bool,
+    duration_seconds: Option<u32>,
+) -> bool {
     if duration_seconds.is_some_and(|duration| duration < 30) {
         return completed;
     }
@@ -474,14 +504,14 @@ mod tests {
 
     #[test]
     fn short_track_counts_only_on_complete() {
-        assert!(!is_counted_play(29, false, Some(20)));
-        assert!(is_counted_play(20, true, Some(20)));
+        assert!(!should_count_as_play(29, false, Some(20)));
+        assert!(should_count_as_play(20, true, Some(20)));
     }
 
     #[test]
     fn long_track_counts_after_30_seconds() {
-        assert!(!is_counted_play(29, true, Some(240)));
-        assert!(is_counted_play(30, false, Some(240)));
+        assert!(!should_count_as_play(29, true, Some(240)));
+        assert!(should_count_as_play(30, false, Some(240)));
     }
 
     #[test]
@@ -496,6 +526,8 @@ mod tests {
             listened_seconds: 9,
             completed: false,
             duration_seconds: Some(180),
+            counted_play_override: None,
+            allow_short_listen: false,
         });
 
         assert!(store.events.is_empty());
@@ -514,6 +546,8 @@ mod tests {
             listened_seconds: 40,
             completed: false,
             duration_seconds: Some(180),
+            counted_play_override: None,
+            allow_short_listen: false,
         });
         store.record_listen(ListenSessionRecord {
             track_path: PathBuf::from("C:/music/B.mp3"),
@@ -524,6 +558,8 @@ mod tests {
             listened_seconds: 80,
             completed: false,
             duration_seconds: Some(220),
+            counted_play_override: None,
+            allow_short_listen: false,
         });
 
         let snapshot = store.query(
@@ -540,5 +576,107 @@ mod tests {
         assert_eq!(snapshot.rows.len(), 1);
         assert_eq!(snapshot.rows[0].title, "Ocean Room");
         assert_eq!(snapshot.total_plays, 1);
+    }
+
+    #[test]
+    fn trend_metric_tracks_selected_sort_mode() {
+        let mut store = StatsStore::default();
+        store.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("C:/music/A.mp3"),
+            title: "A".to_string(),
+            artist: None,
+            album: None,
+            started_at_epoch_seconds: 10,
+            listened_seconds: 45,
+            completed: false,
+            duration_seconds: Some(180),
+            counted_play_override: None,
+            allow_short_listen: false,
+        });
+        store.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("C:/music/B.mp3"),
+            title: "B".to_string(),
+            artist: None,
+            album: None,
+            started_at_epoch_seconds: 20,
+            listened_seconds: 15,
+            completed: false,
+            duration_seconds: Some(180),
+            counted_play_override: None,
+            allow_short_listen: false,
+        });
+
+        let by_plays = store.query(
+            &StatsQuery {
+                range: StatsRange::Lifetime,
+                sort: StatsSort::Plays,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            100,
+        );
+        let by_listen = store.query(
+            &StatsQuery {
+                range: StatsRange::Lifetime,
+                sort: StatsSort::ListenTime,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            100,
+        );
+
+        assert_eq!(
+            by_plays.trend.buckets.iter().sum::<u64>(),
+            by_plays.total_plays
+        );
+        assert_eq!(
+            by_listen.trend.buckets.iter().sum::<u64>(),
+            by_listen.total_listen_seconds
+        );
+    }
+
+    #[test]
+    fn recent_log_collapses_partial_events_for_same_session() {
+        let mut store = StatsStore::default();
+        store.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("C:/music/A.mp3"),
+            title: "A".to_string(),
+            artist: Some("Artist".to_string()),
+            album: Some("Album".to_string()),
+            started_at_epoch_seconds: 1_000,
+            listened_seconds: 10,
+            completed: false,
+            duration_seconds: Some(180),
+            counted_play_override: Some(false),
+            allow_short_listen: true,
+        });
+        store.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("C:/music/A.mp3"),
+            title: "A".to_string(),
+            artist: Some("Artist".to_string()),
+            album: Some("Album".to_string()),
+            started_at_epoch_seconds: 1_000,
+            listened_seconds: 12,
+            completed: false,
+            duration_seconds: Some(180),
+            counted_play_override: Some(false),
+            allow_short_listen: true,
+        });
+
+        let snapshot = store.query(
+            &StatsQuery {
+                range: StatsRange::Lifetime,
+                sort: StatsSort::ListenTime,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            2_000,
+        );
+
+        assert_eq!(snapshot.recent.len(), 1);
+        assert_eq!(snapshot.recent[0].listened_seconds, 22);
     }
 }

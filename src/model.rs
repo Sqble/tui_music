@@ -57,6 +57,8 @@ pub struct PersistedState {
     pub loudness_normalization: bool,
     #[serde(default)]
     pub crossfade_seconds: u16,
+    #[serde(default = "default_scrub_seconds")]
+    pub scrub_seconds: u16,
     #[serde(default)]
     pub theme: Theme,
     #[serde(default)]
@@ -69,6 +71,10 @@ fn default_stats_enabled() -> bool {
     true
 }
 
+fn default_scrub_seconds() -> u16 {
+    5
+}
+
 impl Default for PersistedState {
     fn default() -> Self {
         Self {
@@ -77,6 +83,7 @@ impl Default for PersistedState {
             playback_mode: PlaybackMode::Normal,
             loudness_normalization: false,
             crossfade_seconds: 0,
+            scrub_seconds: default_scrub_seconds(),
             theme: Theme::default(),
             selected_output_device: None,
             stats_enabled: default_stats_enabled(),

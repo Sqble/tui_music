@@ -30,6 +30,8 @@ const APP_CONSOLE_TITLE: &str = "TuneTUI";
 const MAX_VOLUME: f32 = 2.5;
 const VOLUME_STEP_COARSE: f32 = 0.05;
 const VOLUME_STEP_FINE: f32 = 0.01;
+const SCRUB_SECONDS_OPTIONS: [u16; 5] = [5, 10, 15, 30, 60];
+const PARTIAL_LISTEN_FLUSH_SECONDS: u32 = 10;
 
 #[derive(Debug, Clone)]
 struct ActiveListenSession {
@@ -40,6 +42,8 @@ struct ActiveListenSession {
     started_at_epoch_seconds: i64,
     playing_started_at: Option<Instant>,
     listened: Duration,
+    persisted_listened_seconds: u32,
+    play_count_recorded: bool,
     last_position: Option<Duration>,
     duration: Option<Duration>,
 }
@@ -87,6 +91,8 @@ impl ListenTracker {
                 started_at_epoch_seconds: stats::now_epoch_seconds(),
                 playing_started_at: (!paused).then_some(now),
                 listened: Duration::ZERO,
+                persisted_listened_seconds: 0,
+                play_count_recorded: false,
                 last_position: audio.position(),
                 duration: audio.duration(),
             });
@@ -105,6 +111,8 @@ impl ListenTracker {
             }
         }
 
+        wrote_event = self.flush_partial(stats) || wrote_event;
+
         wrote_event
     }
 
@@ -118,7 +126,9 @@ impl ListenTracker {
             active.listened = active.listened.saturating_add(started.elapsed());
         }
 
-        let listened_seconds = duration_to_recorded_seconds(active.listened);
+        let total_listened_seconds = duration_to_recorded_seconds(active.listened);
+        let listened_seconds =
+            total_listened_seconds.saturating_sub(active.persisted_listened_seconds);
         let completed =
             active
                 .duration
@@ -127,6 +137,12 @@ impl ListenTracker {
                     position >= duration
                         || duration.saturating_sub(position) <= Duration::from_secs(1)
                 });
+        let counted_play = crate::stats::should_count_as_play(
+            total_listened_seconds,
+            completed,
+            active.duration.map(|duration| duration.as_secs() as u32),
+        ) && !active.play_count_recorded;
+        let allow_short_listen = active.persisted_listened_seconds > 0 || counted_play;
 
         stats.record_listen(ListenSessionRecord {
             track_path: active.track_path,
@@ -137,8 +153,51 @@ impl ListenTracker {
             listened_seconds,
             completed,
             duration_seconds: active.duration.map(|duration| duration.as_secs() as u32),
+            counted_play_override: Some(counted_play),
+            allow_short_listen,
         });
-        listened_seconds > 0
+        listened_seconds >= PARTIAL_LISTEN_FLUSH_SECONDS || counted_play || allow_short_listen
+    }
+
+    fn flush_partial(&mut self, stats: &mut StatsStore) -> bool {
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+
+        let mut listened = active.listened;
+        if let Some(started) = active.playing_started_at {
+            listened = listened.saturating_add(started.elapsed());
+        }
+
+        let total_seconds = duration_to_recorded_seconds(listened);
+        let delta = total_seconds.saturating_sub(active.persisted_listened_seconds);
+        let should_record_play = crate::stats::should_count_as_play(
+            total_seconds,
+            false,
+            active.duration.map(|duration| duration.as_secs() as u32),
+        ) && !active.play_count_recorded;
+
+        if delta < PARTIAL_LISTEN_FLUSH_SECONDS && !should_record_play {
+            return false;
+        }
+
+        stats.record_listen(ListenSessionRecord {
+            track_path: active.track_path.clone(),
+            title: active.title.clone(),
+            artist: active.artist.clone(),
+            album: active.album.clone(),
+            started_at_epoch_seconds: active.started_at_epoch_seconds,
+            listened_seconds: delta,
+            completed: false,
+            duration_seconds: active.duration.map(|duration| duration.as_secs() as u32),
+            counted_play_override: Some(should_record_play),
+            allow_short_listen: false,
+        });
+        active.persisted_listened_seconds = active.persisted_listened_seconds.saturating_add(delta);
+        if should_record_play {
+            active.play_count_recorded = true;
+        }
+        true
     }
 }
 
@@ -163,6 +222,7 @@ enum ActionPanelState {
     Mode { selected: usize },
     PlaylistPlay { selected: usize },
     PlaylistAdd { selected: usize },
+    PlaylistAddNowPlaying { selected: usize },
     PlaylistCreate { selected: usize, input: String },
     PlaylistRemove { selected: usize },
     AudioSettings { selected: usize },
@@ -199,6 +259,7 @@ impl ActionPanelState {
                 options: vec![
                     String::from("Add directory"),
                     String::from("Add selected item to playlist"),
+                    String::from("Add now playing song to playlist"),
                     String::from("Set playback mode"),
                     String::from("Playback settings"),
                     String::from("Play playlist"),
@@ -244,6 +305,19 @@ impl ActionPanelState {
                 let playlists = sorted_playlist_names(core);
                 Some(crate::ui::ActionPanelView {
                     title: String::from("Add To Playlist"),
+                    hint: String::from("Enter add  Backspace back"),
+                    options: if playlists.is_empty() {
+                        vec![String::from("(no playlists)")]
+                    } else {
+                        playlists
+                    },
+                    selected: *selected,
+                })
+            }
+            Self::PlaylistAddNowPlaying { selected } => {
+                let playlists = sorted_playlist_names(core);
+                Some(crate::ui::ActionPanelView {
+                    title: String::from("Add Now Playing To Playlist"),
                     hint: String::from("Enter add  Backspace back"),
                     options: if playlists.is_empty() {
                         vec![String::from("(no playlists)")]
@@ -497,6 +571,22 @@ pub fn run() -> Result<()> {
                     core.status = concise_audio_error(&err);
                     core.dirty = true;
                 }
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                if let Err(err) = scrub_current_track(&mut *audio, core.scrub_seconds, false) {
+                    core.status = format!("Scrub failed: {err}");
+                } else {
+                    core.status = format!("Scrubbed back {}", scrub_label(core.scrub_seconds));
+                }
+                core.dirty = true;
+            }
+            KeyCode::Char('d') | KeyCode::Char('D') => {
+                if let Err(err) = scrub_current_track(&mut *audio, core.scrub_seconds, true) {
+                    core.status = format!("Scrub failed: {err}");
+                } else {
+                    core.status = format!("Scrubbed forward {}", scrub_label(core.scrub_seconds));
+                }
+                core.dirty = true;
             }
             KeyCode::Char('m') => {
                 core.cycle_mode();
@@ -850,36 +940,36 @@ fn move_stats_row(core: &mut TuneCore, forward: bool) -> bool {
 
 fn set_stats_range_by_index(core: &mut TuneCore, index: u8) {
     core.stats_range = match index {
-        0 => crate::stats::StatsRange::Today,
-        1 => crate::stats::StatsRange::Days7,
-        2 => crate::stats::StatsRange::Days30,
-        _ => crate::stats::StatsRange::Lifetime,
+        0 => crate::stats::StatsRange::Lifetime,
+        1 => crate::stats::StatsRange::Today,
+        2 => crate::stats::StatsRange::Days7,
+        _ => crate::stats::StatsRange::Days30,
     };
     core.dirty = true;
 }
 
 fn set_stats_sort_by_index(core: &mut TuneCore, index: u8) {
     core.stats_sort = if index == 0 {
-        crate::stats::StatsSort::Plays
-    } else {
         crate::stats::StatsSort::ListenTime
+    } else {
+        crate::stats::StatsSort::Plays
     };
     core.dirty = true;
 }
 
 fn core_range_index(range: crate::stats::StatsRange) -> u8 {
     match range {
-        crate::stats::StatsRange::Today => 0,
-        crate::stats::StatsRange::Days7 => 1,
-        crate::stats::StatsRange::Days30 => 2,
-        crate::stats::StatsRange::Lifetime => 3,
+        crate::stats::StatsRange::Lifetime => 0,
+        crate::stats::StatsRange::Today => 1,
+        crate::stats::StatsRange::Days7 => 2,
+        crate::stats::StatsRange::Days30 => 3,
     }
 }
 
 fn core_sort_index(sort: crate::stats::StatsSort) -> u8 {
     match sort {
-        crate::stats::StatsSort::Plays => 0,
-        crate::stats::StatsSort::ListenTime => 1,
+        crate::stats::StatsSort::ListenTime => 0,
+        crate::stats::StatsSort::Plays => 1,
     }
 }
 
@@ -901,6 +991,24 @@ fn should_trigger_crossfade_advance(audio: &dyn AudioEngine) -> bool {
 
     let remaining = duration.saturating_sub(position);
     remaining <= Duration::from_secs(u64::from(crossfade_seconds))
+}
+
+fn scrub_current_track(audio: &mut dyn AudioEngine, seconds: u16, forward: bool) -> Result<()> {
+    let position = audio
+        .position()
+        .ok_or_else(|| anyhow::anyhow!("current backend does not expose position"))?;
+
+    let mut target = if forward {
+        position.saturating_add(Duration::from_secs(u64::from(seconds)))
+    } else {
+        position.saturating_sub(Duration::from_secs(u64::from(seconds)))
+    };
+
+    if let Some(duration) = audio.duration() {
+        target = target.min(duration);
+    }
+
+    audio.seek_to(target)
 }
 
 fn concise_audio_error(err: &anyhow::Error) -> String {
@@ -1036,6 +1144,7 @@ fn playback_settings_options(core: &TuneCore) -> Vec<String> {
             "Song crossfade: {}",
             crossfade_label(core.crossfade_seconds)
         ),
+        format!("Scrub length: {}", scrub_label(core.scrub_seconds)),
         format!(
             "Stats tracking: {}",
             if core.stats_enabled { "On" } else { "Off" }
@@ -1097,6 +1206,22 @@ fn next_crossfade_seconds(current: u16) -> u16 {
     }
 }
 
+fn scrub_label(seconds: u16) -> String {
+    if seconds == 60 {
+        String::from("1m")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn next_scrub_seconds(current: u16) -> u16 {
+    let index = SCRUB_SECONDS_OPTIONS
+        .iter()
+        .position(|entry| *entry == current)
+        .unwrap_or(0);
+    SCRUB_SECONDS_OPTIONS[(index + 1) % SCRUB_SECONDS_OPTIONS.len()]
+}
+
 fn apply_audio_preferences_from_core(core: &TuneCore, audio: &mut dyn AudioEngine) {
     audio.set_loudness_normalization(core.loudness_normalization);
     audio.set_crossfade_seconds(core.crossfade_seconds);
@@ -1124,6 +1249,7 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
         | ActionPanelState::Mode { selected }
         | ActionPanelState::PlaylistPlay { selected }
         | ActionPanelState::PlaylistAdd { selected }
+        | ActionPanelState::PlaylistAddNowPlaying { selected }
         | ActionPanelState::PlaylistCreate { selected, .. }
         | ActionPanelState::PlaylistRemove { selected }
         | ActionPanelState::AudioSettings { selected }
@@ -1176,15 +1302,16 @@ fn handle_action_panel_input(
 
     let option_count = match panel {
         ActionPanelState::Closed => 0,
-        ActionPanelState::Root { .. } => 16,
+        ActionPanelState::Root { .. } => 17,
         ActionPanelState::Mode { .. } => 4,
         ActionPanelState::PlaylistPlay { .. }
         | ActionPanelState::PlaylistAdd { .. }
+        | ActionPanelState::PlaylistAddNowPlaying { .. }
         | ActionPanelState::PlaylistRemove { .. } => sorted_playlist_names(core).len().max(1),
         ActionPanelState::PlaylistCreate { .. } => 1,
         ActionPanelState::AudioSettings { .. } => 3,
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
-        ActionPanelState::PlaybackSettings { .. } => 4,
+        ActionPanelState::PlaybackSettings { .. } => 5,
         ActionPanelState::ThemeSettings { .. } => 6,
         ActionPanelState::AddDirectory { .. } => 2,
         ActionPanelState::RemoveDirectory { .. } => sorted_folder_paths(core).len().max(1),
@@ -1205,19 +1332,22 @@ fn handle_action_panel_input(
         }
         KeyCode::Left | KeyCode::Backspace => {
             *panel = match panel {
-                ActionPanelState::Mode { .. } => ActionPanelState::Root { selected: 2 },
-                ActionPanelState::PlaylistPlay { .. } => ActionPanelState::Root { selected: 4 },
+                ActionPanelState::Mode { .. } => ActionPanelState::Root { selected: 3 },
+                ActionPanelState::PlaylistPlay { .. } => ActionPanelState::Root { selected: 5 },
                 ActionPanelState::PlaylistAdd { .. } => ActionPanelState::Root { selected: 1 },
-                ActionPanelState::PlaylistCreate { .. } => ActionPanelState::Root { selected: 6 },
-                ActionPanelState::PlaylistRemove { .. } => ActionPanelState::Root { selected: 7 },
-                ActionPanelState::AudioSettings { .. } => ActionPanelState::Root { selected: 10 },
-                ActionPanelState::PlaybackSettings { .. } => ActionPanelState::Root { selected: 3 },
+                ActionPanelState::PlaylistAddNowPlaying { .. } => {
+                    ActionPanelState::Root { selected: 2 }
+                }
+                ActionPanelState::PlaylistCreate { .. } => ActionPanelState::Root { selected: 7 },
+                ActionPanelState::PlaylistRemove { .. } => ActionPanelState::Root { selected: 8 },
+                ActionPanelState::AudioSettings { .. } => ActionPanelState::Root { selected: 11 },
+                ActionPanelState::PlaybackSettings { .. } => ActionPanelState::Root { selected: 4 },
                 ActionPanelState::AddDirectory { .. } => ActionPanelState::Root { selected: 0 },
                 ActionPanelState::AudioOutput { .. } => {
                     ActionPanelState::AudioSettings { selected: 0 }
                 }
-                ActionPanelState::ThemeSettings { .. } => ActionPanelState::Root { selected: 11 },
-                ActionPanelState::RemoveDirectory { .. } => ActionPanelState::Root { selected: 8 },
+                ActionPanelState::ThemeSettings { .. } => ActionPanelState::Root { selected: 12 },
+                ActionPanelState::RemoveDirectory { .. } => ActionPanelState::Root { selected: 9 },
                 ActionPanelState::Root { .. } | ActionPanelState::Closed => {
                     ActionPanelState::Closed
                 }
@@ -1244,14 +1374,24 @@ fn handle_action_panel_input(
                     }
                 }
                 2 => {
+                    if sorted_playlist_names(core).is_empty() {
+                        core.status = String::from("No playlists available");
+                        core.dirty = true;
+                        panel.close();
+                    } else {
+                        *panel = ActionPanelState::PlaylistAddNowPlaying { selected: 0 };
+                        core.dirty = true;
+                    }
+                }
+                3 => {
                     *panel = ActionPanelState::Mode { selected: 0 };
                     core.dirty = true;
                 }
-                3 => {
+                4 => {
                     *panel = ActionPanelState::PlaybackSettings { selected: 0 };
                     core.dirty = true;
                 }
-                4 => {
+                5 => {
                     if sorted_playlist_names(core).is_empty() {
                         core.status = String::from("No playlists available");
                         core.dirty = true;
@@ -1261,35 +1401,35 @@ fn handle_action_panel_input(
                         core.dirty = true;
                     }
                 }
-                5 => {
+                6 => {
                     core.remove_selected_from_current_playlist();
                     auto_save_state(core, &*audio);
                     panel.close();
                 }
-                6 => {
+                7 => {
                     *panel = ActionPanelState::PlaylistCreate {
                         selected: 0,
                         input: String::new(),
                     };
                     core.dirty = true;
                 }
-                7 => {
+                8 => {
                     *panel = ActionPanelState::PlaylistRemove { selected: 0 };
                     core.dirty = true;
                 }
-                8 => {
+                9 => {
                     *panel = ActionPanelState::RemoveDirectory { selected: 0 };
                     core.dirty = true;
                 }
-                9 => {
+                10 => {
                     core.rescan();
                     panel.close();
                 }
-                10 => {
+                11 => {
                     *panel = ActionPanelState::AudioSettings { selected: 0 };
                     core.dirty = true;
                 }
-                11 => {
+                12 => {
                     let selected = match core.theme {
                         Theme::Dark | Theme::Ocean => 0,
                         Theme::PitchBlack => 1,
@@ -1301,20 +1441,20 @@ fn handle_action_panel_input(
                     *panel = ActionPanelState::ThemeSettings { selected };
                     core.dirty = true;
                 }
-                12 => {
+                13 => {
                     if let Err(err) = save_state_with_audio(core, &*audio) {
                         core.status = format!("save error: {err:#}");
                         core.dirty = true;
                     }
                     panel.close();
                 }
-                13 => {
+                14 => {
                     core.clear_stats_requested = true;
                     core.status = String::from("Clearing listen history...");
                     core.dirty = true;
                     panel.close();
                 }
-                14 => {
+                15 => {
                     minimize_to_tray();
                     core.status = String::from("Minimized to tray");
                     core.dirty = true;
@@ -1359,6 +1499,22 @@ fn handle_action_panel_input(
                 if let Some(name) = playlists.get(selected) {
                     core.add_selected_to_playlist(name);
                     auto_save_state(core, &*audio);
+                } else {
+                    core.status = String::from("No playlists available");
+                    core.dirty = true;
+                }
+                panel.close();
+            }
+            ActionPanelState::PlaylistAddNowPlaying { selected } => {
+                let playlists = sorted_playlist_names(core);
+                if let Some(name) = playlists.get(selected) {
+                    if let Some(path) = audio.current_track() {
+                        core.add_track_to_playlist(name, path);
+                        auto_save_state(core, &*audio);
+                    } else {
+                        core.status = String::from("No track currently playing");
+                        core.dirty = true;
+                    }
                 } else {
                     core.status = String::from("No playlists available");
                     core.dirty = true;
@@ -1418,7 +1574,7 @@ fn handle_action_panel_input(
                     core.dirty = true;
                 }
                 _ => {
-                    *panel = ActionPanelState::Root { selected: 10 };
+                    *panel = ActionPanelState::Root { selected: 11 };
                     core.dirty = true;
                 }
             },
@@ -1470,6 +1626,12 @@ fn handle_action_panel_input(
                     auto_save_state(core, &*audio);
                 }
                 2 => {
+                    core.scrub_seconds = next_scrub_seconds(core.scrub_seconds);
+                    core.status = format!("Scrub length: {}", scrub_label(core.scrub_seconds));
+                    core.dirty = true;
+                    auto_save_state(core, &*audio);
+                }
+                3 => {
                     core.stats_enabled = !core.stats_enabled;
                     core.status = format!(
                         "Stats tracking: {}",
@@ -1479,7 +1641,7 @@ fn handle_action_panel_input(
                     auto_save_state(core, &*audio);
                 }
                 _ => {
-                    *panel = ActionPanelState::Root { selected: 3 };
+                    *panel = ActionPanelState::Root { selected: 4 };
                     core.dirty = true;
                 }
             },
@@ -1827,7 +1989,7 @@ mod tests {
     use crate::model::PersistedState;
     use crate::model::Track;
     use std::path::{Path, PathBuf};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     struct TestAudioEngine {
         paused: bool,
@@ -1942,6 +2104,21 @@ mod tests {
             self.duration
         }
 
+        fn seek_to(&mut self, position: Duration) -> Result<()> {
+            if self.current.is_none() {
+                return Err(anyhow::anyhow!("no active track"));
+            }
+
+            let clamped = self
+                .duration
+                .map(|duration| position.min(duration))
+                .unwrap_or(position);
+            self.position = Some(clamped);
+            self.queued = None;
+            self.finished = false;
+            Ok(())
+        }
+
         fn volume(&self) -> f32 {
             1.0
         }
@@ -2008,7 +2185,7 @@ mod tests {
     fn action_panel_mode_selection_applies_mode() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 2 };
+        let mut panel = ActionPanelState::Root { selected: 3 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::Mode { .. }));
@@ -2030,6 +2207,40 @@ mod tests {
 
         assert_eq!(core.status, "No playlists available");
         assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn action_panel_now_playing_add_requires_playlist() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("now.mp3"));
+        let mut panel = ActionPanelState::Root { selected: 2 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert_eq!(core.status, "No playlists available");
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn action_panel_adds_now_playing_track_to_playlist() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.create_playlist("mix");
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("now.mp3"));
+        let mut panel = ActionPanelState::Root { selected: 2 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(
+            panel,
+            ActionPanelState::PlaylistAddNowPlaying { .. }
+        ));
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(panel, ActionPanelState::Closed));
+
+        let playlist = core.playlists.get("mix").expect("playlist exists");
+        assert_eq!(playlist.tracks, vec![PathBuf::from("now.mp3")]);
     }
 
     #[test]
@@ -2068,7 +2279,7 @@ mod tests {
         state.folders.push(PathBuf::from(r"E:\LOCALMUSIC"));
         let mut core = TuneCore::from_persisted(state);
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 8 };
+        let mut panel = ActionPanelState::Root { selected: 9 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::RemoveDirectory { .. }));
@@ -2082,7 +2293,7 @@ mod tests {
     fn action_panel_create_playlist_from_input() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 6 };
+        let mut panel = ActionPanelState::Root { selected: 7 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(
@@ -2110,7 +2321,7 @@ mod tests {
             .insert(String::from("mix"), crate::model::Playlist::default());
         let mut core = TuneCore::from_persisted(state);
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 7 };
+        let mut panel = ActionPanelState::Root { selected: 8 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::PlaylistRemove { .. }));
@@ -2125,7 +2336,7 @@ mod tests {
     fn action_panel_audio_driver_reload_updates_status() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 10 };
+        let mut panel = ActionPanelState::Root { selected: 11 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::AudioSettings { .. }));
@@ -2144,7 +2355,7 @@ mod tests {
     fn action_panel_audio_output_selection_sets_device() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 10 };
+        let mut panel = ActionPanelState::Root { selected: 11 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
@@ -2170,7 +2381,7 @@ mod tests {
     fn playback_settings_toggle_loudness_and_crossfade() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 3 };
+        let mut panel = ActionPanelState::Root { selected: 4 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::PlaybackSettings { .. }));
@@ -2186,6 +2397,10 @@ mod tests {
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert_eq!(core.scrub_seconds, 10);
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(!core.stats_enabled);
     }
 
@@ -2193,7 +2408,7 @@ mod tests {
     fn stats_left_on_range_cycles_back() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = crate::core::HeaderSection::Stats;
-        core.stats_focus = crate::core::StatsFilterFocus::Range(2);
+        core.stats_focus = crate::core::StatsFilterFocus::Range(3);
         core.stats_range = crate::stats::StatsRange::Days30;
 
         assert!(handle_stats_inline_input(
@@ -2203,7 +2418,7 @@ mod tests {
         assert_eq!(core.stats_range, crate::stats::StatsRange::Days7);
         assert!(matches!(
             core.stats_focus,
-            crate::core::StatsFilterFocus::Range(1)
+            crate::core::StatsFilterFocus::Range(2)
         ));
     }
 
@@ -2240,7 +2455,7 @@ mod tests {
         assert_eq!(core.stats_scroll, 0);
         assert!(matches!(
             core.stats_focus,
-            crate::core::StatsFilterFocus::Range(1)
+            crate::core::StatsFilterFocus::Range(2)
         ));
     }
 
@@ -2248,7 +2463,7 @@ mod tests {
     fn theme_settings_updates_core() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 11 };
+        let mut panel = ActionPanelState::Root { selected: 12 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(
@@ -2279,6 +2494,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.loudness_normalization = true;
         core.crossfade_seconds = 4;
+        core.scrub_seconds = 30;
         core.theme = Theme::Galaxy;
         core.stats_enabled = false;
         let audio = TestAudioEngine::new();
@@ -2286,6 +2502,7 @@ mod tests {
         let state = persisted_state_with_audio(&core, &audio);
         assert!(state.loudness_normalization);
         assert_eq!(state.crossfade_seconds, 4);
+        assert_eq!(state.scrub_seconds, 30);
         assert_eq!(state.theme, Theme::Galaxy);
         assert!(!state.stats_enabled);
     }
@@ -2303,6 +2520,292 @@ mod tests {
                 .contains("Saved output 'Missing Device' unavailable")
         );
         assert!(core.status.contains("Audio driver settings"));
+    }
+
+    #[test]
+    fn listen_tracker_flushes_partial_session_while_playing() {
+        let core = TuneCore::from_persisted(PersistedState::default());
+        let mut stats = StatsStore::default();
+        let mut tracker = ListenTracker::default();
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("a.mp3"));
+        audio.duration = Some(Duration::from_secs(200));
+
+        assert!(!tracker.tick(&core, &audio, &mut stats));
+        let active = tracker.active.as_mut().expect("active session");
+        active.playing_started_at = Instant::now().checked_sub(Duration::from_secs(12));
+
+        assert!(tracker.tick(&core, &audio, &mut stats));
+        let event = stats.events.last().expect("partial event");
+        assert!(event.listened_seconds >= 10);
+        assert!(!event.counted_play);
+    }
+
+    #[test]
+    fn finalize_after_partial_flush_retains_total_listen_and_play_count() {
+        let mut stats = StatsStore::default();
+        stats.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("a.mp3"),
+            title: String::from("a"),
+            artist: None,
+            album: None,
+            started_at_epoch_seconds: 10,
+            listened_seconds: 30,
+            completed: false,
+            duration_seconds: Some(200),
+            counted_play_override: Some(false),
+            allow_short_listen: true,
+        });
+
+        let mut tracker = ListenTracker {
+            active: Some(ActiveListenSession {
+                track_path: PathBuf::from("a.mp3"),
+                title: String::from("a"),
+                artist: None,
+                album: None,
+                started_at_epoch_seconds: 10,
+                playing_started_at: None,
+                listened: Duration::from_secs(35),
+                persisted_listened_seconds: 30,
+                play_count_recorded: false,
+                last_position: Some(Duration::from_secs(200)),
+                duration: Some(Duration::from_secs(200)),
+            }),
+        };
+
+        assert!(tracker.finalize_active(&mut stats));
+        let snapshot = stats.query(
+            &crate::stats::StatsQuery {
+                range: crate::stats::StatsRange::Lifetime,
+                sort: crate::stats::StatsSort::ListenTime,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            1_000,
+        );
+        assert_eq!(snapshot.total_listen_seconds, 35);
+        assert_eq!(snapshot.total_plays, 1);
+    }
+
+    #[test]
+    fn listen_tracker_records_play_during_partial_flush_once() {
+        let core = TuneCore::from_persisted(PersistedState::default());
+        let mut stats = StatsStore::default();
+        let mut tracker = ListenTracker::default();
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("a.mp3"));
+        audio.duration = Some(Duration::from_secs(200));
+
+        assert!(!tracker.tick(&core, &audio, &mut stats));
+        let active = tracker.active.as_mut().expect("active session");
+        active.playing_started_at = Instant::now().checked_sub(Duration::from_secs(31));
+
+        assert!(tracker.tick(&core, &audio, &mut stats));
+        let first_counted = stats
+            .events
+            .iter()
+            .filter(|event| event.counted_play)
+            .count();
+        assert_eq!(first_counted, 1);
+
+        let active = tracker.active.as_mut().expect("active session");
+        active.playing_started_at = Instant::now().checked_sub(Duration::from_secs(42));
+        assert!(tracker.tick(&core, &audio, &mut stats));
+
+        let total_counted = stats
+            .events
+            .iter()
+            .filter(|event| event.counted_play)
+            .count();
+        assert_eq!(total_counted, 1);
+    }
+
+    #[test]
+    fn finalize_keeps_short_tail_after_partial_flush() {
+        let mut stats = StatsStore::default();
+        stats.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("song.mp3"),
+            title: String::from("song"),
+            artist: None,
+            album: None,
+            started_at_epoch_seconds: 100,
+            listened_seconds: 140,
+            completed: false,
+            duration_seconds: Some(153),
+            counted_play_override: Some(true),
+            allow_short_listen: true,
+        });
+
+        let mut tracker = ListenTracker {
+            active: Some(ActiveListenSession {
+                track_path: PathBuf::from("song.mp3"),
+                title: String::from("song"),
+                artist: None,
+                album: None,
+                started_at_epoch_seconds: 100,
+                playing_started_at: None,
+                listened: Duration::from_secs(153),
+                persisted_listened_seconds: 140,
+                play_count_recorded: true,
+                last_position: Some(Duration::from_secs(153)),
+                duration: Some(Duration::from_secs(153)),
+            }),
+        };
+
+        assert!(tracker.finalize_active(&mut stats));
+        let snapshot = stats.query(
+            &crate::stats::StatsQuery {
+                range: crate::stats::StatsRange::Lifetime,
+                sort: crate::stats::StatsSort::ListenTime,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            1_000,
+        );
+
+        assert_eq!(snapshot.total_listen_seconds, 153);
+        assert_eq!(snapshot.total_plays, 1);
+        assert_eq!(snapshot.recent.len(), 1);
+        assert_eq!(snapshot.recent[0].listened_seconds, 153);
+    }
+
+    #[test]
+    fn pause_resume_session_accumulates_and_counts_one_play() {
+        let mut stats = StatsStore::default();
+        let mut tracker = ListenTracker {
+            active: Some(ActiveListenSession {
+                track_path: PathBuf::from("song.mp3"),
+                title: String::from("song"),
+                artist: None,
+                album: None,
+                started_at_epoch_seconds: 100,
+                playing_started_at: None,
+                listened: Duration::from_secs(40),
+                persisted_listened_seconds: 0,
+                play_count_recorded: false,
+                last_position: Some(Duration::from_secs(40)),
+                duration: Some(Duration::from_secs(153)),
+            }),
+        };
+
+        assert!(tracker.finalize_active(&mut stats));
+        let snapshot = stats.query(
+            &crate::stats::StatsQuery {
+                range: crate::stats::StatsRange::Lifetime,
+                sort: crate::stats::StatsSort::ListenTime,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            1_000,
+        );
+
+        assert_eq!(snapshot.total_listen_seconds, 40);
+        assert_eq!(snapshot.total_plays, 1);
+        assert_eq!(snapshot.recent.len(), 1);
+        assert_eq!(snapshot.recent[0].listened_seconds, 40);
+        assert!(snapshot.recent[0].counted_play);
+    }
+
+    #[test]
+    fn scrubbing_session_can_exceed_track_duration_in_listen_time() {
+        let mut stats = StatsStore::default();
+        let mut tracker = ListenTracker {
+            active: Some(ActiveListenSession {
+                track_path: PathBuf::from("song.mp3"),
+                title: String::from("song"),
+                artist: None,
+                album: None,
+                started_at_epoch_seconds: 100,
+                playing_started_at: None,
+                listened: Duration::from_secs(190),
+                persisted_listened_seconds: 0,
+                play_count_recorded: false,
+                last_position: Some(Duration::from_secs(153)),
+                duration: Some(Duration::from_secs(153)),
+            }),
+        };
+
+        assert!(tracker.finalize_active(&mut stats));
+        let snapshot = stats.query(
+            &crate::stats::StatsQuery {
+                range: crate::stats::StatsRange::Lifetime,
+                sort: crate::stats::StatsSort::ListenTime,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            1_000,
+        );
+
+        assert_eq!(snapshot.total_listen_seconds, 190);
+        assert_eq!(snapshot.total_plays, 1);
+    }
+
+    #[test]
+    fn short_skip_session_under_ten_seconds_is_not_logged() {
+        let mut stats = StatsStore::default();
+        let mut tracker = ListenTracker {
+            active: Some(ActiveListenSession {
+                track_path: PathBuf::from("skip.mp3"),
+                title: String::from("skip"),
+                artist: None,
+                album: None,
+                started_at_epoch_seconds: 100,
+                playing_started_at: None,
+                listened: Duration::from_secs(2),
+                persisted_listened_seconds: 0,
+                play_count_recorded: false,
+                last_position: Some(Duration::from_secs(2)),
+                duration: Some(Duration::from_secs(153)),
+            }),
+        };
+
+        assert!(!tracker.finalize_active(&mut stats));
+        let snapshot = stats.query(
+            &crate::stats::StatsQuery {
+                range: crate::stats::StatsRange::Lifetime,
+                sort: crate::stats::StatsSort::ListenTime,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            1_000,
+        );
+
+        assert_eq!(snapshot.total_listen_seconds, 0);
+        assert_eq!(snapshot.total_plays, 0);
+        assert!(snapshot.recent.is_empty());
+    }
+
+    #[test]
+    fn scrub_current_track_clamps_within_bounds() {
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("a.mp3"));
+        audio.duration = Some(Duration::from_secs(100));
+        audio.position = Some(Duration::from_secs(98));
+
+        scrub_current_track(&mut audio, 10, true).expect("scrub forward");
+        assert_eq!(audio.position, Some(Duration::from_secs(100)));
+
+        scrub_current_track(&mut audio, 120, false).expect("scrub backward");
+        assert_eq!(audio.position, Some(Duration::from_secs(0)));
+    }
+
+    #[test]
+    fn scrub_current_track_clears_queued_crossfade() {
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("a.mp3"));
+        audio.duration = Some(Duration::from_secs(120));
+        audio.position = Some(Duration::from_secs(50));
+        audio.queued = Some(PathBuf::from("b.mp3"));
+
+        scrub_current_track(&mut audio, 15, true).expect("scrub");
+
+        assert_eq!(audio.position, Some(Duration::from_secs(65)));
+        assert_eq!(audio.crossfade_queued_track(), None);
     }
 
     #[test]

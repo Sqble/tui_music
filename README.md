@@ -19,7 +19,7 @@ Performance-oriented terminal music player for Windows-first workflows.
 - Stats tab with totals, ASCII charts, top songs, and recent listen log
 - Audio driver recovery and output speaker selection from actions panel
 - Selected output speaker persists across launches with fallback to default when unavailable
-- Playback settings in actions panel: loudness normalization, crossfade, stats tracking toggle, and themes (Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy)
+- Playback settings in actions panel: loudness normalization, crossfade, scrub length cycle (5s/10s/15s/30s/1m), stats tracking toggle, and themes (Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy)
 - Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
 - Add directory from actions panel via typed path or external folder picker
 - Remove directory from actions panel
@@ -39,6 +39,7 @@ cargo run --release
 - `Space`: pause/resume
 - `n`: next track
 - `b`: previous track
+- `a` / `d`: scrub backward/forward by configured scrub length
 - `m`: cycle playback mode
 - `=`/`-`: volume adjust
 - `+`/`_` (Shift): higher precision volume adjust
