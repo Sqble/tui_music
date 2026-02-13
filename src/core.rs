@@ -1035,7 +1035,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.add_folder(&copied);
 
-        assert!(core.folders.iter().any(|folder| folder == &real));
+        assert!(core.folders.iter().any(|folder| path_eq(folder, &real)));
     }
 
     #[test]
@@ -1048,7 +1048,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.add_folder(&copied);
 
-        assert!(core.folders.iter().any(|folder| folder == &real));
+        assert!(core.folders.iter().any(|folder| path_eq(folder, &real)));
     }
 
     #[test]
@@ -1067,7 +1067,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.add_folder(&copied);
 
-        assert!(core.folders.iter().any(|folder| folder == &real));
+        assert!(core.folders.iter().any(|folder| path_eq(folder, &real)));
     }
 
     #[test]
@@ -1079,7 +1079,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.add_folder(&real);
 
-        assert!(core.folders.iter().any(|folder| folder == &real));
+        assert!(core.folders.iter().any(|folder| path_eq(folder, &real)));
     }
 
     #[test]
@@ -1092,7 +1092,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.add_folder(&copied);
 
-        assert!(core.folders.iter().any(|folder| folder == &real));
+        assert!(core.folders.iter().any(|folder| path_eq(folder, &real)));
     }
 
     #[test]

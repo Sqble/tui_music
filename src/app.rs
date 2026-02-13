@@ -1638,7 +1638,12 @@ mod tests {
         }
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
 
-        assert!(core.folders.iter().any(|folder| folder == &dir));
+        let expected = crate::config::normalize_path(&dir);
+        assert!(
+            core.folders
+                .iter()
+                .any(|folder| crate::config::normalize_path(folder) == expected)
+        );
         assert!(matches!(panel, ActionPanelState::Closed));
     }
 
