@@ -1,6 +1,6 @@
 use crate::config;
 use crate::library;
-use crate::model::{PersistedState, PlaybackMode, Playlist, Track};
+use crate::model::{PersistedState, PlaybackMode, Playlist, Theme, Track};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
@@ -16,6 +16,34 @@ pub enum BrowserEntryKind {
     Playlist,
     AllSongs,
     Track,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderSection {
+    Library,
+    Lyrics,
+    Stats,
+    Online,
+}
+
+impl HeaderSection {
+    fn next(self) -> Self {
+        match self {
+            Self::Library => Self::Lyrics,
+            Self::Lyrics => Self::Stats,
+            Self::Stats => Self::Online,
+            Self::Online => Self::Library,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Library => "Library",
+            Self::Lyrics => "Lyrics",
+            Self::Stats => "Stats",
+            Self::Online => "Online",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +63,10 @@ pub struct TuneCore {
     pub selected_track: usize,
     pub current_queue_index: Option<usize>,
     pub playback_mode: PlaybackMode,
+    pub loudness_normalization: bool,
+    pub crossfade_seconds: u16,
+    pub theme: Theme,
+    pub header_section: HeaderSection,
     pub browser_path: Option<PathBuf>,
     pub browser_playlist: Option<String>,
     pub browser_all_songs: bool,
@@ -60,6 +92,10 @@ impl TuneCore {
             selected_track: 0,
             current_queue_index: None,
             playback_mode: state.playback_mode,
+            loudness_normalization: state.loudness_normalization,
+            crossfade_seconds: state.crossfade_seconds,
+            theme: state.theme,
+            header_section: HeaderSection::Library,
             browser_path: None,
             browser_playlist: None,
             browser_all_songs: false,
@@ -81,6 +117,10 @@ impl TuneCore {
             folders: self.folders.clone(),
             playlists: self.playlists.clone(),
             playback_mode: self.playback_mode,
+            loudness_normalization: self.loudness_normalization,
+            crossfade_seconds: self.crossfade_seconds,
+            theme: self.theme,
+            selected_output_device: None,
         }
     }
 
@@ -91,7 +131,29 @@ impl TuneCore {
     }
 
     pub fn add_folder(&mut self, input: &Path) {
-        let normalized = config::normalize_path(input);
+        let sanitized = config::sanitize_user_folder_path(input);
+        if sanitized.as_os_str().is_empty() {
+            self.set_status("Invalid folder path");
+            return;
+        }
+
+        let resolved = if input.exists() {
+            input.to_path_buf()
+        } else {
+            config::resolve_existing_path(input)
+        };
+
+        if !resolved.exists() {
+            self.set_status("Folder not found");
+            return;
+        }
+
+        if !resolved.is_dir() {
+            self.set_status("Path is not a folder");
+            return;
+        }
+
+        let normalized = config::normalize_path(&resolved);
         if self.folders.iter().any(|f| f == &normalized) {
             self.set_status("Folder already added");
             return;
@@ -108,6 +170,47 @@ impl TuneCore {
         self.set_status(&format!("Added folder with {count} tracks"));
     }
 
+    pub fn remove_folder(&mut self, input: &Path) {
+        if input.as_os_str().is_empty() {
+            self.set_status("Invalid folder path");
+            return;
+        }
+
+        let sanitized = config::sanitize_user_folder_path(input);
+        let display_clean = PathBuf::from(config::sanitize_display_text(&input.to_string_lossy()));
+        let recovered = config::resolve_existing_path(input);
+
+        let mut candidates = vec![config::normalize_path(input)];
+        if !sanitized.as_os_str().is_empty() {
+            candidates.push(config::normalize_path(&sanitized));
+        }
+        if !display_clean.as_os_str().is_empty() {
+            candidates.push(config::normalize_path(&display_clean));
+        }
+        if recovered.exists() {
+            candidates.push(config::normalize_path(&recovered));
+        }
+
+        let before = self.folders.len();
+        self.folders.retain(|folder| {
+            !candidates
+                .iter()
+                .any(|candidate| path_eq(folder, candidate))
+        });
+        if self.folders.len() == before {
+            self.set_status("Folder not found");
+            return;
+        }
+
+        self.browser_path = None;
+        self.browser_all_songs = false;
+        self.selected_browser = 0;
+        self.tracks = library::scan_many(&self.folders);
+        self.rebuild_main_queue();
+        self.refresh_browser_entries();
+        self.set_status("Folder removed");
+    }
+
     pub fn rescan(&mut self) {
         self.tracks = library::scan_many(&self.folders);
         self.rebuild_main_queue();
@@ -122,7 +225,24 @@ impl TuneCore {
         }
 
         self.playlists.insert(name.to_string(), Playlist::default());
+        self.refresh_browser_entries();
         self.set_status("Playlist created");
+    }
+
+    pub fn remove_playlist(&mut self, name: &str) {
+        if self.playlists.remove(name).is_none() {
+            self.set_status("Playlist not found");
+            return;
+        }
+
+        if self.browser_playlist.as_deref() == Some(name) {
+            self.browser_playlist = None;
+            self.selected_browser = 0;
+        }
+
+        self.refresh_browser_entries();
+
+        self.set_status("Playlist removed");
     }
 
     pub fn add_selected_to_playlist(&mut self, name: &str) {
@@ -368,12 +488,26 @@ impl TuneCore {
         self.set_status("Playback mode updated");
     }
 
+    pub fn cycle_header_section(&mut self) {
+        self.header_section = self.header_section.next();
+        self.set_status(&format!("Section: {}", self.header_section.label()));
+    }
+
     pub fn current_path(&self) -> Option<&Path> {
         let queue_index = self.current_queue_index?;
         let track_index = *self.queue.get(queue_index)?;
         self.tracks
             .get(track_index)
             .map(|track| track.path.as_path())
+    }
+
+    pub fn queue_position_for_path(&self, path: &Path) -> Option<usize> {
+        self.queue.iter().position(|idx| {
+            self.tracks
+                .get(*idx)
+                .map(|track| path_eq(&track.path, path))
+                .unwrap_or(false)
+        })
     }
 
     pub fn title_for_path(&self, path: &Path) -> Option<String> {
@@ -619,7 +753,7 @@ impl TuneCore {
                 if let Some(track) = self.tracks.get(idx) {
                     entries.push(BrowserEntry {
                         kind: BrowserEntryKind::Track,
-                        label: track.title.clone(),
+                        label: config::sanitize_display_text(&track.title),
                         path: track.path.clone(),
                     });
                 }
@@ -638,7 +772,8 @@ impl TuneCore {
 
                 for entry in read_dir.filter_map(Result::ok) {
                     let path = config::strip_windows_verbatim_prefix(&entry.path());
-                    let file_name = entry.file_name().to_string_lossy().to_string();
+                    let file_name =
+                        config::sanitize_display_text(&entry.file_name().to_string_lossy());
 
                     if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                         folders.push(BrowserEntry {
@@ -665,7 +800,7 @@ impl TuneCore {
                 let cleaned = config::strip_windows_verbatim_prefix(folder);
                 let label = cleaned
                     .file_name()
-                    .map(|name| name.to_string_lossy().to_string())
+                    .map(|name| config::sanitize_display_text(&name.to_string_lossy()))
                     .unwrap_or_else(|| cleaned.display().to_string());
                 entries.push(BrowserEntry {
                     kind: BrowserEntryKind::Folder,
@@ -684,7 +819,7 @@ impl TuneCore {
                 entries.push(BrowserEntry {
                     kind: BrowserEntryKind::Playlist,
                     path: PathBuf::from(name),
-                    label: format!("[PL] {name}"),
+                    label: format!("[PL] {}", config::sanitize_display_text(name)),
                 });
             }
 
@@ -703,10 +838,10 @@ impl TuneCore {
     fn track_label_from_path(&self, path: &Path) -> String {
         self.track_index(path)
             .and_then(|idx| self.tracks.get(idx))
-            .map(|track| track.title.clone())
+            .map(|track| config::sanitize_display_text(&track.title))
             .unwrap_or_else(|| {
                 path.file_name()
-                    .map(|file| file.to_string_lossy().to_string())
+                    .map(|file| config::sanitize_display_text(&file.to_string_lossy()))
                     .unwrap_or_else(|| path.display().to_string())
             })
     }
@@ -864,6 +999,21 @@ mod tests {
     }
 
     #[test]
+    fn cycle_header_section_wraps_and_updates_status() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        assert_eq!(core.header_section, HeaderSection::Library);
+
+        core.cycle_header_section();
+        assert_eq!(core.header_section, HeaderSection::Lyrics);
+        assert_eq!(core.status, "Section: Lyrics");
+
+        core.cycle_header_section();
+        core.cycle_header_section();
+        core.cycle_header_section();
+        assert_eq!(core.header_section, HeaderSection::Library);
+    }
+
+    #[test]
     fn root_browser_uses_folders() {
         let mut state = PersistedState::default();
         state.folders.push(PathBuf::from(r"E:\LOCALMUSIC"));
@@ -873,6 +1023,88 @@ mod tests {
                 .iter()
                 .any(|entry| entry.kind == BrowserEntryKind::Folder)
         );
+    }
+
+    #[test]
+    fn add_folder_sanitizes_leading_bullet_character() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("LOCALMUSIC");
+        std::fs::create_dir_all(&real).expect("create");
+        let copied = PathBuf::from(format!("• {}", real.display()));
+
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.add_folder(&copied);
+
+        assert!(core.folders.iter().any(|folder| folder == &real));
+    }
+
+    #[test]
+    fn add_folder_sanitizes_leading_bullet_without_space() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("LOCALMUSIC");
+        std::fs::create_dir_all(&real).expect("create");
+        let copied = PathBuf::from(format!("•{}", real.display()));
+
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.add_folder(&copied);
+
+        assert!(core.folders.iter().any(|folder| folder == &real));
+    }
+
+    #[test]
+    fn add_folder_sanitizes_bullet_inside_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let parent = temp.path().join("Albums");
+        let real = parent.join("Live");
+        std::fs::create_dir_all(&real).expect("create");
+
+        let copied = PathBuf::from(
+            real.to_string_lossy()
+                .replace("Albums", "•Albums")
+                .replace("Live", "▪Live"),
+        );
+
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.add_folder(&copied);
+
+        assert!(core.folders.iter().any(|folder| folder == &real));
+    }
+
+    #[test]
+    fn add_folder_preserves_existing_leading_dash_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("-mixes");
+        std::fs::create_dir_all(&real).expect("create");
+
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.add_folder(&real);
+
+        assert!(core.folders.iter().any(|folder| folder == &real));
+    }
+
+    #[test]
+    fn add_folder_recovers_from_control_character_copy_artifact() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let real = temp.path().join("A B");
+        std::fs::create_dir_all(&real).expect("create");
+        let copied = PathBuf::from(real.to_string_lossy().replace("A B", "A\u{0007} B"));
+
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.add_folder(&copied);
+
+        assert!(core.folders.iter().any(|folder| folder == &real));
+    }
+
+    #[test]
+    fn remove_folder_removes_matching_entry() {
+        let mut state = PersistedState::default();
+        state.folders.push(PathBuf::from(r"E:\LOCALMUSIC"));
+        let mut core = TuneCore::from_persisted(state);
+
+        core.remove_folder(Path::new(r"E:\LOCALMUSIC"));
+
+        assert!(core.folders.is_empty());
+        assert_eq!(core.status, "Folder removed");
     }
 
     #[test]
@@ -1293,6 +1525,26 @@ mod tests {
 
         let playlist = core.playlists.get("mix").expect("playlist exists");
         assert_eq!(playlist.tracks, vec![PathBuf::from("a.mp3")]);
+    }
+
+    #[test]
+    fn remove_playlist_refreshes_root_browser_entries() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.create_playlist("mix");
+        assert!(
+            core.browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix")
+        );
+
+        core.remove_playlist("mix");
+
+        assert!(
+            !core
+                .browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix")
+        );
     }
 
     #[test]

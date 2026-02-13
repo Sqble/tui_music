@@ -36,6 +36,19 @@ fn playlist_flow_works() {
     core.selected_browser = 0;
 
     core.create_playlist("mix");
+    core.browser_entries = vec![
+        BrowserEntry {
+            kind: BrowserEntryKind::Track,
+            path: PathBuf::from("a.mp3"),
+            label: String::from("a"),
+        },
+        BrowserEntry {
+            kind: BrowserEntryKind::Track,
+            path: PathBuf::from("b.mp3"),
+            label: String::from("b"),
+        },
+    ];
+    core.selected_browser = 0;
     core.add_selected_to_playlist("mix");
     core.selected_browser = 1;
     core.add_selected_to_playlist("mix");

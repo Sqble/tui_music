@@ -10,6 +10,25 @@ pub enum PlaybackMode {
     LoopOne,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Theme {
+    Dark,
+    PitchBlack,
+    Galaxy,
+    Matrix,
+    Demonic,
+    CottonCandy,
+    Ocean,
+    Forest,
+    Sunset,
+}
+
+impl Default for Theme {
+    fn default() -> Self {
+        Self::Dark
+    }
+}
+
 impl PlaybackMode {
     pub fn next(self) -> Self {
         match self {
@@ -39,6 +58,14 @@ pub struct PersistedState {
     pub folders: Vec<PathBuf>,
     pub playlists: HashMap<String, Playlist>,
     pub playback_mode: PlaybackMode,
+    #[serde(default)]
+    pub loudness_normalization: bool,
+    #[serde(default)]
+    pub crossfade_seconds: u16,
+    #[serde(default)]
+    pub theme: Theme,
+    #[serde(default)]
+    pub selected_output_device: Option<String>,
 }
 
 impl Default for PersistedState {
@@ -47,6 +74,10 @@ impl Default for PersistedState {
             folders: Vec::new(),
             playlists: HashMap::new(),
             playback_mode: PlaybackMode::Normal,
+            loudness_normalization: false,
+            crossfade_seconds: 0,
+            theme: Theme::default(),
+            selected_output_device: None,
         }
     }
 }

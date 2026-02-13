@@ -1,14 +1,40 @@
 
-Audio driver settings context window in commands
-- motivation: if audio driver crashes we need way to reset it or like pick which speaker to play through 
+stat tracking, stat tracking enabled config option, its saved in another file in the same .config/tunetui/
+graphs, total listen time, per song plays with filter and sort
+last 7 days or 30 or all time 
 
-linux build 
-
-config with audio normalization option, stat tracking enabled option, song crossfade 
-theme - accessed in the same context menu 
-
-stat tracking, 
+scrub song playback
 
 listen together with another person even on another network (through ssh)
 
+linux build 
 
+lyrics support - aswell as a built in editor for editing  the lyrics metadata
+
+extract instrumental support
+
+public playlists - use tune.exe as a cli tool with args to a folder of songs and with a config
+then people can view it in a browser of a registry of all the servers running and it serves as a 
+proxy so you are saved and confidential
+
+cool ascii manual that shows up on first launch and has a option to open in context window
+the manual is explaining how to host public playlists or listen along basically a 
+guided tutorial of the app thats really simple and short and helps the user understand
+the main ways to add/get new songs, listen together, and organize their songs 
+
+rasterization of the album cover
+
+mouse support
+
+view spectrograph & audio quality rating 
+have a graphic gui panel rating the audio quality red yellow or green or gold star
+
+metadata editor
+
+tray work in powershell, windows terminal, other windows terminals, 
+compatibility in other linux terminals
+
+DJ tools scripting language in editor
++ online docs
+
+live EQ with it showing playback like Pro-Q3 as you edit it

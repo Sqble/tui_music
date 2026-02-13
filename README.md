@@ -14,6 +14,13 @@ Performance-oriented terminal music player for Windows-first workflows.
 - Automatic track advance when a song ends, including while minimized to tray
 - Persistent state in `%USERPROFILE%\\.config\\tunetui\\state.json`
 - Keyboard-driven TUI with actions panel
+- Right-aligned status tabs with `E` cycling (Library, Lyrics, Stats, Online)
+- Audio driver recovery and output speaker selection from actions panel
+- Selected output speaker persists across launches with fallback to default when unavailable
+- Playback settings in actions panel: loudness normalization, crossfade, and themes (Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy)
+- Add directory from actions panel via typed path or external folder picker
+- Remove directory from actions panel
+- Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
 
 ## Run
 

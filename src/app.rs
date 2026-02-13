@@ -1,7 +1,7 @@
 use crate::audio::{AudioEngine, NullAudioEngine, WasapiAudioEngine};
 use crate::config;
 use crate::core::TuneCore;
-use crate::model::PlaybackMode;
+use crate::model::{PlaybackMode, Theme};
 use anyhow::Result;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -14,6 +14,8 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io::stdout;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
@@ -28,13 +30,21 @@ const MAX_VOLUME: f32 = 2.5;
 const VOLUME_STEP_COARSE: f32 = 0.05;
 const VOLUME_STEP_FINE: f32 = 0.01;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ActionPanelState {
     Closed,
     Root { selected: usize },
     Mode { selected: usize },
     PlaylistPlay { selected: usize },
     PlaylistAdd { selected: usize },
+    PlaylistCreate { selected: usize, input: String },
+    PlaylistRemove { selected: usize },
+    AudioSettings { selected: usize },
+    AudioOutput { selected: usize },
+    PlaybackSettings { selected: usize },
+    ThemeSettings { selected: usize },
+    AddDirectory { selected: usize, input: String },
+    RemoveDirectory { selected: usize },
 }
 
 impl ActionPanelState {
@@ -50,24 +60,34 @@ impl ActionPanelState {
         !matches!(self, Self::Closed)
     }
 
-    fn to_view(self, core: &TuneCore) -> Option<crate::ui::ActionPanelView> {
+    fn to_view(
+        &self,
+        core: &TuneCore,
+        audio: &dyn AudioEngine,
+    ) -> Option<crate::ui::ActionPanelView> {
         match self {
             Self::Closed => None,
             Self::Root { selected } => Some(crate::ui::ActionPanelView {
                 title: String::from("Actions"),
                 hint: String::from("Enter select  Esc close  Up/Down navigate"),
                 options: vec![
-                    String::from("Load main library queue"),
-                    String::from("Set playback mode"),
-                    String::from("Play playlist"),
+                    String::from("Add directory"),
                     String::from("Add selected item to playlist"),
+                    String::from("Set playback mode"),
+                    String::from("Playback settings"),
+                    String::from("Play playlist"),
                     String::from("Remove selected from playlist"),
+                    String::from("Create playlist"),
+                    String::from("Remove playlist"),
+                    String::from("Remove directory"),
                     String::from("Rescan library"),
+                    String::from("Audio driver settings"),
+                    String::from("Theme"),
                     String::from("Save state"),
                     String::from("Minimize to tray"),
                     String::from("Close panel"),
                 ],
-                selected,
+                selected: *selected,
             }),
             Self::Mode { selected } => Some(crate::ui::ActionPanelView {
                 title: String::from("Playback Mode"),
@@ -78,7 +98,7 @@ impl ActionPanelState {
                     String::from("Loop playlist"),
                     String::from("Loop single track"),
                 ],
-                selected,
+                selected: *selected,
             }),
             Self::PlaylistPlay { selected } => {
                 let playlists = sorted_playlist_names(core);
@@ -90,7 +110,7 @@ impl ActionPanelState {
                     } else {
                         playlists
                     },
-                    selected,
+                    selected: *selected,
                 })
             }
             Self::PlaylistAdd { selected } => {
@@ -103,7 +123,92 @@ impl ActionPanelState {
                     } else {
                         playlists
                     },
-                    selected,
+                    selected: *selected,
+                })
+            }
+            Self::PlaylistCreate { selected, input } => Some(crate::ui::ActionPanelView {
+                title: String::from("Create Playlist"),
+                hint: String::from("Type name + Enter  Backspace back"),
+                options: vec![if input.is_empty() {
+                    String::from("Name: ")
+                } else {
+                    format!("Name: {input}")
+                }],
+                selected: *selected,
+            }),
+            Self::PlaylistRemove { selected } => {
+                let playlists = sorted_playlist_names(core);
+                Some(crate::ui::ActionPanelView {
+                    title: String::from("Remove Playlist"),
+                    hint: String::from("Enter remove  Backspace back"),
+                    options: if playlists.is_empty() {
+                        vec![String::from("(no playlists)")]
+                    } else {
+                        playlists
+                    },
+                    selected: *selected,
+                })
+            }
+            Self::AudioSettings { selected } => Some(crate::ui::ActionPanelView {
+                title: String::from("Audio Driver Settings"),
+                hint: String::from("Enter select  Backspace back"),
+                options: vec![
+                    String::from("Reload audio driver"),
+                    String::from("Select output speaker"),
+                    String::from("Back"),
+                ],
+                selected: *selected,
+            }),
+            Self::AudioOutput { selected } => {
+                let options = audio_output_options(audio);
+                Some(crate::ui::ActionPanelView {
+                    title: String::from("Output Speaker"),
+                    hint: String::from("Enter apply  Backspace back"),
+                    options,
+                    selected: *selected,
+                })
+            }
+            Self::PlaybackSettings { selected } => Some(crate::ui::ActionPanelView {
+                title: String::from("Playback Settings"),
+                hint: String::from("Enter toggle/select  Backspace back"),
+                options: playback_settings_options(core),
+                selected: *selected,
+            }),
+            Self::ThemeSettings { selected } => Some(crate::ui::ActionPanelView {
+                title: String::from("Theme"),
+                hint: String::from("Enter apply  Backspace back"),
+                options: theme_options(core.theme),
+                selected: *selected,
+            }),
+            Self::AddDirectory { selected, input } => Some(crate::ui::ActionPanelView {
+                title: String::from("Add Directory"),
+                hint: String::from("Enter choose folder  Down type path"),
+                options: vec![
+                    String::from("Choose folder externally"),
+                    if input.is_empty() {
+                        String::from("Path: ")
+                    } else {
+                        format!("Path: {input}")
+                    },
+                ],
+                selected: *selected,
+            }),
+            Self::RemoveDirectory { selected } => {
+                let paths = sorted_folder_paths(core);
+                Some(crate::ui::ActionPanelView {
+                    title: String::from("Remove Directory"),
+                    hint: String::from("Enter remove  Backspace back"),
+                    options: if paths.is_empty() {
+                        vec![String::from("(no folders)")]
+                    } else {
+                        paths
+                            .iter()
+                            .map(|path| {
+                                crate::config::sanitize_display_text(&path.display().to_string())
+                            })
+                            .collect()
+                    },
+                    selected: *selected,
                 })
             }
         }
@@ -119,12 +224,16 @@ pub fn run() -> Result<()> {
     };
 
     let state = config::load_state()?;
+    let preferred_output = state.selected_output_device.clone();
     let mut core = TuneCore::from_persisted(state);
 
     let mut audio: Box<dyn AudioEngine> = match WasapiAudioEngine::new() {
         Ok(engine) => Box::new(engine),
         Err(_) => Box::new(NullAudioEngine::new()),
     };
+
+    apply_audio_preferences_from_core(&core, &mut *audio);
+    apply_saved_audio_output(&mut core, &mut *audio, preferred_output);
 
     enable_raw_mode()?;
     let mut out = stdout();
@@ -139,12 +248,13 @@ pub fn run() -> Result<()> {
 
     let result: Result<()> = loop {
         pump_tray_events(&mut core);
+        audio.tick();
         maybe_auto_advance_track(&mut core, &mut *audio);
 
         if core.dirty || last_tick.elapsed() > Duration::from_millis(250) {
             terminal.draw(|frame| {
                 library_rect = crate::ui::library_rect(frame.area());
-                let panel_view = action_panel.to_view(&core);
+                let panel_view = action_panel.to_view(&core, &*audio);
                 crate::ui::draw(frame, &core, &*audio, panel_view.as_ref())
             })?;
             core.dirty = false;
@@ -183,7 +293,7 @@ pub fn run() -> Result<()> {
                     .activate_selected()
                     .and_then(|path| audio.play(&path).err())
                 {
-                    core.status = format!("playback error: {err:#}");
+                    core.status = concise_audio_error(&err);
                 }
             }
             KeyCode::Left | KeyCode::Backspace => core.navigate_back(),
@@ -202,7 +312,7 @@ pub fn run() -> Result<()> {
                     .next_track_path()
                     .and_then(|path| audio.play(&path).err())
                 {
-                    core.status = format!("playback error: {err:#}");
+                    core.status = concise_audio_error(&err);
                     core.dirty = true;
                 }
             }
@@ -211,11 +321,15 @@ pub fn run() -> Result<()> {
                     .prev_track_path()
                     .and_then(|path| audio.play(&path).err())
                 {
-                    core.status = format!("playback error: {err:#}");
+                    core.status = concise_audio_error(&err);
                     core.dirty = true;
                 }
             }
-            KeyCode::Char('m') => core.cycle_mode(),
+            KeyCode::Char('m') => {
+                core.cycle_mode();
+                auto_save_state(&mut core, &*audio);
+            }
+            KeyCode::Char('e') => core.cycle_header_section(),
             KeyCode::Char('t') => {
                 minimize_to_tray();
                 core.status = String::from("Minimized to tray");
@@ -249,7 +363,7 @@ pub fn run() -> Result<()> {
             }
             KeyCode::Char('r') => core.rescan(),
             KeyCode::Char('s') => {
-                if let Err(err) = core.save() {
+                if let Err(err) = save_state_with_audio(&mut core, &*audio) {
                     core.status = format!("save error: {err:#}");
                     core.dirty = true;
                 }
@@ -270,7 +384,7 @@ pub fn run() -> Result<()> {
     )?;
     cleanup_tray();
     terminal.show_cursor()?;
-    let save_result = core.save();
+    let save_result = save_state_with_audio(&mut core, &*audio);
     result?;
     save_result?;
     Ok(())
@@ -343,19 +457,119 @@ fn focus_existing_instance() {
 }
 
 fn maybe_auto_advance_track(core: &mut TuneCore, audio: &mut dyn AudioEngine) {
-    if audio.current_track().is_none() || audio.is_paused() || !audio.is_finished() {
+    if audio.current_track().is_none() || audio.is_paused() {
+        return;
+    }
+
+    let crossfade_triggered = should_trigger_crossfade_advance(audio);
+    if crossfade_triggered && audio.crossfade_queued_track().is_some() {
+        return;
+    }
+
+    if !audio.is_finished() && !crossfade_triggered {
         return;
     }
 
     if let Some(path) = core.next_track_path() {
-        if let Err(err) = audio.play(&path) {
-            core.status = format!("playback error: {err:#}");
+        let result = if crossfade_triggered {
+            audio.queue_crossfade(&path)
+        } else {
+            audio.play(&path)
+        };
+        if let Err(err) = result {
+            core.status = concise_audio_error(&err);
             core.dirty = true;
         }
-    } else {
+    } else if audio.is_finished() {
         audio.stop();
         core.status = String::from("Reached end of queue");
         core.dirty = true;
+    }
+}
+
+fn should_trigger_crossfade_advance(audio: &dyn AudioEngine) -> bool {
+    let crossfade_seconds = audio.crossfade_seconds();
+    if crossfade_seconds == 0 {
+        return false;
+    }
+
+    let Some(position) = audio.position() else {
+        return false;
+    };
+    let Some(duration) = audio.duration() else {
+        return false;
+    };
+    if duration <= position {
+        return false;
+    }
+
+    let remaining = duration.saturating_sub(position);
+    remaining <= Duration::from_secs(u64::from(crossfade_seconds))
+}
+
+fn concise_audio_error(err: &anyhow::Error) -> String {
+    let message = err.to_string();
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("device") && (lower.contains("no longer") || lower.contains("unavailable")) {
+        return String::from("Audio device unavailable. Use / -> Audio driver settings -> Reload");
+    }
+    format!("Playback failed: {message}")
+}
+
+fn save_state_with_audio(core: &mut TuneCore, audio: &dyn AudioEngine) -> Result<()> {
+    persist_state_with_audio(core, audio, true)
+}
+
+fn auto_save_state(core: &mut TuneCore, audio: &dyn AudioEngine) {
+    let _ = persist_state_with_audio(core, audio, false);
+}
+
+fn persist_state_with_audio(
+    core: &mut TuneCore,
+    audio: &dyn AudioEngine,
+    show_status: bool,
+) -> Result<()> {
+    let state = persisted_state_with_audio(core, audio);
+    config::save_state(&state)?;
+    if show_status {
+        core.status = String::from("State saved");
+        core.dirty = true;
+    }
+    Ok(())
+}
+
+fn persisted_state_with_audio(
+    core: &TuneCore,
+    audio: &dyn AudioEngine,
+) -> crate::model::PersistedState {
+    let mut state = core.persisted_state();
+    state.selected_output_device = audio.selected_output_device();
+    state
+}
+
+fn apply_saved_audio_output(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    preferred_output: Option<String>,
+) {
+    let Some(preferred_output) = preferred_output else {
+        return;
+    };
+
+    if let Err(err) = audio.set_output_device(Some(preferred_output.as_str())) {
+        core.status = format!(
+            "Saved output '{}' unavailable. Using default. / -> Audio driver settings",
+            preferred_output
+        );
+        core.dirty = true;
+
+        if let Err(default_err) = audio.set_output_device(None) {
+            core.status =
+                format!("Audio init failed: {default_err}. / -> Audio driver settings -> Reload");
+            core.dirty = true;
+        } else {
+            core.status = format!("{} ({})", core.status, concise_audio_error(&err));
+        }
     }
 }
 
@@ -384,6 +598,110 @@ fn sorted_playlist_names(core: &TuneCore) -> Vec<String> {
     names
 }
 
+fn sorted_folder_paths(core: &TuneCore) -> Vec<PathBuf> {
+    let mut paths = core.folders.clone();
+    paths.sort_by_cached_key(|path| path.to_string_lossy().to_ascii_lowercase());
+    paths
+}
+
+fn audio_output_options(audio: &dyn AudioEngine) -> Vec<String> {
+    let selected = audio.selected_output_device();
+    let outputs = audio.available_outputs();
+    let mut options = Vec::with_capacity(outputs.len().saturating_add(1));
+    options.push(if selected.is_none() {
+        String::from("* System default output")
+    } else {
+        String::from("System default output")
+    });
+
+    for output in outputs {
+        let label = if selected.as_deref() == Some(output.as_str()) {
+            format!("* {output}")
+        } else {
+            output
+        };
+        options.push(label);
+    }
+
+    options
+}
+
+fn playback_settings_options(core: &TuneCore) -> Vec<String> {
+    vec![
+        format!(
+            "Loudness normalization: {}",
+            if core.loudness_normalization {
+                "On"
+            } else {
+                "Off"
+            }
+        ),
+        format!(
+            "Song crossfade: {}",
+            crossfade_label(core.crossfade_seconds)
+        ),
+        String::from("Back"),
+    ]
+}
+
+fn theme_options(theme: Theme) -> Vec<String> {
+    [
+        Theme::Dark,
+        Theme::PitchBlack,
+        Theme::Galaxy,
+        Theme::Matrix,
+        Theme::Demonic,
+        Theme::CottonCandy,
+    ]
+    .into_iter()
+    .map(|entry| {
+        if entry == theme {
+            format!("* {}", theme_label(entry))
+        } else {
+            theme_label(entry).to_string()
+        }
+    })
+    .collect()
+}
+
+fn theme_label(theme: Theme) -> &'static str {
+    match theme {
+        Theme::Dark => "Dark",
+        Theme::PitchBlack => "Pitch Black",
+        Theme::Galaxy => "Galaxy",
+        Theme::Matrix => "Matrix",
+        Theme::Demonic => "Demonic",
+        Theme::CottonCandy => "Cotton Candy",
+        Theme::Ocean => "Ocean (legacy)",
+        Theme::Forest => "Forest (legacy)",
+        Theme::Sunset => "Sunset (legacy)",
+    }
+}
+
+fn crossfade_label(seconds: u16) -> String {
+    if seconds == 0 {
+        String::from("Off")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn next_crossfade_seconds(current: u16) -> u16 {
+    match current {
+        0 => 2,
+        2 => 4,
+        4 => 6,
+        6 => 8,
+        8 => 10,
+        _ => 0,
+    }
+}
+
+fn apply_audio_preferences_from_core(core: &TuneCore, audio: &mut dyn AudioEngine) {
+    audio.set_loudness_normalization(core.loudness_normalization);
+    audio.set_crossfade_seconds(core.crossfade_seconds);
+}
+
 fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, move_next: bool) {
     if option_count == 0 {
         return;
@@ -405,7 +723,15 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
         ActionPanelState::Root { selected }
         | ActionPanelState::Mode { selected }
         | ActionPanelState::PlaylistPlay { selected }
-        | ActionPanelState::PlaylistAdd { selected } => advance(selected),
+        | ActionPanelState::PlaylistAdd { selected }
+        | ActionPanelState::PlaylistCreate { selected, .. }
+        | ActionPanelState::PlaylistRemove { selected }
+        | ActionPanelState::AudioSettings { selected }
+        | ActionPanelState::AudioOutput { selected }
+        | ActionPanelState::PlaybackSettings { selected }
+        | ActionPanelState::ThemeSettings { selected }
+        | ActionPanelState::AddDirectory { selected, .. }
+        | ActionPanelState::RemoveDirectory { selected } => advance(selected),
         ActionPanelState::Closed => {}
     }
 }
@@ -416,13 +742,52 @@ fn handle_action_panel_input(
     panel: &mut ActionPanelState,
     key: KeyCode,
 ) {
+    if let ActionPanelState::AddDirectory { selected, input } = panel {
+        match key {
+            KeyCode::Char(ch) if *selected == 1 => {
+                input.push(ch);
+                core.dirty = true;
+                return;
+            }
+            KeyCode::Backspace if *selected == 1 && !input.is_empty() => {
+                input.pop();
+                core.dirty = true;
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if let ActionPanelState::PlaylistCreate { selected, input } = panel {
+        match key {
+            KeyCode::Char(ch) if *selected == 0 => {
+                input.push(ch);
+                core.dirty = true;
+                return;
+            }
+            KeyCode::Backspace if *selected == 0 && !input.is_empty() => {
+                input.pop();
+                core.dirty = true;
+                return;
+            }
+            _ => {}
+        }
+    }
+
     let option_count = match panel {
         ActionPanelState::Closed => 0,
-        ActionPanelState::Root { .. } => 9,
+        ActionPanelState::Root { .. } => 15,
         ActionPanelState::Mode { .. } => 4,
-        ActionPanelState::PlaylistPlay { .. } | ActionPanelState::PlaylistAdd { .. } => {
-            sorted_playlist_names(core).len().max(1)
-        }
+        ActionPanelState::PlaylistPlay { .. }
+        | ActionPanelState::PlaylistAdd { .. }
+        | ActionPanelState::PlaylistRemove { .. } => sorted_playlist_names(core).len().max(1),
+        ActionPanelState::PlaylistCreate { .. } => 1,
+        ActionPanelState::AudioSettings { .. } => 3,
+        ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
+        ActionPanelState::PlaybackSettings { .. } => 3,
+        ActionPanelState::ThemeSettings { .. } => 6,
+        ActionPanelState::AddDirectory { .. } => 2,
+        ActionPanelState::RemoveDirectory { .. } => sorted_folder_paths(core).len().max(1),
     };
 
     match key {
@@ -440,36 +805,35 @@ fn handle_action_panel_input(
         }
         KeyCode::Left | KeyCode::Backspace => {
             *panel = match panel {
-                ActionPanelState::Mode { .. }
-                | ActionPanelState::PlaylistPlay { .. }
-                | ActionPanelState::PlaylistAdd { .. } => ActionPanelState::Root { selected: 0 },
+                ActionPanelState::Mode { .. } => ActionPanelState::Root { selected: 2 },
+                ActionPanelState::PlaylistPlay { .. } => ActionPanelState::Root { selected: 4 },
+                ActionPanelState::PlaylistAdd { .. } => ActionPanelState::Root { selected: 1 },
+                ActionPanelState::PlaylistCreate { .. } => ActionPanelState::Root { selected: 6 },
+                ActionPanelState::PlaylistRemove { .. } => ActionPanelState::Root { selected: 7 },
+                ActionPanelState::AudioSettings { .. } => ActionPanelState::Root { selected: 10 },
+                ActionPanelState::PlaybackSettings { .. } => ActionPanelState::Root { selected: 3 },
+                ActionPanelState::AddDirectory { .. } => ActionPanelState::Root { selected: 0 },
+                ActionPanelState::AudioOutput { .. } => {
+                    ActionPanelState::AudioSettings { selected: 0 }
+                }
+                ActionPanelState::ThemeSettings { .. } => ActionPanelState::Root { selected: 11 },
+                ActionPanelState::RemoveDirectory { .. } => ActionPanelState::Root { selected: 8 },
                 ActionPanelState::Root { .. } | ActionPanelState::Closed => {
                     ActionPanelState::Closed
                 }
             };
             core.dirty = true;
         }
-        KeyCode::Enter => match *panel {
+        KeyCode::Enter => match panel.clone() {
             ActionPanelState::Root { selected } => match selected {
                 0 => {
-                    core.reset_main_queue();
-                    panel.close();
-                }
-                1 => {
-                    *panel = ActionPanelState::Mode { selected: 0 };
+                    *panel = ActionPanelState::AddDirectory {
+                        selected: 1,
+                        input: String::new(),
+                    };
                     core.dirty = true;
                 }
-                2 => {
-                    if sorted_playlist_names(core).is_empty() {
-                        core.status = String::from("No playlists available");
-                        core.dirty = true;
-                        panel.close();
-                    } else {
-                        *panel = ActionPanelState::PlaylistPlay { selected: 0 };
-                        core.dirty = true;
-                    }
-                }
-                3 => {
+                1 => {
                     if sorted_playlist_names(core).is_empty() {
                         core.status = String::from("No playlists available");
                         core.dirty = true;
@@ -479,22 +843,72 @@ fn handle_action_panel_input(
                         core.dirty = true;
                     }
                 }
+                2 => {
+                    *panel = ActionPanelState::Mode { selected: 0 };
+                    core.dirty = true;
+                }
+                3 => {
+                    *panel = ActionPanelState::PlaybackSettings { selected: 0 };
+                    core.dirty = true;
+                }
                 4 => {
-                    core.remove_selected_from_current_playlist();
-                    panel.close();
+                    if sorted_playlist_names(core).is_empty() {
+                        core.status = String::from("No playlists available");
+                        core.dirty = true;
+                        panel.close();
+                    } else {
+                        *panel = ActionPanelState::PlaylistPlay { selected: 0 };
+                        core.dirty = true;
+                    }
                 }
                 5 => {
-                    core.rescan();
+                    core.remove_selected_from_current_playlist();
+                    auto_save_state(core, &*audio);
                     panel.close();
                 }
                 6 => {
-                    if let Err(err) = core.save() {
+                    *panel = ActionPanelState::PlaylistCreate {
+                        selected: 0,
+                        input: String::new(),
+                    };
+                    core.dirty = true;
+                }
+                7 => {
+                    *panel = ActionPanelState::PlaylistRemove { selected: 0 };
+                    core.dirty = true;
+                }
+                8 => {
+                    *panel = ActionPanelState::RemoveDirectory { selected: 0 };
+                    core.dirty = true;
+                }
+                9 => {
+                    core.rescan();
+                    panel.close();
+                }
+                10 => {
+                    *panel = ActionPanelState::AudioSettings { selected: 0 };
+                    core.dirty = true;
+                }
+                11 => {
+                    let selected = match core.theme {
+                        Theme::Dark | Theme::Ocean => 0,
+                        Theme::PitchBlack => 1,
+                        Theme::Galaxy => 2,
+                        Theme::Matrix | Theme::Forest => 3,
+                        Theme::Demonic => 4,
+                        Theme::CottonCandy | Theme::Sunset => 5,
+                    };
+                    *panel = ActionPanelState::ThemeSettings { selected };
+                    core.dirty = true;
+                }
+                12 => {
+                    if let Err(err) = save_state_with_audio(core, &*audio) {
                         core.status = format!("save error: {err:#}");
                         core.dirty = true;
                     }
                     panel.close();
                 }
-                7 => {
+                13 => {
                     minimize_to_tray();
                     core.status = String::from("Minimized to tray");
                     core.dirty = true;
@@ -514,6 +928,7 @@ fn handle_action_panel_input(
                 };
                 core.status = String::from("Playback mode updated");
                 core.dirty = true;
+                auto_save_state(core, &*audio);
                 panel.close();
             }
             ActionPanelState::PlaylistPlay { selected } => {
@@ -524,7 +939,7 @@ fn handle_action_panel_input(
                         .next_track_path()
                         .and_then(|path| audio.play(&path).err())
                     {
-                        core.status = format!("playback error: {err:#}");
+                        core.status = concise_audio_error(&err);
                         core.dirty = true;
                     }
                 } else {
@@ -537,8 +952,172 @@ fn handle_action_panel_input(
                 let playlists = sorted_playlist_names(core);
                 if let Some(name) = playlists.get(selected) {
                     core.add_selected_to_playlist(name);
+                    auto_save_state(core, &*audio);
                 } else {
                     core.status = String::from("No playlists available");
+                    core.dirty = true;
+                }
+                panel.close();
+            }
+            ActionPanelState::PlaylistCreate { input, .. } => {
+                let name = input.trim();
+                if name.is_empty() {
+                    core.status = String::from("Enter a playlist name");
+                    core.dirty = true;
+                    return;
+                }
+                core.create_playlist(name);
+                auto_save_state(core, &*audio);
+                panel.close();
+            }
+            ActionPanelState::PlaylistRemove { selected } => {
+                let playlists = sorted_playlist_names(core);
+                if let Some(name) = playlists.get(selected) {
+                    core.remove_playlist(name);
+                    auto_save_state(core, &*audio);
+                } else {
+                    core.status = String::from("No playlists available");
+                    core.dirty = true;
+                }
+                panel.close();
+            }
+            ActionPanelState::AudioSettings { selected } => match selected {
+                0 => {
+                    if let Err(err) = audio.reload_driver() {
+                        core.status =
+                            format!("Audio reset failed: {err}. Use / -> Audio driver settings");
+                    } else {
+                        core.status = format!(
+                            "Audio reset on {}. Reload again if needed",
+                            audio
+                                .output_name()
+                                .unwrap_or_else(|| String::from("unknown output"))
+                        );
+                    }
+                    core.dirty = true;
+                    panel.close();
+                }
+                1 => {
+                    let selected = audio
+                        .selected_output_device()
+                        .and_then(|name| {
+                            audio
+                                .available_outputs()
+                                .iter()
+                                .position(|entry| entry == &name)
+                        })
+                        .map(|index| index.saturating_add(1))
+                        .unwrap_or(0);
+                    *panel = ActionPanelState::AudioOutput { selected };
+                    core.dirty = true;
+                }
+                _ => {
+                    *panel = ActionPanelState::Root { selected: 10 };
+                    core.dirty = true;
+                }
+            },
+            ActionPanelState::AudioOutput { selected } => {
+                let outputs = audio.available_outputs();
+                let result = if selected == 0 {
+                    audio.set_output_device(None)
+                } else {
+                    match outputs.get(selected - 1) {
+                        Some(name) => audio.set_output_device(Some(name.as_str())),
+                        None => Err(anyhow::anyhow!("selected audio output is unavailable")),
+                    }
+                };
+
+                if let Err(err) = result {
+                    core.status = format!("Output switch failed: {err}. Try Reload audio driver");
+                } else {
+                    core.status = format!(
+                        "Output: {}",
+                        audio
+                            .output_name()
+                            .unwrap_or_else(|| String::from("unknown output"))
+                    );
+                    auto_save_state(core, &*audio);
+                }
+                core.dirty = true;
+                panel.close();
+            }
+            ActionPanelState::PlaybackSettings { selected } => match selected {
+                0 => {
+                    core.loudness_normalization = !core.loudness_normalization;
+                    audio.set_loudness_normalization(core.loudness_normalization);
+                    core.status = format!(
+                        "Loudness normalization: {}",
+                        if core.loudness_normalization {
+                            "On"
+                        } else {
+                            "Off"
+                        }
+                    );
+                    core.dirty = true;
+                    auto_save_state(core, &*audio);
+                }
+                1 => {
+                    core.crossfade_seconds = next_crossfade_seconds(core.crossfade_seconds);
+                    audio.set_crossfade_seconds(core.crossfade_seconds);
+                    core.status = format!("Crossfade: {}", crossfade_label(core.crossfade_seconds));
+                    core.dirty = true;
+                    auto_save_state(core, &*audio);
+                }
+                _ => {
+                    *panel = ActionPanelState::Root { selected: 3 };
+                    core.dirty = true;
+                }
+            },
+            ActionPanelState::ThemeSettings { selected } => {
+                core.theme = match selected {
+                    0 => Theme::Dark,
+                    1 => Theme::PitchBlack,
+                    2 => Theme::Galaxy,
+                    3 => Theme::Matrix,
+                    4 => Theme::Demonic,
+                    _ => Theme::CottonCandy,
+                };
+                core.status = format!("Theme: {}", theme_label(core.theme));
+                core.dirty = true;
+                auto_save_state(core, &*audio);
+                panel.close();
+            }
+            ActionPanelState::AddDirectory { selected, input } => {
+                if selected == 1 {
+                    let trimmed = input.trim();
+                    if trimmed.is_empty() {
+                        core.status = String::from("Enter a folder path or choose externally");
+                        core.dirty = true;
+                        return;
+                    }
+                    core.add_folder(Path::new(trimmed));
+                    auto_save_state(core, &*audio);
+                    panel.close();
+                } else {
+                    match choose_folder_externally() {
+                        Ok(Some(path)) => {
+                            core.add_folder(&path);
+                            auto_save_state(core, &*audio);
+                            panel.close();
+                        }
+                        Ok(None) => {
+                            core.status = String::from("Folder selection cancelled");
+                            core.dirty = true;
+                        }
+                        Err(err) => {
+                            core.status = format!("Folder picker failed: {err}");
+                            core.dirty = true;
+                        }
+                    }
+                }
+            }
+            ActionPanelState::RemoveDirectory { selected } => {
+                let folders = sorted_folder_paths(core);
+                if let Some(path) = folders.get(selected) {
+                    core.remove_folder(path);
+                    auto_save_state(core, &*audio);
+                } else {
+                    core.status = String::from("No folders available");
                     core.dirty = true;
                 }
                 panel.close();
@@ -547,6 +1126,39 @@ fn handle_action_panel_input(
         },
         _ => {}
     }
+}
+
+#[cfg(windows)]
+fn choose_folder_externally() -> Result<Option<PathBuf>> {
+    let _ = disable_raw_mode();
+    struct RawModeRestore;
+    impl Drop for RawModeRestore {
+        fn drop(&mut self) {
+            let _ = enable_raw_mode();
+        }
+    }
+    let _restore = RawModeRestore;
+
+    let script = "Add-Type -AssemblyName System.Windows.Forms; $dlg = New-Object System.Windows.Forms.FolderBrowserDialog; $dlg.Description = 'Select music folder'; if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.WriteLine($dlg.SelectedPath) }";
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .output()?;
+
+    if !output.status.success() {
+        return Err(anyhow::anyhow!("powerShell folder picker failed"));
+    }
+
+    let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if selected.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(PathBuf::from(selected)))
+    }
+}
+
+#[cfg(not(windows))]
+fn choose_folder_externally() -> Result<Option<PathBuf>> {
+    Ok(None)
 }
 
 #[cfg(windows)]
@@ -805,19 +1417,53 @@ mod tests {
     struct TestAudioEngine {
         paused: bool,
         current: Option<PathBuf>,
+        queued: Option<PathBuf>,
         finished: bool,
+        position: Option<Duration>,
+        duration: Option<Duration>,
         played: Vec<PathBuf>,
         stopped: bool,
+        outputs: Vec<String>,
+        selected_output: Option<String>,
+        reload_calls: usize,
+        loudness_normalization: bool,
+        crossfade_seconds: u16,
     }
 
     impl TestAudioEngine {
+        fn new() -> Self {
+            Self {
+                paused: false,
+                current: None,
+                queued: None,
+                finished: false,
+                position: None,
+                duration: None,
+                played: Vec::new(),
+                stopped: false,
+                outputs: vec![String::from("Headphones"), String::from("Speakers")],
+                selected_output: None,
+                reload_calls: 0,
+                loudness_normalization: false,
+                crossfade_seconds: 0,
+            }
+        }
+
         fn finished_with_current(path: &str) -> Self {
             Self {
                 paused: false,
                 current: Some(PathBuf::from(path)),
+                queued: None,
                 finished: true,
+                position: None,
+                duration: None,
                 played: Vec::new(),
                 stopped: false,
+                outputs: vec![String::from("Headphones"), String::from("Speakers")],
+                selected_output: None,
+                reload_calls: 0,
+                loudness_normalization: false,
+                crossfade_seconds: 0,
             }
         }
     }
@@ -825,9 +1471,27 @@ mod tests {
     impl AudioEngine for TestAudioEngine {
         fn play(&mut self, path: &Path) -> Result<()> {
             self.current = Some(path.to_path_buf());
+            self.queued = None;
             self.finished = false;
+            self.position = Some(Duration::from_secs(0));
             self.played.push(path.to_path_buf());
             Ok(())
+        }
+
+        fn queue_crossfade(&mut self, path: &Path) -> Result<()> {
+            self.queued = Some(path.to_path_buf());
+            Ok(())
+        }
+
+        fn tick(&mut self) {
+            if self.finished {
+                if let Some(path) = self.queued.take() {
+                    self.current = Some(path.clone());
+                    self.played.push(path);
+                    self.finished = false;
+                    self.position = Some(Duration::from_secs(u64::from(self.crossfade_seconds)));
+                }
+            }
         }
 
         fn pause(&mut self) {
@@ -842,6 +1506,7 @@ mod tests {
             self.stopped = true;
             self.current = None;
             self.finished = false;
+            self.position = None;
         }
 
         fn is_paused(&self) -> bool {
@@ -853,11 +1518,11 @@ mod tests {
         }
 
         fn position(&self) -> Option<Duration> {
-            None
+            self.position
         }
 
         fn duration(&self) -> Option<Duration> {
-            None
+            self.duration
         }
 
         fn volume(&self) -> f32 {
@@ -867,7 +1532,54 @@ mod tests {
         fn set_volume(&mut self, _volume: f32) {}
 
         fn output_name(&self) -> Option<String> {
-            Some(String::from("test"))
+            Some(
+                self.selected_output
+                    .clone()
+                    .unwrap_or_else(|| String::from("System default output (test)")),
+            )
+        }
+
+        fn reload_driver(&mut self) -> Result<()> {
+            self.reload_calls = self.reload_calls.saturating_add(1);
+            Ok(())
+        }
+
+        fn available_outputs(&self) -> Vec<String> {
+            self.outputs.clone()
+        }
+
+        fn selected_output_device(&self) -> Option<String> {
+            self.selected_output.clone()
+        }
+
+        fn set_output_device(&mut self, output: Option<&str>) -> Result<()> {
+            if let Some(name) = output {
+                if !self.outputs.iter().any(|entry| entry == name) {
+                    return Err(anyhow::anyhow!("audio output device not found: {name}"));
+                }
+            }
+            self.selected_output = output.map(ToOwned::to_owned);
+            Ok(())
+        }
+
+        fn loudness_normalization(&self) -> bool {
+            self.loudness_normalization
+        }
+
+        fn set_loudness_normalization(&mut self, enabled: bool) {
+            self.loudness_normalization = enabled;
+        }
+
+        fn crossfade_seconds(&self) -> u16 {
+            self.crossfade_seconds
+        }
+
+        fn set_crossfade_seconds(&mut self, seconds: u16) {
+            self.crossfade_seconds = seconds;
+        }
+
+        fn crossfade_queued_track(&self) -> Option<&Path> {
+            self.queued.as_deref()
         }
 
         fn is_finished(&self) -> bool {
@@ -879,7 +1591,7 @@ mod tests {
     fn action_panel_mode_selection_applies_mode() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 1 };
+        let mut panel = ActionPanelState::Root { selected: 2 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::Mode { .. }));
@@ -895,12 +1607,219 @@ mod tests {
     fn action_panel_playlist_add_requires_playlist() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 3 };
+        let mut panel = ActionPanelState::Root { selected: 1 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
 
         assert_eq!(core.status, "No playlists available");
         assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn action_panel_add_directory_from_typed_path() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let dir = temp.path().join("typed-folder");
+        std::fs::create_dir_all(&dir).expect("create");
+
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Root { selected: 0 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(
+            panel,
+            ActionPanelState::AddDirectory { selected: 1, .. }
+        ));
+
+        for ch in dir.to_string_lossy().chars() {
+            handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Char(ch));
+        }
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert!(core.folders.iter().any(|folder| folder == &dir));
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn action_panel_remove_directory_from_list() {
+        let mut state = PersistedState::default();
+        state.folders.push(PathBuf::from(r"E:\LOCALMUSIC"));
+        let mut core = TuneCore::from_persisted(state);
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Root { selected: 8 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(panel, ActionPanelState::RemoveDirectory { .. }));
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(core.folders.is_empty());
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn action_panel_create_playlist_from_input() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Root { selected: 6 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(
+            panel,
+            ActionPanelState::PlaylistCreate { selected: 0, .. }
+        ));
+
+        for ch in "mix".chars() {
+            handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Char(ch));
+        }
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert!(core.playlists.contains_key("mix"));
+        assert!(core.browser_entries.iter().any(|entry| {
+            entry.kind == crate::core::BrowserEntryKind::Playlist && entry.label == "[PL] mix"
+        }));
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn action_panel_remove_playlist_from_list() {
+        let mut state = PersistedState::default();
+        state
+            .playlists
+            .insert(String::from("mix"), crate::model::Playlist::default());
+        let mut core = TuneCore::from_persisted(state);
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Root { selected: 7 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(panel, ActionPanelState::PlaylistRemove { .. }));
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(!core.playlists.contains_key("mix"));
+        assert_eq!(core.status, "Playlist removed");
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn action_panel_audio_driver_reload_updates_status() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = TestAudioEngine::new();
+        let mut panel = ActionPanelState::Root { selected: 10 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(panel, ActionPanelState::AudioSettings { .. }));
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert_eq!(audio.reload_calls, 1);
+        assert_eq!(
+            core.status,
+            "Audio reset on System default output (test). Reload again if needed"
+        );
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn action_panel_audio_output_selection_sets_device() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = TestAudioEngine::new();
+        let mut panel = ActionPanelState::Root { selected: 10 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(
+            panel,
+            ActionPanelState::AudioOutput { selected: 0 }
+        ));
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert_eq!(
+            audio.selected_output_device(),
+            Some(String::from("Speakers"))
+        );
+        assert_eq!(core.status, "Output: Speakers");
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn playback_settings_toggle_loudness_and_crossfade() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = TestAudioEngine::new();
+        let mut panel = ActionPanelState::Root { selected: 3 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(panel, ActionPanelState::PlaybackSettings { .. }));
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(core.loudness_normalization);
+        assert!(audio.loudness_normalization());
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert_eq!(core.crossfade_seconds, 2);
+        assert_eq!(audio.crossfade_seconds(), 2);
+    }
+
+    #[test]
+    fn theme_settings_updates_core() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = TestAudioEngine::new();
+        let mut panel = ActionPanelState::Root { selected: 11 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(
+            panel,
+            ActionPanelState::ThemeSettings { selected: 0 }
+        ));
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert_eq!(core.theme, Theme::PitchBlack);
+        assert_eq!(core.status, "Theme: Pitch Black");
+    }
+
+    #[test]
+    fn persisted_state_contains_selected_audio_output() {
+        let core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = TestAudioEngine::new();
+        audio
+            .set_output_device(Some("Speakers"))
+            .expect("select output");
+
+        let state = persisted_state_with_audio(&core, &audio);
+        assert_eq!(state.selected_output_device, Some(String::from("Speakers")));
+    }
+
+    #[test]
+    fn persisted_state_contains_playback_settings() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.loudness_normalization = true;
+        core.crossfade_seconds = 4;
+        core.theme = Theme::Galaxy;
+        let audio = TestAudioEngine::new();
+
+        let state = persisted_state_with_audio(&core, &audio);
+        assert!(state.loudness_normalization);
+        assert_eq!(state.crossfade_seconds, 4);
+        assert_eq!(state.theme, Theme::Galaxy);
+    }
+
+    #[test]
+    fn invalid_saved_output_falls_back_to_default_with_actionable_status() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = TestAudioEngine::new();
+
+        apply_saved_audio_output(&mut core, &mut audio, Some(String::from("Missing Device")));
+
+        assert_eq!(audio.selected_output_device(), None);
+        assert!(
+            core.status
+                .contains("Saved output 'Missing Device' unavailable")
+        );
+        assert!(core.status.contains("Audio driver settings"));
     }
 
     #[test]
@@ -928,6 +1847,44 @@ mod tests {
 
         assert_eq!(audio.played, vec![PathBuf::from("b.mp3")]);
         assert_eq!(core.current_queue_index, Some(1));
+    }
+
+    #[test]
+    fn auto_advance_starts_next_track_within_crossfade_window() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("a"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("b.mp3"),
+                title: String::from("b"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.queue = vec![0, 1];
+        core.current_queue_index = Some(0);
+
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("a.mp3"));
+        audio.duration = Some(Duration::from_secs(100));
+        audio.position = Some(Duration::from_secs(95));
+        audio.crossfade_seconds = 6;
+
+        maybe_auto_advance_track(&mut core, &mut audio);
+
+        assert_eq!(audio.played, Vec::<PathBuf>::new());
+        assert_eq!(audio.crossfade_queued_track(), Some(Path::new("b.mp3")));
+        assert_eq!(core.current_queue_index, Some(1));
+
+        audio.finished = true;
+        audio.tick();
+        assert_eq!(audio.played, vec![PathBuf::from("b.mp3")]);
+        assert_eq!(audio.position, Some(Duration::from_secs(6)));
     }
 
     #[test]
