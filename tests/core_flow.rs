@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use tune::core::TuneCore;
+use tune::core::{BrowserEntry, BrowserEntryKind};
 use tune::model::{PersistedState, PlaybackMode, Track};
 
 #[test]
@@ -20,10 +21,23 @@ fn playlist_flow_works() {
         },
     ];
     core.reset_main_queue();
+    core.browser_entries = vec![
+        BrowserEntry {
+            kind: BrowserEntryKind::Track,
+            path: PathBuf::from("a.mp3"),
+            label: String::from("a"),
+        },
+        BrowserEntry {
+            kind: BrowserEntryKind::Track,
+            path: PathBuf::from("b.mp3"),
+            label: String::from("b"),
+        },
+    ];
+    core.selected_browser = 0;
 
     core.create_playlist("mix");
     core.add_selected_to_playlist("mix");
-    core.select_next();
+    core.selected_browser = 1;
     core.add_selected_to_playlist("mix");
     core.load_playlist_queue("mix");
 

@@ -1,6 +1,7 @@
 use crate::audio::{AudioEngine, NullAudioEngine, WasapiAudioEngine};
 use crate::config;
 use crate::core::TuneCore;
+use crate::model::PlaybackMode;
 use anyhow::Result;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
@@ -13,14 +14,110 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io::stdout;
-use std::path::PathBuf;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+#[cfg(windows)]
+const APP_INSTANCE_MUTEX: &str = "TuneTui.SingleInstance";
+#[cfg(windows)]
+const APP_CONSOLE_TITLE: &str = "TuneTUI";
+const MAX_VOLUME: f32 = 2.5;
+const VOLUME_STEP_COARSE: f32 = 0.05;
+const VOLUME_STEP_FINE: f32 = 0.01;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActionPanelState {
+    Closed,
+    Root { selected: usize },
+    Mode { selected: usize },
+    PlaylistPlay { selected: usize },
+    PlaylistAdd { selected: usize },
+}
+
+impl ActionPanelState {
+    fn open(&mut self) {
+        *self = Self::Root { selected: 0 };
+    }
+
+    fn close(&mut self) {
+        *self = Self::Closed;
+    }
+
+    fn is_open(&self) -> bool {
+        !matches!(self, Self::Closed)
+    }
+
+    fn to_view(self, core: &TuneCore) -> Option<crate::ui::ActionPanelView> {
+        match self {
+            Self::Closed => None,
+            Self::Root { selected } => Some(crate::ui::ActionPanelView {
+                title: String::from("Actions"),
+                hint: String::from("Enter select  Esc close  Up/Down navigate"),
+                options: vec![
+                    String::from("Load main library queue"),
+                    String::from("Set playback mode"),
+                    String::from("Play playlist"),
+                    String::from("Add selected item to playlist"),
+                    String::from("Remove selected from playlist"),
+                    String::from("Rescan library"),
+                    String::from("Save state"),
+                    String::from("Minimize to tray"),
+                    String::from("Close panel"),
+                ],
+                selected,
+            }),
+            Self::Mode { selected } => Some(crate::ui::ActionPanelView {
+                title: String::from("Playback Mode"),
+                hint: String::from("Enter apply  Backspace back"),
+                options: vec![
+                    String::from("Normal"),
+                    String::from("Shuffle"),
+                    String::from("Loop playlist"),
+                    String::from("Loop single track"),
+                ],
+                selected,
+            }),
+            Self::PlaylistPlay { selected } => {
+                let playlists = sorted_playlist_names(core);
+                Some(crate::ui::ActionPanelView {
+                    title: String::from("Play Playlist"),
+                    hint: String::from("Enter play  Backspace back"),
+                    options: if playlists.is_empty() {
+                        vec![String::from("(no playlists)")]
+                    } else {
+                        playlists
+                    },
+                    selected,
+                })
+            }
+            Self::PlaylistAdd { selected } => {
+                let playlists = sorted_playlist_names(core);
+                Some(crate::ui::ActionPanelView {
+                    title: String::from("Add To Playlist"),
+                    hint: String::from("Enter add  Backspace back"),
+                    options: if playlists.is_empty() {
+                        vec![String::from("(no playlists)")]
+                    } else {
+                        playlists
+                    },
+                    selected,
+                })
+            }
+        }
+    }
+}
+
 pub fn run() -> Result<()> {
+    #[cfg(windows)]
+    let _single_instance = match ensure_single_instance() {
+        Ok(Some(guard)) => guard,
+        Ok(None) => return Ok(()),
+        Err(err) => return Err(err),
+    };
+
     let state = config::load_state()?;
     let mut core = TuneCore::from_persisted(state);
 
@@ -36,8 +133,7 @@ pub fn run() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let mut command_mode = false;
-    let mut command_buffer = String::new();
+    let mut action_panel = ActionPanelState::Closed;
     let mut last_tick = Instant::now();
     let mut library_rect = ratatui::prelude::Rect::default();
 
@@ -48,7 +144,8 @@ pub fn run() -> Result<()> {
         if core.dirty || last_tick.elapsed() > Duration::from_millis(250) {
             terminal.draw(|frame| {
                 library_rect = crate::ui::library_rect(frame.area());
-                crate::ui::draw(frame, &core, &*audio, &command_buffer, command_mode)
+                let panel_view = action_panel.to_view(&core);
+                crate::ui::draw(frame, &core, &*audio, panel_view.as_ref())
             })?;
             core.dirty = false;
             last_tick = Instant::now();
@@ -72,28 +169,8 @@ pub fn run() -> Result<()> {
             continue;
         }
 
-        if command_mode {
-            match key.code {
-                KeyCode::Esc => {
-                    command_mode = false;
-                    command_buffer.clear();
-                    core.dirty = true;
-                }
-                KeyCode::Enter => {
-                    run_command(&mut core, &mut *audio, &command_buffer);
-                    command_mode = false;
-                    command_buffer.clear();
-                }
-                KeyCode::Backspace => {
-                    command_buffer.pop();
-                    core.dirty = true;
-                }
-                KeyCode::Char(ch) => {
-                    command_buffer.push(ch);
-                    core.dirty = true;
-                }
-                _ => {}
-            }
+        if action_panel.is_open() {
+            handle_action_panel_input(&mut core, &mut *audio, &mut action_panel, key.code);
             continue;
         }
 
@@ -129,6 +206,15 @@ pub fn run() -> Result<()> {
                     core.dirty = true;
                 }
             }
+            KeyCode::Char('b') => {
+                if let Some(err) = core
+                    .prev_track_path()
+                    .and_then(|path| audio.play(&path).err())
+                {
+                    core.status = format!("playback error: {err:#}");
+                    core.dirty = true;
+                }
+            }
             KeyCode::Char('m') => core.cycle_mode(),
             KeyCode::Char('t') => {
                 minimize_to_tray();
@@ -136,13 +222,27 @@ pub fn run() -> Result<()> {
                 core.dirty = true;
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
-                let next = (audio.volume() + 0.05).clamp(0.0, 2.0);
+                let step = if key.code == KeyCode::Char('+')
+                    || key.modifiers.contains(KeyModifiers::SHIFT)
+                {
+                    VOLUME_STEP_FINE
+                } else {
+                    VOLUME_STEP_COARSE
+                };
+                let next = (audio.volume() + step).clamp(0.0, MAX_VOLUME);
                 audio.set_volume(next);
                 core.status = format!("Volume: {}%", (next * 100.0).round() as u16);
                 core.dirty = true;
             }
-            KeyCode::Char('-') => {
-                let next = (audio.volume() - 0.05).clamp(0.0, 2.0);
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                let step = if key.code == KeyCode::Char('_')
+                    || key.modifiers.contains(KeyModifiers::SHIFT)
+                {
+                    VOLUME_STEP_FINE
+                } else {
+                    VOLUME_STEP_COARSE
+                };
+                let next = (audio.volume() - step).clamp(0.0, MAX_VOLUME);
                 audio.set_volume(next);
                 core.status = format!("Volume: {}%", (next * 100.0).round() as u16);
                 core.dirty = true;
@@ -154,8 +254,8 @@ pub fn run() -> Result<()> {
                     core.dirty = true;
                 }
             }
-            KeyCode::Char(':') => {
-                command_mode = true;
+            KeyCode::Char('/') => {
+                action_panel.open();
                 core.dirty = true;
             }
             _ => {}
@@ -174,6 +274,72 @@ pub fn run() -> Result<()> {
     result?;
     save_result?;
     Ok(())
+}
+
+#[cfg(windows)]
+struct SingleInstanceGuard(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl Drop for SingleInstanceGuard {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn ensure_single_instance() -> anyhow::Result<Option<SingleInstanceGuard>> {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+
+    let mutex_name = to_wide(APP_INSTANCE_MUTEX);
+    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 1, mutex_name.as_ptr()) };
+    if handle.is_null() {
+        return Err(anyhow::anyhow!(
+            "Failed to initialize single-instance mutex"
+        ));
+    }
+
+    let already_exists = unsafe { GetLastError() == ERROR_ALREADY_EXISTS };
+    if already_exists {
+        focus_existing_instance();
+        unsafe {
+            windows_sys::Win32::Foundation::CloseHandle(handle);
+        }
+        return Ok(None);
+    }
+
+    set_console_title(APP_CONSOLE_TITLE);
+    Ok(Some(SingleInstanceGuard(handle)))
+}
+
+#[cfg(windows)]
+fn set_console_title(title: &str) {
+    use windows_sys::Win32::System::Console::SetConsoleTitleW;
+
+    let title_wide = to_wide(title);
+    unsafe {
+        SetConsoleTitleW(title_wide.as_ptr());
+    }
+}
+
+#[cfg(windows)]
+fn focus_existing_instance() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    };
+
+    let class_name = to_wide("ConsoleWindowClass");
+    let title = to_wide(APP_CONSOLE_TITLE);
+    let hwnd = unsafe { FindWindowW(class_name.as_ptr(), title.as_ptr()) };
+    if !hwnd.is_null() {
+        unsafe {
+            ShowWindow(hwnd, SW_SHOW);
+            ShowWindow(hwnd, SW_RESTORE);
+            SetForegroundWindow(hwnd);
+        }
+    }
 }
 
 fn maybe_auto_advance_track(core: &mut TuneCore, audio: &mut dyn AudioEngine) {
@@ -212,48 +378,147 @@ fn point_in_rect(x: u16, y: u16, rect: ratatui::prelude::Rect) -> bool {
         && y < rect.y.saturating_add(rect.height)
 }
 
-fn run_command(core: &mut TuneCore, audio: &mut dyn AudioEngine, raw: &str) {
-    let input = raw.trim();
-    if input.is_empty() {
-        core.status = String::from("No command");
-        core.dirty = true;
+fn sorted_playlist_names(core: &TuneCore) -> Vec<String> {
+    let mut names: Vec<String> = core.playlists.keys().cloned().collect();
+    names.sort_by_cached_key(|name| name.to_ascii_lowercase());
+    names
+}
+
+fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, move_next: bool) {
+    if option_count == 0 {
         return;
     }
 
-    let mut command_split = input.splitn(2, char::is_whitespace);
-    let command = command_split.next().unwrap_or_default();
-    let rest = command_split.next().unwrap_or("").trim();
+    let advance = |selected: &mut usize| {
+        if move_next {
+            *selected = (*selected + 1) % option_count;
+        } else {
+            *selected = if *selected == 0 {
+                option_count - 1
+            } else {
+                *selected - 1
+            };
+        }
+    };
 
-    match command {
-        "help" => {
-            core.status = String::from(
-                "Commands: add <path> | playlist new <name> | playlist add <name> | playlist play <name> | library | mode <normal|shuffle|loop|single> | minimize | save",
-            );
+    match panel {
+        ActionPanelState::Root { selected }
+        | ActionPanelState::Mode { selected }
+        | ActionPanelState::PlaylistPlay { selected }
+        | ActionPanelState::PlaylistAdd { selected } => advance(selected),
+        ActionPanelState::Closed => {}
+    }
+}
+
+fn handle_action_panel_input(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    panel: &mut ActionPanelState,
+    key: KeyCode,
+) {
+    let option_count = match panel {
+        ActionPanelState::Closed => 0,
+        ActionPanelState::Root { .. } => 9,
+        ActionPanelState::Mode { .. } => 4,
+        ActionPanelState::PlaylistPlay { .. } | ActionPanelState::PlaylistAdd { .. } => {
+            sorted_playlist_names(core).len().max(1)
+        }
+    };
+
+    match key {
+        KeyCode::Esc => {
+            panel.close();
             core.dirty = true;
         }
-        "add" => {
-            if rest.is_empty() {
-                core.status = String::from("Usage: add <path>");
-                core.dirty = true;
-            } else {
-                core.add_folder(&PathBuf::from(rest));
-            }
+        KeyCode::Up => {
+            update_panel_selection(panel, option_count, false);
+            core.dirty = true;
         }
-        "playlist" => {
-            let mut playlist_split = rest.splitn(2, char::is_whitespace);
-            let action = playlist_split.next().unwrap_or_default();
-            let name = playlist_split.next().unwrap_or("").trim();
-
-            if action.is_empty() || name.is_empty() {
-                core.status = String::from("Usage: playlist <new|add|play> <name>");
+        KeyCode::Down => {
+            update_panel_selection(panel, option_count, true);
+            core.dirty = true;
+        }
+        KeyCode::Left | KeyCode::Backspace => {
+            *panel = match panel {
+                ActionPanelState::Mode { .. }
+                | ActionPanelState::PlaylistPlay { .. }
+                | ActionPanelState::PlaylistAdd { .. } => ActionPanelState::Root { selected: 0 },
+                ActionPanelState::Root { .. } | ActionPanelState::Closed => {
+                    ActionPanelState::Closed
+                }
+            };
+            core.dirty = true;
+        }
+        KeyCode::Enter => match *panel {
+            ActionPanelState::Root { selected } => match selected {
+                0 => {
+                    core.reset_main_queue();
+                    panel.close();
+                }
+                1 => {
+                    *panel = ActionPanelState::Mode { selected: 0 };
+                    core.dirty = true;
+                }
+                2 => {
+                    if sorted_playlist_names(core).is_empty() {
+                        core.status = String::from("No playlists available");
+                        core.dirty = true;
+                        panel.close();
+                    } else {
+                        *panel = ActionPanelState::PlaylistPlay { selected: 0 };
+                        core.dirty = true;
+                    }
+                }
+                3 => {
+                    if sorted_playlist_names(core).is_empty() {
+                        core.status = String::from("No playlists available");
+                        core.dirty = true;
+                        panel.close();
+                    } else {
+                        *panel = ActionPanelState::PlaylistAdd { selected: 0 };
+                        core.dirty = true;
+                    }
+                }
+                4 => {
+                    core.remove_selected_from_current_playlist();
+                    panel.close();
+                }
+                5 => {
+                    core.rescan();
+                    panel.close();
+                }
+                6 => {
+                    if let Err(err) = core.save() {
+                        core.status = format!("save error: {err:#}");
+                        core.dirty = true;
+                    }
+                    panel.close();
+                }
+                7 => {
+                    minimize_to_tray();
+                    core.status = String::from("Minimized to tray");
+                    core.dirty = true;
+                    panel.close();
+                }
+                _ => {
+                    panel.close();
+                    core.dirty = true;
+                }
+            },
+            ActionPanelState::Mode { selected } => {
+                core.playback_mode = match selected {
+                    0 => PlaybackMode::Normal,
+                    1 => PlaybackMode::Shuffle,
+                    2 => PlaybackMode::Loop,
+                    _ => PlaybackMode::LoopOne,
+                };
+                core.status = String::from("Playback mode updated");
                 core.dirty = true;
-                return;
+                panel.close();
             }
-
-            match action {
-                "new" => core.create_playlist(name),
-                "add" => core.add_selected_to_playlist(name),
-                "play" => {
+            ActionPanelState::PlaylistPlay { selected } => {
+                let playlists = sorted_playlist_names(core);
+                if let Some(name) = playlists.get(selected) {
                     core.load_playlist_queue(name);
                     if let Some(err) = core
                         .next_track_path()
@@ -262,49 +527,25 @@ fn run_command(core: &mut TuneCore, audio: &mut dyn AudioEngine, raw: &str) {
                         core.status = format!("playback error: {err:#}");
                         core.dirty = true;
                     }
-                }
-                _ => {
-                    core.status = String::from("Usage: playlist <new|add|play> <name>");
+                } else {
+                    core.status = String::from("No playlists available");
                     core.dirty = true;
                 }
+                panel.close();
             }
-        }
-        "library" => core.reset_main_queue(),
-        "minimize" => {
-            minimize_to_tray();
-            core.status = String::from("Minimized to tray");
-            core.dirty = true;
-        }
-        "mode" => {
-            if rest.is_empty() {
-                core.status = String::from("Usage: mode <normal|shuffle|loop|single>");
-                core.dirty = true;
-                return;
-            }
-            core.playback_mode = match rest {
-                "normal" => crate::model::PlaybackMode::Normal,
-                "shuffle" => crate::model::PlaybackMode::Shuffle,
-                "loop" => crate::model::PlaybackMode::Loop,
-                "single" => crate::model::PlaybackMode::LoopOne,
-                _ => {
-                    core.status = String::from("Unknown mode");
+            ActionPanelState::PlaylistAdd { selected } => {
+                let playlists = sorted_playlist_names(core);
+                if let Some(name) = playlists.get(selected) {
+                    core.add_selected_to_playlist(name);
+                } else {
+                    core.status = String::from("No playlists available");
                     core.dirty = true;
-                    return;
                 }
-            };
-            core.status = format!("Playback mode: {:?}", core.playback_mode);
-            core.dirty = true;
-        }
-        "save" => {
-            if let Err(err) = core.save() {
-                core.status = format!("save error: {err:#}");
-                core.dirty = true;
+                panel.close();
             }
-        }
-        _ => {
-            core.status = String::from("Unknown command. Use :help");
-            core.dirty = true;
-        }
+            ActionPanelState::Closed => {}
+        },
+        _ => {}
     }
 }
 
@@ -635,25 +876,31 @@ mod tests {
     }
 
     #[test]
-    fn unknown_command_is_reported() {
+    fn action_panel_mode_selection_applies_mode() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        run_command(&mut core, &mut audio, "wat");
-        assert!(core.status.contains("Unknown command"));
+        let mut panel = ActionPanelState::Root { selected: 1 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(panel, ActionPanelState::Mode { .. }));
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert_eq!(core.playback_mode, crate::model::PlaybackMode::Shuffle);
+        assert!(matches!(panel, ActionPanelState::Closed));
     }
 
     #[test]
-    fn add_command_accepts_paths_with_spaces() {
+    fn action_panel_playlist_add_requires_playlist() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Root { selected: 3 };
 
-        run_command(&mut core, &mut audio, "add C:\\Music Folder");
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
 
-        assert!(core.folders.iter().any(|path| {
-            path.to_string_lossy()
-                .to_ascii_lowercase()
-                .contains("music folder")
-        }));
+        assert_eq!(core.status, "No playlists available");
+        assert!(matches!(panel, ActionPanelState::Closed));
     }
 
     #[test]

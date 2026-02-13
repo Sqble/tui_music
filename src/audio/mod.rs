@@ -4,6 +4,8 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+const MAX_VOLUME: f32 = 2.5;
+
 pub trait AudioEngine {
     fn play(&mut self, path: &Path) -> Result<()>;
     fn pause(&mut self);
@@ -95,7 +97,7 @@ impl AudioEngine for WasapiAudioEngine {
     }
 
     fn set_volume(&mut self, volume: f32) {
-        self.volume = volume.clamp(0.0, 2.0);
+        self.volume = volume.clamp(0.0, MAX_VOLUME);
         self.sink.set_volume(self.volume);
     }
 
@@ -171,7 +173,7 @@ impl AudioEngine for NullAudioEngine {
     }
 
     fn set_volume(&mut self, volume: f32) {
-        self.volume = volume.clamp(0.0, 2.0);
+        self.volume = volume.clamp(0.0, MAX_VOLUME);
     }
 
     fn output_name(&self) -> Option<String> {

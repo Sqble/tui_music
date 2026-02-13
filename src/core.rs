@@ -14,6 +14,7 @@ pub enum BrowserEntryKind {
     Back,
     Folder,
     Playlist,
+    AllSongs,
     Track,
 }
 
@@ -36,6 +37,7 @@ pub struct TuneCore {
     pub playback_mode: PlaybackMode,
     pub browser_path: Option<PathBuf>,
     pub browser_playlist: Option<String>,
+    pub browser_all_songs: bool,
     pub browser_entries: Vec<BrowserEntry>,
     pub selected_browser: usize,
     pub dirty: bool,
@@ -60,6 +62,7 @@ impl TuneCore {
             playback_mode: state.playback_mode,
             browser_path: None,
             browser_playlist: None,
+            browser_all_songs: false,
             browser_entries: Vec::new(),
             selected_browser: 0,
             dirty: true,
@@ -123,18 +126,50 @@ impl TuneCore {
     }
 
     pub fn add_selected_to_playlist(&mut self, name: &str) {
-        let selected_path = self
-            .selected_browser_track_path()
-            .or_else(|| self.tracks.get(self.selected_track).map(|t| t.path.clone()));
+        let paths = self.selected_paths_for_playlist_action();
+        if paths.is_empty() {
+            self.set_status("Nothing selectable to add");
+            return;
+        }
 
-        let Some(track_path) = selected_path else {
-            self.set_status("No track selected");
+        let playlist = self.playlists.entry(name.to_string()).or_default();
+        let added = paths.len();
+        playlist.tracks.extend(paths);
+        self.set_status(&format!("Added {added} track(s) to playlist"));
+    }
+
+    pub fn remove_selected_from_current_playlist(&mut self) {
+        let Some(name) = self.browser_playlist.clone() else {
+            self.set_status("Open a playlist to remove tracks");
             return;
         };
 
-        let playlist = self.playlists.entry(name.to_string()).or_default();
-        playlist.tracks.push(track_path);
-        self.set_status("Track added to playlist");
+        let Some(entry) = self.browser_entries.get(self.selected_browser).cloned() else {
+            self.set_status("No selection");
+            return;
+        };
+
+        if entry.kind != BrowserEntryKind::Track {
+            self.set_status("Select a playlist track to remove");
+            return;
+        }
+
+        let Some(playlist) = self.playlists.get_mut(&name) else {
+            self.set_status("Playlist not found");
+            return;
+        };
+
+        if let Some(pos) = playlist
+            .tracks
+            .iter()
+            .position(|path| path_eq(path, &entry.path))
+        {
+            playlist.tracks.remove(pos);
+            self.refresh_browser_entries();
+            self.set_status("Removed track from playlist");
+        } else {
+            self.set_status("Track not found in playlist");
+        }
     }
 
     pub fn load_playlist_queue(&mut self, name: &str) {
@@ -186,6 +221,7 @@ impl TuneCore {
             }
             BrowserEntryKind::Folder => {
                 self.browser_playlist = None;
+                self.browser_all_songs = false;
                 self.browser_path = Some(entry.path);
                 self.selected_browser = 0;
                 self.refresh_browser_entries();
@@ -194,10 +230,20 @@ impl TuneCore {
             }
             BrowserEntryKind::Playlist => {
                 self.browser_path = None;
+                self.browser_all_songs = false;
                 self.browser_playlist = Some(entry.path.to_string_lossy().to_string());
                 self.selected_browser = 0;
                 self.refresh_browser_entries();
                 self.set_status("Opened playlist");
+                None
+            }
+            BrowserEntryKind::AllSongs => {
+                self.browser_path = None;
+                self.browser_playlist = None;
+                self.browser_all_songs = true;
+                self.selected_browser = 0;
+                self.refresh_browser_entries();
+                self.set_status("Opened all songs");
                 None
             }
             BrowserEntryKind::Track => {
@@ -211,22 +257,81 @@ impl TuneCore {
                     } else {
                         self.queue.clear();
                     }
+                } else if self.browser_all_songs {
+                    self.queue = self.metadata_sorted_library_queue();
+                } else if self.browser_path.is_some() {
+                    let tracks = self.browser_track_paths();
+                    self.queue = self.queue_from_paths(&tracks);
                 } else {
                     self.queue = self.metadata_sorted_library_queue();
                 }
                 self.rebuild_shuffle_order();
-                self.current_queue_index = self
-                    .queue
-                    .iter()
-                    .position(|track_idx| path_eq(&self.tracks[*track_idx].path, &entry.path));
+                self.current_queue_index = if self.browser_playlist.is_some()
+                    || self.browser_all_songs
+                    || self.browser_path.is_some()
+                {
+                    self.selected_track_position_in_browser()
+                } else {
+                    self.queue
+                        .iter()
+                        .position(|track_idx| path_eq(&self.tracks[*track_idx].path, &entry.path))
+                };
                 self.set_status("Playing selected track");
                 Some(entry.path)
             }
         }
     }
 
+    pub fn is_browser_entry_playing(&self, browser_index: usize) -> bool {
+        let Some(current_queue_index) = self.current_queue_index else {
+            return false;
+        };
+        let Some(current_track_index) = self.queue.get(current_queue_index).copied() else {
+            return false;
+        };
+        let Some(entry) = self.browser_entries.get(browser_index) else {
+            return false;
+        };
+        if entry.kind != BrowserEntryKind::Track {
+            return false;
+        }
+
+        let Some(entry_track_index) = self.track_index(&entry.path) else {
+            return false;
+        };
+        if entry_track_index != current_track_index {
+            return false;
+        }
+
+        let queue_occurrence = self.queue[..=current_queue_index]
+            .iter()
+            .filter(|track_idx| **track_idx == current_track_index)
+            .count();
+
+        let entry_occurrence = self.browser_entries[..=browser_index]
+            .iter()
+            .filter(|browser_entry| {
+                browser_entry.kind == BrowserEntryKind::Track
+                    && self
+                        .track_index(&browser_entry.path)
+                        .map(|idx| idx == current_track_index)
+                        .unwrap_or(false)
+            })
+            .count();
+
+        queue_occurrence == entry_occurrence
+    }
+
     pub fn navigate_back(&mut self) {
         if self.browser_playlist.take().is_some() {
+            self.selected_browser = 0;
+            self.refresh_browser_entries();
+            self.set_status("Went back");
+            return;
+        }
+
+        if self.browser_all_songs {
+            self.browser_all_songs = false;
             self.selected_browser = 0;
             self.refresh_browser_entries();
             self.set_status("Went back");
@@ -260,7 +365,7 @@ impl TuneCore {
 
     pub fn cycle_mode(&mut self) {
         self.playback_mode = self.playback_mode.next();
-        self.set_status(&format!("Playback mode: {:?}", self.playback_mode));
+        self.set_status("Playback mode updated");
     }
 
     pub fn current_path(&self) -> Option<&Path> {
@@ -318,6 +423,34 @@ impl TuneCore {
             .map(|track| track.path.clone())
     }
 
+    pub fn prev_track_path(&mut self) -> Option<PathBuf> {
+        if self.queue.is_empty() {
+            self.set_status("Queue is empty");
+            return None;
+        }
+
+        let idx = match self.current_queue_index {
+            Some(current) => self.prev_index(current),
+            None => {
+                if self.playback_mode == PlaybackMode::Shuffle {
+                    if self.shuffle_order.len() != self.queue.len() {
+                        self.rebuild_shuffle_order();
+                    }
+                    self.shuffle_order.last().copied()
+                } else {
+                    self.queue.len().checked_sub(1)
+                }
+            }
+        }?;
+
+        self.current_queue_index = Some(idx);
+        self.dirty = true;
+        self.queue
+            .get(idx)
+            .and_then(|track_idx| self.tracks.get(*track_idx))
+            .map(|track| track.path.clone())
+    }
+
     fn next_index(&mut self, current: usize) -> Option<usize> {
         match self.playback_mode {
             PlaybackMode::LoopOne => Some(current),
@@ -351,6 +484,42 @@ impl TuneCore {
         }
     }
 
+    fn prev_index(&mut self, current: usize) -> Option<usize> {
+        match self.playback_mode {
+            PlaybackMode::LoopOne => Some(current),
+            PlaybackMode::Normal => current.checked_sub(1),
+            PlaybackMode::Loop => {
+                if self.queue.is_empty() {
+                    None
+                } else if current == 0 {
+                    Some(self.queue.len() - 1)
+                } else {
+                    Some(current - 1)
+                }
+            }
+            PlaybackMode::Shuffle => {
+                if self.shuffle_order.len() != self.queue.len() {
+                    self.rebuild_shuffle_order();
+                }
+
+                if self.shuffle_order.is_empty() {
+                    return None;
+                }
+
+                if let Some(pos) = self.shuffle_order.iter().position(|idx| *idx == current) {
+                    self.shuffle_cursor = pos;
+                }
+
+                self.shuffle_cursor = if self.shuffle_cursor == 0 {
+                    self.shuffle_order.len() - 1
+                } else {
+                    self.shuffle_cursor - 1
+                };
+                self.shuffle_order.get(self.shuffle_cursor).copied()
+            }
+        }
+    }
+
     fn rebuild_main_queue(&mut self) {
         self.track_lookup = build_track_lookup(&self.tracks);
         self.queue = self.metadata_sorted_library_queue();
@@ -364,11 +533,58 @@ impl TuneCore {
         queue
     }
 
-    fn selected_browser_track_path(&self) -> Option<PathBuf> {
+    fn selected_paths_for_playlist_action(&self) -> Vec<PathBuf> {
+        let Some(entry) = self.browser_entries.get(self.selected_browser) else {
+            return self
+                .tracks
+                .get(self.selected_track)
+                .map(|track| vec![track.path.clone()])
+                .unwrap_or_default();
+        };
+
+        match entry.kind {
+            BrowserEntryKind::Track => vec![entry.path.clone()],
+            BrowserEntryKind::Folder => self
+                .tracks
+                .iter()
+                .filter(|track| path_is_within(&track.path, &entry.path))
+                .map(|track| track.path.clone())
+                .collect(),
+            BrowserEntryKind::Playlist => self
+                .playlists
+                .get(entry.path.to_string_lossy().as_ref())
+                .map(|playlist| playlist.tracks.clone())
+                .unwrap_or_default(),
+            BrowserEntryKind::AllSongs => self
+                .metadata_sorted_library_queue()
+                .into_iter()
+                .filter_map(|idx| self.tracks.get(idx).map(|track| track.path.clone()))
+                .collect(),
+            BrowserEntryKind::Back => Vec::new(),
+        }
+    }
+
+    fn selected_track_position_in_browser(&self) -> Option<usize> {
+        let entry = self.browser_entries.get(self.selected_browser)?;
+        if entry.kind != BrowserEntryKind::Track {
+            return None;
+        }
+
+        Some(
+            self.browser_entries[..=self.selected_browser]
+                .iter()
+                .filter(|browser_entry| browser_entry.kind == BrowserEntryKind::Track)
+                .count()
+                .saturating_sub(1),
+        )
+    }
+
+    fn browser_track_paths(&self) -> Vec<PathBuf> {
         self.browser_entries
-            .get(self.selected_browser)
+            .iter()
             .filter(|entry| entry.kind == BrowserEntryKind::Track)
             .map(|entry| entry.path.clone())
+            .collect()
     }
 
     fn refresh_browser_entries(&mut self) {
@@ -388,6 +604,23 @@ impl TuneCore {
                         kind: BrowserEntryKind::Track,
                         label: self.track_label_from_path(&cleaned),
                         path: cleaned,
+                    });
+                }
+            }
+        } else if self.browser_all_songs {
+            entries.push(BrowserEntry {
+                kind: BrowserEntryKind::Back,
+                path: PathBuf::new(),
+                label: String::from("[..] Back"),
+            });
+
+            let queue = self.metadata_sorted_library_queue();
+            for idx in queue {
+                if let Some(track) = self.tracks.get(idx) {
+                    entries.push(BrowserEntry {
+                        kind: BrowserEntryKind::Track,
+                        label: track.title.clone(),
+                        path: track.path.clone(),
                     });
                 }
             }
@@ -440,6 +673,12 @@ impl TuneCore {
                     label: format!("[DIR] {label}"),
                 });
             }
+
+            entries.push(BrowserEntry {
+                kind: BrowserEntryKind::AllSongs,
+                path: PathBuf::new(),
+                label: String::from("[ALL] All Songs"),
+            });
 
             for name in self.playlists.keys() {
                 entries.push(BrowserEntry {
@@ -629,8 +868,21 @@ mod tests {
         let mut state = PersistedState::default();
         state.folders.push(PathBuf::from(r"E:\LOCALMUSIC"));
         let core = TuneCore::from_persisted(state);
-        assert!(!core.browser_entries.is_empty());
-        assert_eq!(core.browser_entries[0].kind, BrowserEntryKind::Folder);
+        assert!(
+            core.browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::Folder)
+        );
+    }
+
+    #[test]
+    fn root_browser_includes_all_songs_entry() {
+        let core = TuneCore::from_persisted(PersistedState::default());
+        assert!(
+            core.browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::AllSongs)
+        );
     }
 
     #[test]
@@ -660,6 +912,12 @@ mod tests {
             },
         );
         let mut core = TuneCore::from_persisted(state);
+
+        core.selected_browser = core
+            .browser_entries
+            .iter()
+            .position(|entry| entry.kind == BrowserEntryKind::Playlist)
+            .expect("playlist entry");
 
         core.activate_selected();
         assert_eq!(core.browser_playlist.as_deref(), Some("mix"));
@@ -848,6 +1106,220 @@ mod tests {
 
         assert_eq!(selected, PathBuf::from("b.mp3"));
         assert_eq!(core.queue, vec![1, 0]);
+        assert_eq!(core.current_queue_index, Some(0));
+    }
+
+    #[test]
+    fn activating_folder_track_uses_folder_local_queue() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from(r"music\folder\a.mp3"),
+                title: String::from("a"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from(r"music\folder\b.mp3"),
+                title: String::from("b"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from(r"music\other\c.mp3"),
+                title: String::from("c"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.browser_path = Some(PathBuf::from(r"music\folder"));
+        core.browser_entries = vec![
+            BrowserEntry {
+                kind: BrowserEntryKind::Back,
+                path: PathBuf::from(r"music\folder"),
+                label: String::from("[..] Back"),
+            },
+            BrowserEntry {
+                kind: BrowserEntryKind::Track,
+                path: PathBuf::from(r"music\folder\a.mp3"),
+                label: String::from("a"),
+            },
+            BrowserEntry {
+                kind: BrowserEntryKind::Track,
+                path: PathBuf::from(r"music\folder\b.mp3"),
+                label: String::from("b"),
+            },
+        ];
+        core.selected_browser = 2;
+
+        let selected = core.activate_selected().expect("track selected");
+
+        assert_eq!(selected, PathBuf::from(r"music\folder\b.mp3"));
+        assert_eq!(core.queue, vec![0, 1]);
+        assert_eq!(core.current_queue_index, Some(1));
+    }
+
+    #[test]
+    fn adding_folder_selection_to_playlist_adds_all_folder_tracks() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from(r"music\folder\a.mp3"),
+                title: String::from("a"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from(r"music\folder\sub\b.mp3"),
+                title: String::from("b"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from(r"music\other\c.mp3"),
+                title: String::from("c"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.browser_entries = vec![BrowserEntry {
+            kind: BrowserEntryKind::Folder,
+            path: PathBuf::from(r"music\folder"),
+            label: String::from("[DIR] folder"),
+        }];
+
+        core.add_selected_to_playlist("mix");
+
+        let playlist = core.playlists.get("mix").expect("playlist exists");
+        assert_eq!(playlist.tracks.len(), 2);
+        assert!(
+            playlist
+                .tracks
+                .iter()
+                .any(|p| p == &PathBuf::from(r"music\folder\a.mp3"))
+        );
+        assert!(
+            playlist
+                .tracks
+                .iter()
+                .any(|p| p == &PathBuf::from(r"music\folder\sub\b.mp3"))
+        );
+    }
+
+    #[test]
+    fn adding_playlist_selection_to_playlist_copies_tracks() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.playlists.insert(
+            String::from("source"),
+            Playlist {
+                tracks: vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")],
+            },
+        );
+        core.browser_entries = vec![BrowserEntry {
+            kind: BrowserEntryKind::Playlist,
+            path: PathBuf::from("source"),
+            label: String::from("[PL] source"),
+        }];
+
+        core.add_selected_to_playlist("target");
+
+        let playlist = core.playlists.get("target").expect("target exists");
+        assert_eq!(
+            playlist.tracks,
+            vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")]
+        );
+    }
+
+    #[test]
+    fn adding_all_songs_selection_to_playlist_adds_full_library() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("z.mp3"),
+                title: String::from("Zulu"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("Alpha"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.browser_entries = vec![BrowserEntry {
+            kind: BrowserEntryKind::AllSongs,
+            path: PathBuf::new(),
+            label: String::from("[ALL] All Songs"),
+        }];
+
+        core.add_selected_to_playlist("mix");
+
+        let playlist = core.playlists.get("mix").expect("playlist exists");
+        assert_eq!(
+            playlist.tracks,
+            vec![PathBuf::from("a.mp3"), PathBuf::from("z.mp3")]
+        );
+    }
+
+    #[test]
+    fn remove_selected_from_current_playlist_removes_track() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.playlists.insert(
+            String::from("mix"),
+            Playlist {
+                tracks: vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")],
+            },
+        );
+        core.browser_playlist = Some(String::from("mix"));
+        core.browser_entries = vec![
+            BrowserEntry {
+                kind: BrowserEntryKind::Back,
+                path: PathBuf::new(),
+                label: String::from("[..] Back"),
+            },
+            BrowserEntry {
+                kind: BrowserEntryKind::Track,
+                path: PathBuf::from("b.mp3"),
+                label: String::from("b"),
+            },
+        ];
+        core.selected_browser = 1;
+
+        core.remove_selected_from_current_playlist();
+
+        let playlist = core.playlists.get("mix").expect("playlist exists");
+        assert_eq!(playlist.tracks, vec![PathBuf::from("a.mp3")]);
+    }
+
+    #[test]
+    fn prev_track_path_moves_back_in_queue() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("a"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("b.mp3"),
+                title: String::from("b"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.queue = vec![0, 1];
+        core.current_queue_index = Some(1);
+        core.playback_mode = PlaybackMode::Normal;
+
+        let prev = core.prev_track_path().expect("prev track");
+
+        assert_eq!(prev, PathBuf::from("a.mp3"));
         assert_eq!(core.current_queue_index, Some(0));
     }
 
