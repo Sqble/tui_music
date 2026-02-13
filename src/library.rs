@@ -147,13 +147,13 @@ fn codec_duration_seconds(codec_params: &symphonia::core::codecs::CodecParameter
         return Some(seconds);
     }
 
-    if let (Some(frame_count), Some(sample_rate)) =
-        (codec_params.n_frames, codec_params.sample_rate)
+    if let Some((frame_count, sample_rate)) = codec_params
+        .n_frames
+        .zip(codec_params.sample_rate)
+        .filter(|(_, sample_rate)| *sample_rate > 0)
     {
-        if sample_rate > 0 {
-            let seconds = ((frame_count as f64) / (sample_rate as f64)).round();
-            return Some(seconds.clamp(0.0, u32::MAX as f64) as u32);
-        }
+        let seconds = ((frame_count as f64) / (sample_rate as f64)).round();
+        return Some(seconds.clamp(0.0, u32::MAX as f64) as u32);
     }
 
     None

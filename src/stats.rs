@@ -270,10 +270,11 @@ impl StatsStore {
         let mut recent: HashMap<String, ListenEvent> = HashMap::new();
 
         for event in &self.events {
-            if let Some(start) = range_start {
-                if event.started_at_epoch_seconds < start {
-                    continue;
-                }
+            if matches!(
+                range_start,
+                Some(start) if event.started_at_epoch_seconds < start
+            ) {
+                continue;
             }
 
             let artist_text = event
