@@ -10,8 +10,9 @@ pub enum PlaybackMode {
     LoopOne,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Theme {
+    #[default]
     Dark,
     PitchBlack,
     Galaxy,
@@ -21,12 +22,6 @@ pub enum Theme {
     Ocean,
     Forest,
     Sunset,
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Self::Dark
-    }
 }
 
 impl PlaybackMode {

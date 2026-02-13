@@ -116,11 +116,12 @@ pub fn sanitize_user_folder_path(path: &Path) -> PathBuf {
     }
 
     for marker in ['*', '-'] {
-        if let Some(rest) = cleaned.strip_prefix(marker) {
-            if rest.starts_with(char::is_whitespace) {
+        match cleaned.strip_prefix(marker) {
+            Some(rest) if rest.starts_with(char::is_whitespace) => {
                 cleaned = rest.trim_start();
                 return PathBuf::from(cleaned);
             }
+            _ => {}
         }
     }
 
