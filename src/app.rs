@@ -9,10 +9,10 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -404,7 +404,7 @@ impl Drop for SingleInstanceGuard {
 
 #[cfg(windows)]
 fn ensure_single_instance() -> anyhow::Result<Option<SingleInstanceGuard>> {
-    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
     use windows_sys::Win32::System::Threading::CreateMutexW;
 
     let mutex_name = to_wide(APP_INSTANCE_MUTEX);
@@ -441,7 +441,7 @@ fn set_console_title(title: &str) {
 #[cfg(windows)]
 fn focus_existing_instance() {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        FindWindowW, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+        FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
     };
 
     let class_name = to_wide("ConsoleWindowClass");
@@ -1214,7 +1214,7 @@ fn cleanup_tray() {}
 fn restore_from_tray() {
     use windows_sys::Win32::System::Console::GetConsoleWindow;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOW,
+        SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
     };
 
     unsafe {
@@ -1250,7 +1250,7 @@ impl TrayController {
 
     fn minimize(&mut self) {
         use windows_sys::Win32::System::Console::GetConsoleWindow;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
 
         unsafe {
             if self.ensure_window().is_none() {
@@ -1268,7 +1268,7 @@ impl TrayController {
 
     fn pump(&mut self) {
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+            DispatchMessageW, MSG, PM_REMOVE, PeekMessageW, TranslateMessage,
         };
 
         unsafe {
@@ -1333,9 +1333,9 @@ impl TrayController {
 
     fn show_icon(&mut self) -> bool {
         use windows_sys::Win32::UI::Shell::{
-            Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NOTIFYICONDATAW,
+            NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NOTIFYICONDATAW, Shell_NotifyIconW,
         };
-        use windows_sys::Win32::UI::WindowsAndMessaging::{LoadIconW, IDI_APPLICATION};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{IDI_APPLICATION, LoadIconW};
 
         let Some(hwnd) = self.ensure_window() else {
             return false;
@@ -1361,7 +1361,7 @@ impl TrayController {
     }
 
     fn hide_icon(&mut self) {
-        use windows_sys::Win32::UI::Shell::{Shell_NotifyIconW, NIM_DELETE, NOTIFYICONDATAW};
+        use windows_sys::Win32::UI::Shell::{NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW};
 
         if !self.icon_visible || self.window == 0 {
             return;
@@ -1817,9 +1817,10 @@ mod tests {
         apply_saved_audio_output(&mut core, &mut audio, Some(String::from("Missing Device")));
 
         assert_eq!(audio.selected_output_device(), None);
-        assert!(core
-            .status
-            .contains("Saved output 'Missing Device' unavailable"));
+        assert!(
+            core.status
+                .contains("Saved output 'Missing Device' unavailable")
+        );
         assert!(core.status.contains("Audio driver settings"));
     }
 
