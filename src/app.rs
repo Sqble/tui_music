@@ -822,8 +822,8 @@ pub fn run() -> Result<()> {
                     &*audio,
                     panel_view.as_ref(),
                     stats_snapshot.as_ref(),
-                    online_runtime
-                        .join_prompt_active
+                    (core.header_section == HeaderSection::Online
+                        && online_runtime.join_prompt_active)
                         .then_some(online_runtime.join_code_input.as_str()),
                 )
             })?;
@@ -837,6 +837,7 @@ pub fn run() -> Result<()> {
 
         let event = event::read()?;
         if let Event::Paste(text) = &event
+            && core.header_section == HeaderSection::Online
             && online_runtime.join_prompt_active
         {
             append_invite_input(&mut online_runtime, text);
@@ -1320,6 +1321,10 @@ fn handle_online_inline_input(
     key: KeyEvent,
     online_runtime: &mut OnlineRuntime,
 ) -> bool {
+    if core.header_section != HeaderSection::Online {
+        return false;
+    }
+
     if online_runtime.join_prompt_active {
         match key.code {
             KeyCode::Esc => {
@@ -1328,6 +1333,13 @@ fn handle_online_inline_input(
                 core.status = String::from("Join cancelled");
                 core.dirty = true;
                 return true;
+            }
+            KeyCode::Tab => {
+                online_runtime.join_prompt_active = false;
+                online_runtime.join_code_input.clear();
+                core.status = String::from("Join cancelled");
+                core.dirty = true;
+                return false;
             }
             KeyCode::Backspace => {
                 online_runtime.join_code_input.pop();
@@ -1383,10 +1395,6 @@ fn handle_online_inline_input(
             }
             _ => return true,
         }
-    }
-
-    if core.header_section != HeaderSection::Online {
-        return false;
     }
 
     if key.code == KeyCode::Tab || key.code == KeyCode::Char('/') {
