@@ -3,9 +3,9 @@ use crate::library;
 use crate::lyrics::{self, LyricLine, LyricsDocument, LyricsSource};
 use crate::model::{PersistedState, PlaybackMode, Playlist, Theme, Track};
 use crate::stats::{StatsRange, StatsSort};
+use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
-use rand::SeedableRng;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -1381,10 +1381,11 @@ mod tests {
         let mut state = PersistedState::default();
         state.folders.push(PathBuf::from(r"E:\LOCALMUSIC"));
         let core = TuneCore::from_persisted(state);
-        assert!(core
-            .browser_entries
-            .iter()
-            .any(|entry| entry.kind == BrowserEntryKind::Folder));
+        assert!(
+            core.browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::Folder)
+        );
     }
 
     #[test]
@@ -1472,10 +1473,11 @@ mod tests {
     #[test]
     fn root_browser_includes_all_songs_entry() {
         let core = TuneCore::from_persisted(PersistedState::default());
-        assert!(core
-            .browser_entries
-            .iter()
-            .any(|entry| entry.kind == BrowserEntryKind::AllSongs));
+        assert!(
+            core.browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::AllSongs)
+        );
     }
 
     #[test]
@@ -1488,10 +1490,11 @@ mod tests {
             },
         );
         let core = TuneCore::from_persisted(state);
-        assert!(core
-            .browser_entries
-            .iter()
-            .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix"));
+        assert!(
+            core.browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix")
+        );
     }
 
     #[test]
@@ -1889,17 +1892,20 @@ mod tests {
     fn remove_playlist_refreshes_root_browser_entries() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.create_playlist("mix");
-        assert!(core
-            .browser_entries
-            .iter()
-            .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix"));
+        assert!(
+            core.browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix")
+        );
 
         core.remove_playlist("mix");
 
-        assert!(!core
-            .browser_entries
-            .iter()
-            .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix"));
+        assert!(
+            !core
+                .browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix")
+        );
     }
 
     #[test]
