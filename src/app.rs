@@ -1,6 +1,6 @@
 use crate::audio::{AudioEngine, NullAudioEngine, WasapiAudioEngine};
 use crate::config;
-use crate::core::{HeaderSection, StatsFilterFocus, TuneCore};
+use crate::core::{HeaderSection, LyricsMode, StatsFilterFocus, TuneCore};
 use crate::model::{PlaybackMode, Theme};
 use crate::stats::{self, ListenSessionRecord, StatsStore};
 use anyhow::Result;
@@ -218,19 +218,52 @@ fn duration_to_recorded_seconds(duration: Duration) -> u32 {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ActionPanelState {
     Closed,
-    Root { selected: usize },
-    Mode { selected: usize },
-    PlaylistPlay { selected: usize },
-    PlaylistAdd { selected: usize },
-    PlaylistAddNowPlaying { selected: usize },
-    PlaylistCreate { selected: usize, input: String },
-    PlaylistRemove { selected: usize },
-    AudioSettings { selected: usize },
-    AudioOutput { selected: usize },
-    PlaybackSettings { selected: usize },
-    ThemeSettings { selected: usize },
-    AddDirectory { selected: usize, input: String },
-    RemoveDirectory { selected: usize },
+    Root {
+        selected: usize,
+    },
+    Mode {
+        selected: usize,
+    },
+    PlaylistPlay {
+        selected: usize,
+    },
+    PlaylistAdd {
+        selected: usize,
+    },
+    PlaylistAddNowPlaying {
+        selected: usize,
+    },
+    PlaylistCreate {
+        selected: usize,
+        input: String,
+    },
+    PlaylistRemove {
+        selected: usize,
+    },
+    AudioSettings {
+        selected: usize,
+    },
+    AudioOutput {
+        selected: usize,
+    },
+    PlaybackSettings {
+        selected: usize,
+    },
+    ThemeSettings {
+        selected: usize,
+    },
+    LyricsImportTxt {
+        selected: usize,
+        path_input: String,
+        interval_input: String,
+    },
+    AddDirectory {
+        selected: usize,
+        input: String,
+    },
+    RemoveDirectory {
+        selected: usize,
+    },
 }
 
 impl ActionPanelState {
@@ -273,6 +306,7 @@ impl ActionPanelState {
                     String::from("Save state"),
                     String::from("Clear listen history (backup)"),
                     String::from("Minimize to tray"),
+                    String::from("Import TXT to lyrics"),
                     String::from("Close panel"),
                 ],
                 selected: *selected,
@@ -381,6 +415,28 @@ impl ActionPanelState {
                 options: theme_options(core.theme),
                 selected: *selected,
             }),
+            Self::LyricsImportTxt {
+                selected,
+                path_input,
+                interval_input,
+            } => Some(crate::ui::ActionPanelView {
+                title: String::from("Import TXT To Lyrics"),
+                hint: String::from("Type path/seconds then Enter on Import"),
+                options: vec![
+                    if path_input.is_empty() {
+                        String::from("TXT path: ")
+                    } else {
+                        format!("TXT path: {path_input}")
+                    },
+                    if interval_input.is_empty() {
+                        String::from("Seed interval seconds: 3")
+                    } else {
+                        format!("Seed interval seconds: {interval_input}")
+                    },
+                    String::from("Import and save sidecar"),
+                ],
+                selected: *selected,
+            }),
             Self::AddDirectory { selected, input } => Some(crate::ui::ActionPanelView {
                 title: String::from("Add Directory"),
                 hint: String::from("Enter choose folder  Down type path"),
@@ -475,6 +531,14 @@ pub fn run() -> Result<()> {
         }
         stats_enabled_last = core.stats_enabled;
         maybe_auto_advance_track(&mut core, &mut *audio);
+        let lyrics_track_path = audio
+            .current_track()
+            .map(Path::to_path_buf)
+            .or_else(|| core.current_path().map(Path::to_path_buf));
+        core.sync_lyrics_for_track(lyrics_track_path.as_deref());
+        if core.header_section == HeaderSection::Lyrics && core.lyrics_mode == LyricsMode::View {
+            core.sync_lyrics_highlight_to_position(audio.position());
+        }
 
         if core.dirty || last_tick.elapsed() > Duration::from_millis(250) {
             terminal.draw(|frame| {
@@ -528,6 +592,9 @@ pub fn run() -> Result<()> {
         }
 
         if handle_stats_inline_input(&mut core, key) {
+            continue;
+        }
+        if handle_lyrics_inline_input(&mut core, &*audio, key) {
             continue;
         }
 
@@ -876,6 +943,80 @@ fn handle_stats_inline_input(core: &mut TuneCore, key: KeyEvent) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+fn handle_lyrics_inline_input(core: &mut TuneCore, audio: &dyn AudioEngine, key: KeyEvent) -> bool {
+    if core.header_section != HeaderSection::Lyrics {
+        return false;
+    }
+
+    if key.code == KeyCode::Tab || key.code == KeyCode::Char('/') {
+        return false;
+    }
+
+    if core.lyrics_missing_prompt {
+        match key.code {
+            KeyCode::Enter => {
+                core.create_empty_lyrics_sidecar();
+                true
+            }
+            KeyCode::Esc | KeyCode::Backspace => {
+                core.decline_lyrics_creation();
+                true
+            }
+            _ => true,
+        }
+    } else {
+        if key.code == KeyCode::Char('e') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            core.toggle_lyrics_mode();
+            return true;
+        }
+
+        match core.lyrics_mode {
+            LyricsMode::View => match key.code {
+                KeyCode::Up => {
+                    core.lyrics_move_selection(false);
+                    true
+                }
+                KeyCode::Down => {
+                    core.lyrics_move_selection(true);
+                    true
+                }
+                _ => false,
+            },
+            LyricsMode::Edit => match key.code {
+                KeyCode::Up => {
+                    core.lyrics_move_selection(false);
+                    true
+                }
+                KeyCode::Down => {
+                    core.lyrics_move_selection(true);
+                    true
+                }
+                KeyCode::Backspace => {
+                    core.lyrics_backspace();
+                    true
+                }
+                KeyCode::Enter => {
+                    core.lyrics_insert_line_after();
+                    true
+                }
+                KeyCode::Delete => {
+                    core.lyrics_delete_selected_line();
+                    true
+                }
+                KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    core.lyrics_stamp_selected_line(audio.position());
+                    true
+                }
+                KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    core.lyrics_insert_char(ch);
+                    true
+                }
+                _ => false,
+            },
+        }
     }
 }
 
@@ -1273,6 +1414,7 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
         | ActionPanelState::AudioOutput { selected }
         | ActionPanelState::PlaybackSettings { selected }
         | ActionPanelState::ThemeSettings { selected }
+        | ActionPanelState::LyricsImportTxt { selected, .. }
         | ActionPanelState::AddDirectory { selected, .. }
         | ActionPanelState::RemoveDirectory { selected } => advance(selected),
         ActionPanelState::Closed => {}
@@ -1317,9 +1459,40 @@ fn handle_action_panel_input(
         }
     }
 
+    if let ActionPanelState::LyricsImportTxt {
+        selected,
+        path_input,
+        interval_input,
+    } = panel
+    {
+        match key {
+            KeyCode::Char(ch) if *selected == 0 => {
+                path_input.push(ch);
+                core.dirty = true;
+                return;
+            }
+            KeyCode::Char(ch) if *selected == 1 && ch.is_ascii_digit() => {
+                interval_input.push(ch);
+                core.dirty = true;
+                return;
+            }
+            KeyCode::Backspace if *selected == 0 && !path_input.is_empty() => {
+                path_input.pop();
+                core.dirty = true;
+                return;
+            }
+            KeyCode::Backspace if *selected == 1 && !interval_input.is_empty() => {
+                interval_input.pop();
+                core.dirty = true;
+                return;
+            }
+            _ => {}
+        }
+    }
+
     let option_count = match panel {
         ActionPanelState::Closed => 0,
-        ActionPanelState::Root { .. } => 17,
+        ActionPanelState::Root { .. } => 18,
         ActionPanelState::Mode { .. } => 4,
         ActionPanelState::PlaylistPlay { .. }
         | ActionPanelState::PlaylistAdd { .. }
@@ -1330,6 +1503,7 @@ fn handle_action_panel_input(
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
         ActionPanelState::PlaybackSettings { .. } => 5,
         ActionPanelState::ThemeSettings { .. } => 6,
+        ActionPanelState::LyricsImportTxt { .. } => 3,
         ActionPanelState::AddDirectory { .. } => 2,
         ActionPanelState::RemoveDirectory { .. } => sorted_folder_paths(core).len().max(1),
     };
@@ -1364,6 +1538,7 @@ fn handle_action_panel_input(
                     ActionPanelState::AudioSettings { selected: 0 }
                 }
                 ActionPanelState::ThemeSettings { .. } => ActionPanelState::Root { selected: 12 },
+                ActionPanelState::LyricsImportTxt { .. } => ActionPanelState::Root { selected: 16 },
                 ActionPanelState::RemoveDirectory { .. } => ActionPanelState::Root { selected: 9 },
                 ActionPanelState::Root { .. } | ActionPanelState::Closed => {
                     ActionPanelState::Closed
@@ -1476,6 +1651,14 @@ fn handle_action_panel_input(
                     core.status = String::from("Minimized to tray");
                     core.dirty = true;
                     panel.close();
+                }
+                16 => {
+                    *panel = ActionPanelState::LyricsImportTxt {
+                        selected: 0,
+                        path_input: String::new(),
+                        interval_input: String::from("3"),
+                    };
+                    core.dirty = true;
                 }
                 _ => {
                     panel.close();
@@ -1674,6 +1857,24 @@ fn handle_action_panel_input(
                 core.status = format!("Theme: {}", theme_label(core.theme));
                 core.dirty = true;
                 auto_save_state(core, &*audio);
+                panel.close();
+            }
+            ActionPanelState::LyricsImportTxt {
+                selected,
+                path_input,
+                interval_input,
+            } => {
+                if selected < 2 {
+                    return;
+                }
+                let trimmed_path = path_input.trim();
+                if trimmed_path.is_empty() {
+                    core.status = String::from("Provide TXT path to import");
+                    core.dirty = true;
+                    return;
+                }
+                let interval = interval_input.trim().parse::<u32>().unwrap_or(3).max(1);
+                core.import_txt_to_lyrics(Path::new(trimmed_path), interval);
                 panel.close();
             }
             ActionPanelState::AddDirectory { selected, input } => {

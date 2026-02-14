@@ -1,5 +1,6 @@
 use crate::config;
 use crate::library;
+use crate::lyrics::{self, LyricLine, LyricsDocument, LyricsSource};
 use crate::model::{PersistedState, PlaybackMode, Playlist, Theme, Track};
 use crate::stats::{StatsRange, StatsSort};
 use rand::SeedableRng;
@@ -10,6 +11,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserEntryKind {
@@ -35,6 +37,12 @@ pub enum StatsFilterFocus {
     Artist,
     Album,
     Search,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LyricsMode {
+    View,
+    Edit,
 }
 
 impl StatsFilterFocus {
@@ -107,6 +115,12 @@ pub struct TuneCore {
     pub stats_focus: StatsFilterFocus,
     pub stats_scroll: u16,
     pub clear_stats_requested: bool,
+    pub lyrics: Option<LyricsDocument>,
+    pub lyrics_track_path: Option<PathBuf>,
+    pub lyrics_mode: LyricsMode,
+    pub lyrics_selected_line: usize,
+    pub lyrics_missing_prompt: bool,
+    pub lyrics_creation_declined: bool,
     duration_lookup: RefCell<HashMap<String, Option<u32>>>,
     shuffle_order: Vec<usize>,
     shuffle_cursor: usize,
@@ -147,6 +161,12 @@ impl TuneCore {
             stats_focus: StatsFilterFocus::Range(0),
             stats_scroll: 0,
             clear_stats_requested: false,
+            lyrics: None,
+            lyrics_track_path: None,
+            lyrics_mode: LyricsMode::View,
+            lyrics_selected_line: 0,
+            lyrics_missing_prompt: false,
+            lyrics_creation_declined: false,
             duration_lookup: RefCell::new(HashMap::new()),
             shuffle_order: Vec::new(),
             shuffle_cursor: 0,
@@ -561,6 +581,257 @@ impl TuneCore {
         self.stats_album_filter.clear();
         self.stats_search.clear();
         self.set_status("Stats filters cleared");
+    }
+
+    pub fn sync_lyrics_for_track(&mut self, track: Option<&Path>) {
+        let Some(path) = track else {
+            self.lyrics = None;
+            self.lyrics_track_path = None;
+            self.lyrics_mode = LyricsMode::View;
+            self.lyrics_selected_line = 0;
+            self.lyrics_missing_prompt = false;
+            self.lyrics_creation_declined = false;
+            return;
+        };
+
+        if self
+            .lyrics_track_path
+            .as_ref()
+            .is_some_and(|current| path_eq(current, path))
+        {
+            return;
+        }
+
+        self.lyrics_track_path = Some(path.to_path_buf());
+        self.lyrics_mode = LyricsMode::View;
+        self.lyrics_selected_line = 0;
+        self.lyrics_creation_declined = false;
+        match lyrics::load_for_track(path) {
+            Ok(Some(doc)) => {
+                self.lyrics = Some(doc);
+                self.lyrics_missing_prompt = false;
+            }
+            Ok(None) => {
+                self.lyrics = None;
+                self.lyrics_missing_prompt = true;
+            }
+            Err(err) => {
+                self.lyrics = None;
+                self.lyrics_missing_prompt = false;
+                self.set_status(&format!("Lyrics load failed: {err}"));
+            }
+        }
+    }
+
+    pub fn decline_lyrics_creation(&mut self) {
+        self.lyrics_missing_prompt = false;
+        self.lyrics_creation_declined = true;
+        self.set_status("Lyrics creation skipped");
+    }
+
+    pub fn create_empty_lyrics_sidecar(&mut self) {
+        let Some(path) = self.lyrics_track_path.clone() else {
+            self.set_status("No active track for lyrics");
+            return;
+        };
+        let doc = LyricsDocument {
+            lines: vec![LyricLine {
+                timestamp_ms: None,
+                text: String::new(),
+            }],
+            source: LyricsSource::Created,
+            precision: lyrics::LyricsTimingPrecision::None,
+        };
+
+        match lyrics::write_sidecar(&path, &doc) {
+            Ok(saved) => {
+                self.lyrics = Some(doc);
+                self.lyrics_mode = LyricsMode::Edit;
+                self.lyrics_selected_line = 0;
+                self.lyrics_missing_prompt = false;
+                self.lyrics_creation_declined = false;
+                self.set_status(&format!("Created {}", saved.display()));
+            }
+            Err(err) => self.set_status(&format!("Lyrics create failed: {err}")),
+        }
+    }
+
+    pub fn toggle_lyrics_mode(&mut self) {
+        self.lyrics_mode = match self.lyrics_mode {
+            LyricsMode::View => LyricsMode::Edit,
+            LyricsMode::Edit => {
+                self.save_lyrics_sidecar();
+                LyricsMode::View
+            }
+        };
+        self.dirty = true;
+        self.status = format!("Lyrics mode: {:?}", self.lyrics_mode);
+    }
+
+    pub fn save_lyrics_sidecar(&mut self) {
+        let Some(path) = self.lyrics_track_path.clone() else {
+            self.set_status("No active track for lyrics");
+            return;
+        };
+        let Some(doc) = self.lyrics.as_ref() else {
+            self.set_status("No lyrics loaded");
+            return;
+        };
+        match lyrics::write_sidecar(&path, doc) {
+            Ok(saved) => self.set_status(&format!("Saved {}", saved.display())),
+            Err(err) => self.set_status(&format!("Lyrics save failed: {err}")),
+        }
+    }
+
+    pub fn import_txt_to_lyrics(&mut self, txt_path: &Path, interval_seconds: u32) {
+        match lyrics::read_txt_for_import(txt_path) {
+            Ok(lines) if lines.is_empty() => self.set_status("TXT import found no non-empty lines"),
+            Ok(lines) => {
+                self.lyrics = Some(lyrics::build_seeded_from_lines(lines, interval_seconds));
+                self.lyrics_mode = LyricsMode::Edit;
+                self.lyrics_selected_line = 0;
+                self.lyrics_missing_prompt = false;
+                self.lyrics_creation_declined = false;
+                self.save_lyrics_sidecar();
+                self.set_status("Imported TXT into seeded LRC");
+            }
+            Err(err) => self.set_status(&format!("TXT import failed: {err}")),
+        }
+    }
+
+    pub fn active_lyric_line_for_position(&self, position: Option<Duration>) -> Option<usize> {
+        let position_ms = position.map(|pos| pos.as_millis().min(u128::from(u32::MAX)) as u32)?;
+        let doc = self.lyrics.as_ref()?;
+
+        let mut current = None;
+        for (idx, line) in doc.lines.iter().enumerate() {
+            let Some(ts) = line.timestamp_ms else {
+                continue;
+            };
+            if ts <= position_ms {
+                current = Some(idx);
+            } else {
+                break;
+            }
+        }
+        current
+    }
+
+    pub fn sync_lyrics_highlight_to_position(&mut self, position: Option<Duration>) {
+        let Some(active_idx) = self.active_lyric_line_for_position(position) else {
+            return;
+        };
+        if self.lyrics_selected_line != active_idx {
+            self.lyrics_selected_line = active_idx;
+            self.dirty = true;
+        }
+    }
+
+    pub fn lyrics_move_selection(&mut self, down: bool) {
+        let Some(doc) = self.lyrics.as_ref() else {
+            return;
+        };
+        if doc.lines.is_empty() {
+            self.lyrics_selected_line = 0;
+            return;
+        }
+        if down {
+            self.lyrics_selected_line = (self.lyrics_selected_line + 1).min(doc.lines.len() - 1);
+        } else {
+            self.lyrics_selected_line = self.lyrics_selected_line.saturating_sub(1);
+        }
+        self.dirty = true;
+    }
+
+    pub fn lyrics_insert_char(&mut self, ch: char) {
+        let Some(doc) = self.lyrics.as_mut() else {
+            return;
+        };
+        if doc.lines.is_empty() {
+            doc.lines.push(LyricLine {
+                timestamp_ms: None,
+                text: String::new(),
+            });
+            self.lyrics_selected_line = 0;
+        }
+        if let Some(line) = doc.lines.get_mut(self.lyrics_selected_line) {
+            line.text.push(ch);
+            self.dirty = true;
+        }
+    }
+
+    pub fn lyrics_backspace(&mut self) {
+        let Some(doc) = self.lyrics.as_mut() else {
+            return;
+        };
+        let Some(line) = doc.lines.get_mut(self.lyrics_selected_line) else {
+            return;
+        };
+        if !line.text.is_empty() {
+            line.text.pop();
+            self.dirty = true;
+        }
+    }
+
+    pub fn lyrics_insert_line_after(&mut self) {
+        let Some(doc) = self.lyrics.as_mut() else {
+            return;
+        };
+        let insert_at = self
+            .lyrics_selected_line
+            .saturating_add(1)
+            .min(doc.lines.len());
+        let timestamp = doc
+            .lines
+            .get(self.lyrics_selected_line)
+            .and_then(|line| line.timestamp_ms);
+        doc.lines.insert(
+            insert_at,
+            LyricLine {
+                timestamp_ms: timestamp,
+                text: String::new(),
+            },
+        );
+        self.lyrics_selected_line = insert_at;
+        self.dirty = true;
+    }
+
+    pub fn lyrics_delete_selected_line(&mut self) {
+        let Some(doc) = self.lyrics.as_mut() else {
+            return;
+        };
+        if doc.lines.is_empty() {
+            return;
+        }
+        if self.lyrics_selected_line < doc.lines.len() {
+            doc.lines.remove(self.lyrics_selected_line);
+        }
+        if doc.lines.is_empty() {
+            self.lyrics_selected_line = 0;
+        } else {
+            self.lyrics_selected_line = self.lyrics_selected_line.min(doc.lines.len() - 1);
+        }
+        self.dirty = true;
+    }
+
+    pub fn lyrics_stamp_selected_line(&mut self, position: Option<Duration>) {
+        let Some(position) = position else {
+            self.set_status("Cannot stamp timestamp without playback position");
+            return;
+        };
+        let Some(doc) = self.lyrics.as_mut() else {
+            return;
+        };
+        let Some(line) = doc.lines.get_mut(self.lyrics_selected_line) else {
+            return;
+        };
+        line.timestamp_ms = Some(position.as_millis().min(u128::from(u32::MAX)) as u32);
+        doc.lines
+            .sort_by_key(|entry| entry.timestamp_ms.unwrap_or(u32::MAX));
+        self.lyrics_selected_line = self
+            .active_lyric_line_for_position(Some(position))
+            .unwrap_or(self.lyrics_selected_line);
+        self.dirty = true;
     }
 
     pub fn current_path(&self) -> Option<&Path> {

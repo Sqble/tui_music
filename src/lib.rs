@@ -3,6 +3,7 @@ pub mod audio;
 pub mod config;
 pub mod core;
 pub mod library;
+pub mod lyrics;
 pub mod model;
 pub mod stats;
 pub mod ui;

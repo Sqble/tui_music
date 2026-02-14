@@ -10,6 +10,7 @@ use std::sync::OnceLock;
 const APP_DIR: &str = "tunetui";
 const STATE_FILE: &str = "state.json";
 const STATS_FILE: &str = "stats.json";
+const LYRICS_DIR: &str = "lyrics";
 
 pub fn config_root() -> Result<PathBuf> {
     #[cfg(test)]
@@ -51,6 +52,31 @@ pub fn ensure_config_dir() -> Result<PathBuf> {
 
 pub fn stats_path() -> Result<PathBuf> {
     Ok(config_root()?.join(STATS_FILE))
+}
+
+pub fn lyrics_root() -> Result<PathBuf> {
+    Ok(config_root()?.join(LYRICS_DIR))
+}
+
+pub fn ensure_lyrics_dir() -> Result<PathBuf> {
+    let root = lyrics_root()?;
+    fs::create_dir_all(&root).with_context(|| format!("failed to create {}", root.display()))?;
+    Ok(root)
+}
+
+pub fn lyrics_path_for_track(track_path: &Path) -> Result<PathBuf> {
+    let normalized = normalize_path(track_path);
+    let normalized_display = sanitize_display_text(&normalized.to_string_lossy());
+    let hash = stable_fnv1a_64(&normalized_display);
+
+    let stem = track_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .map(sanitize_lyrics_stem)
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| String::from("track"));
+
+    Ok(lyrics_root()?.join(format!("{stem}-{hash:016x}.lrc")))
 }
 
 pub fn load_state() -> Result<PersistedState> {
@@ -323,6 +349,30 @@ fn component_match_key(input: &str) -> String {
         .collect()
 }
 
+fn sanitize_lyrics_stem(input: &str) -> String {
+    let mut out = String::with_capacity(input.len().min(40));
+    for ch in input.chars() {
+        if out.len() >= 40 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else if ch.is_ascii_whitespace() {
+            out.push('_');
+        }
+    }
+    out
+}
+
+fn stable_fnv1a_64(input: &str) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in input.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 pub fn strip_windows_verbatim_prefix(path: &Path) -> PathBuf {
     let raw = path.to_string_lossy();
 
@@ -443,5 +493,19 @@ mod tests {
 
         let recovered = recover_existing_path(&broken);
         assert_eq!(recovered, existing);
+    }
+
+    #[test]
+    fn lyrics_path_for_track_uses_config_lyrics_directory() {
+        let path =
+            lyrics_path_for_track(Path::new(r"D:\Music\Artist\song.mp3")).expect("lyrics path");
+        assert!(path.to_string_lossy().contains("tunetui"));
+        assert!(path.to_string_lossy().contains("lyrics"));
+        assert!(path.extension().and_then(|ext| ext.to_str()) == Some("lrc"));
+        let filename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("filename");
+        assert!(filename.starts_with("song-"));
     }
 }

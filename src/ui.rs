@@ -1,6 +1,7 @@
 use crate::audio::AudioEngine;
 use crate::core::BrowserEntryKind;
 use crate::core::HeaderSection;
+use crate::core::LyricsMode;
 use crate::core::StatsFilterFocus;
 use crate::core::TuneCore;
 use crate::model::Theme;
@@ -390,13 +391,7 @@ pub fn draw(
                 draw_stats_section(frame, &body, colors, core, stats_snapshot);
             }
             HeaderSection::Lyrics => {
-                draw_placeholder_section(
-                    frame,
-                    &body,
-                    colors,
-                    "Lyrics",
-                    "Lyrics view is not wired yet. Press Tab for Stats.",
-                );
+                draw_lyrics_section(frame, &body, colors, core, audio);
             }
             HeaderSection::Online => {
                 draw_placeholder_section(
@@ -426,6 +421,8 @@ pub fn draw(
 
     let key_hint = if core.header_section == HeaderSection::Stats {
         "Keys: Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top, Tab tabs"
+    } else if core.header_section == HeaderSection::Lyrics {
+        "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -517,6 +514,152 @@ fn draw_placeholder_section(
         )),
         body[1],
     );
+}
+
+fn draw_lyrics_section(
+    frame: &mut Frame,
+    body: &[Rect],
+    colors: ThemePalette,
+    core: &TuneCore,
+    audio: &dyn AudioEngine,
+) {
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(Rect {
+            x: body[0].x,
+            y: body[0].y,
+            width: body[0].width.saturating_add(body[1].width),
+            height: body[0].height.max(body[1].height),
+        });
+
+    let Some(doc) = core.lyrics.as_ref() else {
+        let message = if core.lyrics_missing_prompt {
+            "No lyrics found for this track. Enter creates an empty .lrc, Backspace skips."
+        } else {
+            "No lyrics loaded. Play a track, import TXT via /, or create a sidecar in this tab."
+        };
+        draw_placeholder_section(frame, body, colors, "Lyrics", message);
+        return;
+    };
+
+    let focused = core
+        .lyrics_selected_line
+        .min(doc.lines.len().saturating_sub(1));
+    let top = focused.saturating_sub(6);
+    let bottom = (focused + 7).min(doc.lines.len());
+    let mut playback_lines = Vec::new();
+    for idx in top..bottom {
+        let line = &doc.lines[idx];
+        let mut style = Style::default().fg(colors.muted);
+        if idx == focused {
+            style = Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD);
+        }
+
+        let stamp = line
+            .timestamp_ms
+            .map(format_lrc_time)
+            .unwrap_or_else(|| "[--:--.--]".to_string());
+        playback_lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", if idx == focused { ">" } else { " " }),
+                Style::default().fg(colors.muted),
+            ),
+            Span::styled(stamp, Style::default().fg(colors.alert)),
+            Span::styled(" ", Style::default().fg(colors.muted)),
+            Span::styled(line.text.as_str(), style),
+        ]));
+    }
+
+    let left = Paragraph::new(playback_lines)
+        .block(panel_block(
+            "Lyrics Playback",
+            colors.panel_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(left, horizontal[0]);
+
+    let mut right_lines = vec![Line::from(Span::styled(
+        format!(
+            "Mode {}  Source {:?}  Timing {:?}",
+            match core.lyrics_mode {
+                LyricsMode::View => "View",
+                LyricsMode::Edit => "Edit",
+            },
+            doc.source,
+            doc.precision
+        ),
+        Style::default().fg(colors.muted),
+    ))];
+    right_lines.push(Line::from(""));
+
+    match core.lyrics_mode {
+        LyricsMode::View => {
+            right_lines.push(Line::from(Span::styled(
+                "Press Ctrl+e to edit. Scroll follows line changes only.",
+                Style::default().fg(colors.text),
+            )));
+            right_lines.push(Line::from(Span::styled(
+                "Use / for TXT import.",
+                Style::default().fg(colors.muted),
+            )));
+            if let Some(position) = audio.position() {
+                right_lines.push(Line::from(""));
+                right_lines.push(Line::from(Span::styled(
+                    format!("Playhead {}", format_duration(position)),
+                    Style::default().fg(colors.alert),
+                )));
+            }
+        }
+        LyricsMode::Edit => {
+            right_lines.push(Line::from(Span::styled(
+                "Editor",
+                Style::default()
+                    .fg(colors.text)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            right_lines.push(Line::from(Span::styled(
+                "Type text, Enter new line, Backspace delete char, Delete remove line, Ctrl+t stamp",
+                Style::default().fg(colors.muted),
+            )));
+            right_lines.push(Line::from(""));
+
+            let start = focused.saturating_sub(5);
+            let end = (focused + 6).min(doc.lines.len());
+            for idx in start..end {
+                let line = &doc.lines[idx];
+                let stamp = line
+                    .timestamp_ms
+                    .map(format_lrc_time)
+                    .unwrap_or_else(|| "[--:--.--]".to_string());
+                let style = if idx == focused {
+                    Style::default()
+                        .fg(colors.accent)
+                        .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+                } else {
+                    Style::default().fg(colors.text)
+                };
+                right_lines.push(Line::from(Span::styled(
+                    format!("{:>3} {} {}", idx + 1, stamp, line.text),
+                    style,
+                )));
+            }
+        }
+    }
+
+    let right = Paragraph::new(right_lines)
+        .block(panel_block(
+            "Lyrics Editor",
+            colors.panel_alt_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(right, horizontal[1]);
 }
 
 fn draw_stats_section(
@@ -1180,6 +1323,13 @@ fn format_duration(duration: Duration) -> String {
     let minutes = total_seconds / 60;
     let seconds = total_seconds % 60;
     format!("{minutes:02}:{seconds:02}")
+}
+
+fn format_lrc_time(ms: u32) -> String {
+    let minutes = ms / 60_000;
+    let seconds = (ms % 60_000) / 1000;
+    let hundredths = (ms % 1000) / 10;
+    format!("[{minutes:02}:{seconds:02}.{hundredths:02}]")
 }
 
 fn progress_bar(ratio: Option<f64>, width: usize) -> String {
