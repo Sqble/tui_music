@@ -48,6 +48,7 @@ struct OnlineRuntime {
     streamed_track_cache: HashMap<PathBuf, PathBuf>,
     pending_stream_path: Option<PathBuf>,
     remote_logical_track: Option<PathBuf>,
+    last_remote_transport_origin: Option<String>,
     last_periodic_sync_at: Instant,
 }
 
@@ -58,6 +59,7 @@ impl OnlineRuntime {
         }
         self.pending_stream_path = None;
         self.remote_logical_track = None;
+        self.last_remote_transport_origin = None;
     }
 }
 
@@ -757,6 +759,7 @@ pub fn run() -> Result<()> {
         streamed_track_cache: HashMap::new(),
         pending_stream_path: None,
         remote_logical_track: None,
+        last_remote_transport_origin: None,
         last_periodic_sync_at: Instant::now(),
     };
 
@@ -1713,6 +1716,8 @@ fn drain_online_network_events(
                         .origin_nickname
                         .eq_ignore_ascii_case(&online_runtime.local_nickname)
                     {
+                        online_runtime.last_remote_transport_origin =
+                            Some(last_transport.origin_nickname.clone());
                         apply_remote_transport(
                             core,
                             audio,
@@ -1846,7 +1851,8 @@ fn ensure_remote_track(
         Err(err) => {
             if online_runtime.pending_stream_path.as_ref() != Some(&path.to_path_buf()) {
                 if let Some(network) = online_runtime.network.as_ref() {
-                    let source_nickname = preferred_stream_source(core, network.role(), path);
+                    let source_nickname =
+                        preferred_stream_source(core, online_runtime, network.role(), path);
                     network.request_track_stream(path.to_path_buf(), source_nickname.clone());
                     online_runtime.pending_stream_path = Some(path.to_path_buf());
                     online_runtime.remote_logical_track = Some(path.to_path_buf());
@@ -1864,7 +1870,12 @@ fn ensure_remote_track(
     }
 }
 
-fn preferred_stream_source(core: &TuneCore, role: &NetworkRole, path: &Path) -> Option<String> {
+fn preferred_stream_source(
+    core: &TuneCore,
+    online_runtime: &OnlineRuntime,
+    role: &NetworkRole,
+    path: &Path,
+) -> Option<String> {
     if !matches!(role, NetworkRole::Host) {
         return None;
     }
@@ -1872,7 +1883,7 @@ fn preferred_stream_source(core: &TuneCore, role: &NetworkRole, path: &Path) -> 
     let local_nickname = session
         .local_participant()
         .map(|entry| entry.nickname.as_str());
-    session
+    let queue_owner = session
         .shared_queue
         .iter()
         .rev()
@@ -1884,7 +1895,19 @@ fn preferred_stream_source(core: &TuneCore, role: &NetworkRole, path: &Path) -> 
                         .unwrap_or(true)
                 })
         })
-        .and_then(|item| item.owner_nickname.clone())
+        .and_then(|item| item.owner_nickname.clone());
+    if queue_owner.is_some() {
+        return queue_owner;
+    }
+    online_runtime
+        .last_remote_transport_origin
+        .as_deref()
+        .filter(|origin| {
+            local_nickname
+                .map(|local| !origin.eq_ignore_ascii_case(local))
+                .unwrap_or(true)
+        })
+        .map(str::to_string)
 }
 
 fn stats_scroll_down(core: &mut TuneCore) {
