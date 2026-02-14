@@ -16,7 +16,6 @@ use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(windows)]
@@ -198,6 +197,64 @@ impl ListenTracker {
             active.play_count_recorded = true;
         }
         true
+    }
+}
+
+fn inferred_tunetui_config_dir(
+    userprofile: Option<&str>,
+    home: Option<&str>,
+    override_dir: Option<&str>,
+) -> Option<PathBuf> {
+    if override_dir.is_some_and(|value| !value.trim().is_empty()) {
+        return None;
+    }
+    if userprofile.is_some_and(|value| !value.trim().is_empty()) {
+        return None;
+    }
+    let home = home.filter(|value| !value.trim().is_empty())?;
+    Some(PathBuf::from(home).join(".config").join("tunetui"))
+}
+
+fn should_set_ssh_term(
+    ssh_tty: Option<&str>,
+    ssh_connection: Option<&str>,
+    ssh_client: Option<&str>,
+    term: Option<&str>,
+) -> bool {
+    let over_ssh = [ssh_tty, ssh_connection, ssh_client]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.trim().is_empty());
+    if !over_ssh {
+        return false;
+    }
+
+    match term.map(str::trim) {
+        None | Some("") => true,
+        Some(value) => value.eq_ignore_ascii_case("dumb"),
+    }
+}
+
+fn prepare_runtime_environment() {
+    if let Some(config_dir) = inferred_tunetui_config_dir(
+        std::env::var("USERPROFILE").ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+        std::env::var("TUNETUI_CONFIG_DIR").ok().as_deref(),
+    ) {
+        unsafe {
+            std::env::set_var("TUNETUI_CONFIG_DIR", config_dir);
+        }
+    }
+
+    if should_set_ssh_term(
+        std::env::var("SSH_TTY").ok().as_deref(),
+        std::env::var("SSH_CONNECTION").ok().as_deref(),
+        std::env::var("SSH_CLIENT").ok().as_deref(),
+        std::env::var("TERM").ok().as_deref(),
+    ) {
+        unsafe {
+            std::env::set_var("TERM", "xterm-256color");
+        }
     }
 }
 
@@ -473,6 +530,8 @@ impl ActionPanelState {
 }
 
 pub fn run() -> Result<()> {
+    prepare_runtime_environment();
+
     #[cfg(windows)]
     let _single_instance = match ensure_single_instance() {
         Ok(Some(guard)) => guard,
@@ -1942,7 +2001,7 @@ fn choose_folder_externally() -> Result<Option<PathBuf>> {
     let _restore = RawModeRestore;
 
     let script = "Add-Type -AssemblyName System.Windows.Forms; $dlg = New-Object System.Windows.Forms.FolderBrowserDialog; $dlg.Description = 'Select music folder'; if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.WriteLine($dlg.SelectedPath) }";
-    let output = Command::new("powershell")
+    let output = std::process::Command::new("powershell")
         .args(["-NoProfile", "-Command", script])
         .output()?;
 
@@ -2004,7 +2063,7 @@ enum FolderPickerResult {
 
 #[cfg(not(windows))]
 fn try_external_folder_picker(command: &str, args: &[&str]) -> Result<FolderPickerResult> {
-    let output = match Command::new(command).args(args).output() {
+    let output = match std::process::Command::new(command).args(args).output() {
         Ok(output) => output,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
             return Ok(FolderPickerResult::Unavailable);
@@ -3300,6 +3359,34 @@ mod tests {
 
         assert!(audio.stopped);
         assert_eq!(core.status, "Reached end of queue");
+    }
+
+    #[test]
+    fn inferred_tunetui_config_dir_uses_home_when_userprofile_missing() {
+        let inferred = inferred_tunetui_config_dir(None, Some("/home/tune"), None);
+        assert_eq!(inferred, Some(PathBuf::from("/home/tune/.config/tunetui")));
+    }
+
+    #[test]
+    fn inferred_tunetui_config_dir_respects_existing_override() {
+        let inferred =
+            inferred_tunetui_config_dir(None, Some("/home/tune"), Some("/custom/tunetui-config"));
+        assert_eq!(inferred, None);
+    }
+
+    #[test]
+    fn should_set_ssh_term_when_over_ssh_and_term_is_missing() {
+        assert!(should_set_ssh_term(Some("/dev/pts/0"), None, None, None));
+    }
+
+    #[test]
+    fn should_not_set_ssh_term_when_terminal_is_already_set() {
+        assert!(!should_set_ssh_term(
+            Some("/dev/pts/0"),
+            None,
+            None,
+            Some("xterm-256color")
+        ));
     }
 
     #[cfg(not(windows))]

@@ -37,6 +37,9 @@ Performance-oriented terminal music player for desktop terminal workflows.
 cargo run --release
 ```
 
+On SSH sessions, TuneTUI auto-sets `TERM=xterm-256color` when `TERM` is missing/`dumb`.
+If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI auto-falls back to `$HOME/.config/tunetui`.
+
 ## Controls
 
 - `Up/Down`: select track
