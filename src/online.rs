@@ -136,7 +136,7 @@ impl OnlineSession {
                 nickname: normalized_nickname(local_nickname),
                 is_local: true,
                 is_host: true,
-                ping_ms: 18,
+                ping_ms: 0,
                 manual_extra_delay_ms: 0,
                 auto_ping_delay: true,
             }],
@@ -159,7 +159,7 @@ impl OnlineSession {
                 nickname: normalized_nickname(local_nickname),
                 is_local: true,
                 is_host: false,
-                ping_ms: 42,
+                ping_ms: 0,
                 manual_extra_delay_ms: 0,
                 auto_ping_delay: true,
             }],
@@ -205,46 +205,12 @@ impl OnlineSession {
     }
 
     pub fn recalibrate_local_ping(&mut self) {
-        let remote_count = self
-            .participants
-            .iter()
-            .filter(|entry| !entry.is_local)
-            .count();
         if let Some(local) = self.local_participant_mut() {
-            let mut rng = rand::rng();
-            let base = 18_u16.saturating_add((remote_count as u16).saturating_mul(4));
-            let jitter = rng.random_range(0..18_u16);
-            local.ping_ms = base.saturating_add(jitter);
-            self.last_sync_drift_ms = rng.random_range(-35_i32..35_i32);
+            if local.is_host {
+                local.ping_ms = 0;
+            }
+            self.last_sync_drift_ms = 0;
         }
-    }
-
-    pub fn add_simulated_listener(&mut self) -> String {
-        let next_index = self
-            .participants
-            .iter()
-            .filter(|entry| !entry.is_local)
-            .count()
-            .saturating_add(1);
-        let nickname = format!("listener-{next_index}");
-        let mut rng = rand::rng();
-        self.participants.push(Participant {
-            nickname: nickname.clone(),
-            is_local: false,
-            is_host: false,
-            ping_ms: rng.random_range(22..120_u16),
-            manual_extra_delay_ms: 0,
-            auto_ping_delay: true,
-        });
-        nickname
-    }
-
-    pub fn remove_latest_listener(&mut self) -> Option<String> {
-        let index = self
-            .participants
-            .iter()
-            .rposition(|entry| !entry.is_local)?;
-        Some(self.participants.remove(index).nickname)
     }
 
     pub fn push_shared_track(

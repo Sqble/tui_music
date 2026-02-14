@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_PEERS: usize = 8;
 const INVITE_PREFIX_NO_PASSWORD: &str = "T1";
@@ -26,6 +26,8 @@ const STUN_ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const STUN_ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const STREAM_CHUNK_BYTES: usize = 24 * 1024;
 const MAX_STREAM_FILE_BYTES: u64 = 1_073_741_824;
+const PING_INTERVAL: Duration = Duration::from_millis(1_500);
+const PING_TIMEOUT: Duration = Duration::from_millis(5_000);
 
 pub struct DecodedInvite {
     pub server_addr: String,
@@ -521,6 +523,12 @@ fn client_loop(
                             }
                             let _ = read_event_tx.send(NetworkEvent::SessionSync(session));
                         }
+                        Ok(WireServerMessage::Ping { nonce }) => {
+                            let _ = send_json_line_shared(
+                                &read_writer,
+                                &WireClientMessage::Pong { nonce },
+                            );
+                        }
                         Ok(WireServerMessage::StreamRequest { path, request_id }) => {
                             let permitted = read_upload_guard
                                 .lock()
@@ -705,6 +713,8 @@ fn host_loop(
     let mut peers: HashMap<u32, PeerConnection> = HashMap::new();
     let mut pending_pull_requests: HashMap<(u32, u64), PathBuf> = HashMap::new();
     let mut inbound_streams: HashMap<(u32, u64), InboundStreamDownload> = HashMap::new();
+    let mut pending_pings: HashMap<u32, PendingPing> = HashMap::new();
+    let mut last_ping_sweep_at = Instant::now();
     let mut next_peer_id: u32 = 1;
 
     let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
@@ -732,9 +742,12 @@ fn host_loop(
                     inbound,
                     session,
                     expected_password.as_deref(),
-                    &mut peers,
-                    &mut pending_pull_requests,
-                    &mut inbound_streams,
+                    InboundState {
+                        peers: &mut peers,
+                        pending_pull_requests: &mut pending_pull_requests,
+                        inbound_streams: &mut inbound_streams,
+                        pending_pings: &mut pending_pings,
+                    },
                     &event_tx,
                 ),
                 Err(TryRecvError::Empty) => break,
@@ -796,6 +809,28 @@ fn host_loop(
             }
         }
 
+        if last_ping_sweep_at.elapsed() >= PING_INTERVAL {
+            last_ping_sweep_at = Instant::now();
+            pending_pings.retain(|peer_id, pending| {
+                peers.contains_key(peer_id) && pending.sent_at.elapsed() <= PING_TIMEOUT
+            });
+            for (peer_id, peer) in &peers {
+                if pending_pings.contains_key(peer_id) {
+                    continue;
+                }
+                let nonce = rand::rng().random::<u64>();
+                if send_json_line_shared(&peer.writer, &WireServerMessage::Ping { nonce }).is_ok() {
+                    pending_pings.insert(
+                        *peer_id,
+                        PendingPing {
+                            nonce,
+                            sent_at: Instant::now(),
+                        },
+                    );
+                }
+            }
+        }
+
         thread::sleep(Duration::from_millis(12));
     }
 }
@@ -804,11 +839,15 @@ fn handle_inbound(
     inbound: Inbound,
     session: &mut OnlineSession,
     expected_password: Option<&str>,
-    peers: &mut HashMap<u32, PeerConnection>,
-    pending_pull_requests: &mut HashMap<(u32, u64), PathBuf>,
-    inbound_streams: &mut HashMap<(u32, u64), InboundStreamDownload>,
+    state: InboundState<'_>,
     event_tx: &Sender<NetworkEvent>,
 ) {
+    let InboundState {
+        peers,
+        pending_pull_requests,
+        inbound_streams,
+        pending_pings,
+    } = state;
     match inbound {
         Inbound::Hello {
             peer_id,
@@ -899,6 +938,30 @@ fn handle_inbound(
             apply_action_to_session(session, wire_to_action(action), &origin);
             broadcast_state(peers, session);
             let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
+        }
+        Inbound::Pong { peer_id, nonce } => {
+            let Some(pending) = pending_pings.get(&peer_id) else {
+                return;
+            };
+            if pending.nonce != nonce {
+                return;
+            }
+            let rtt_ms = pending
+                .sent_at
+                .elapsed()
+                .as_millis()
+                .clamp(0, u128::from(u16::MAX)) as u16;
+            pending_pings.remove(&peer_id);
+            if let Some(peer) = peers.get(&peer_id)
+                && let Some(participant) = session
+                    .participants
+                    .iter_mut()
+                    .find(|entry| entry.nickname.eq_ignore_ascii_case(&peer.nickname))
+            {
+                participant.ping_ms = smooth_ping(participant.ping_ms, rtt_ms);
+                broadcast_state(peers, session);
+                let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
+            }
         }
         Inbound::StreamRequest {
             peer_id,
@@ -1035,6 +1098,7 @@ fn handle_inbound(
                     .retain(|participant| participant.nickname != peer.nickname);
                 pending_pull_requests.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
                 inbound_streams.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
+                pending_pings.remove(&peer_id);
                 broadcast_state(peers, session);
                 let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
             }
@@ -1043,6 +1107,7 @@ fn handle_inbound(
             peers.remove(&peer_id);
             pending_pull_requests.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
             inbound_streams.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
+            pending_pings.remove(&peer_id);
             let _ = event_tx.send(NetworkEvent::Status(format!("peer read error: {error}")));
         }
     }
@@ -1180,6 +1245,9 @@ fn host_peer_reader(peer_id: u32, stream: TcpStream, inbound_tx: Sender<Inbound>
                 match msg {
                     Ok(WireClientMessage::Action(action)) => {
                         let _ = inbound_tx.send(Inbound::Action { peer_id, action });
+                    }
+                    Ok(WireClientMessage::Pong { nonce }) => {
+                        let _ = inbound_tx.send(Inbound::Pong { peer_id, nonce });
                     }
                     Ok(WireClientMessage::StreamRequest { path, request_id }) => {
                         let _ = inbound_tx.send(Inbound::StreamRequest {
@@ -1372,10 +1440,31 @@ fn next_request_id() -> u64 {
     rand::rng().random()
 }
 
+fn smooth_ping(previous: u16, sample: u16) -> u16 {
+    if previous == 0 {
+        sample
+    } else {
+        ((u32::from(previous) * 3 + u32::from(sample)) / 4) as u16
+    }
+}
+
 #[derive(Debug)]
 struct PeerConnection {
     nickname: String,
     writer: Arc<Mutex<TcpStream>>,
+}
+
+#[derive(Debug)]
+struct PendingPing {
+    nonce: u64,
+    sent_at: Instant,
+}
+
+struct InboundState<'a> {
+    peers: &'a mut HashMap<u32, PeerConnection>,
+    pending_pull_requests: &'a mut HashMap<(u32, u64), PathBuf>,
+    inbound_streams: &'a mut HashMap<(u32, u64), InboundStreamDownload>,
+    pending_pings: &'a mut HashMap<u32, PendingPing>,
 }
 
 #[derive(Debug)]
@@ -1390,6 +1479,10 @@ enum Inbound {
     Action {
         peer_id: u32,
         action: WireAction,
+    },
+    Pong {
+        peer_id: u32,
+        nonce: u64,
     },
     StreamRequest {
         peer_id: u32,
@@ -1431,6 +1524,9 @@ enum WireClientMessage {
         password: Option<String>,
     },
     Action(WireAction),
+    Pong {
+        nonce: u64,
+    },
     StreamRequest {
         path: PathBuf,
         request_id: u64,
@@ -1460,6 +1556,9 @@ enum WireServerMessage {
         session: Option<OnlineSession>,
     },
     Session(OnlineSession),
+    Ping {
+        nonce: u64,
+    },
     StreamRequest {
         path: PathBuf,
         request_id: u64,
@@ -1670,5 +1769,32 @@ mod tests {
     fn validate_stream_source_rejects_missing_path() {
         let result = validate_stream_source(Path::new("does_not_exist.flac"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn ping_wire_messages_round_trip() {
+        let ping = WireServerMessage::Ping { nonce: 123 };
+        let encoded_ping = serde_json::to_string(&ping).expect("serialize ping");
+        let decoded_ping: WireServerMessage =
+            serde_json::from_str(&encoded_ping).expect("deserialize ping");
+        assert!(matches!(
+            decoded_ping,
+            WireServerMessage::Ping { nonce: 123 }
+        ));
+
+        let pong = WireClientMessage::Pong { nonce: 123 };
+        let encoded_pong = serde_json::to_string(&pong).expect("serialize pong");
+        let decoded_pong: WireClientMessage =
+            serde_json::from_str(&encoded_pong).expect("deserialize pong");
+        assert!(matches!(
+            decoded_pong,
+            WireClientMessage::Pong { nonce: 123 }
+        ));
+    }
+
+    #[test]
+    fn smooth_ping_prefers_recent_history() {
+        assert_eq!(smooth_ping(0, 38), 38);
+        assert_eq!(smooth_ping(100, 20), 80);
     }
 }

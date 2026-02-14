@@ -173,6 +173,7 @@ pub fn draw(
     audio: &dyn AudioEngine,
     action_panel: Option<&ActionPanelView>,
     stats_snapshot: Option<&StatsSnapshot>,
+    join_prompt_input: Option<&str>,
 ) {
     let colors = palette(core.theme);
     frame.render_widget(
@@ -219,6 +220,19 @@ pub fn draw(
         Span::styled(
             format!("Mode {:?}", core.playback_mode),
             Style::default().fg(colors.alert),
+        ),
+        Span::styled("  |  ", Style::default().fg(colors.muted)),
+        Span::styled(
+            if core.online.session.is_some() {
+                "Online LIVE"
+            } else {
+                "Online OFF"
+            },
+            Style::default().fg(if core.online.session.is_some() {
+                colors.accent
+            } else {
+                colors.muted
+            }),
         ),
     ]));
     frame.render_widget(header_left, header_chunks[0]);
@@ -423,7 +437,7 @@ pub fn draw(
     } else if core.header_section == HeaderSection::Lyrics {
         "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: c host, j join, l leave, o mode, q quality, p/x peers, [/ ] delay, g ping, s queue"
+        "Keys: h host, j join, l leave, o mode, q quality, [/ ] delay, a auto delay, g ping, s queue"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -443,6 +457,43 @@ pub fn draw(
     if let Some(panel) = action_panel {
         draw_action_panel(frame, panel, &colors);
     }
+    if let Some(invite_input) = join_prompt_input {
+        draw_join_prompt(frame, invite_input, &colors);
+    }
+}
+
+fn draw_join_prompt(frame: &mut Frame, invite_input: &str, colors: &ThemePalette) {
+    let popup = centered_rect(frame.area(), 68, 34);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        panel_block(
+            "Join Online Room",
+            colors.popup_bg,
+            colors.text,
+            colors.border,
+        ),
+        popup,
+    );
+
+    let inner = popup.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Invite code", Style::default().fg(colors.muted)),
+            Span::styled(": ", Style::default().fg(colors.muted)),
+            Span::styled(invite_input, Style::default().fg(colors.text)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[Enter] Join   [V] Paste Clipboard   [Esc] Cancel",
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 fn header_section_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'static> {
@@ -534,7 +585,7 @@ fn draw_online_section(frame: &mut Frame, body: &[Rect], colors: ThemePalette, c
             body,
             colors,
             "Online",
-            "No room connected. Press c to host or j to join.",
+            "No room connected. Press h to host or j to join.",
         );
         return;
     };

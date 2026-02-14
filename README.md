@@ -29,7 +29,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
 - Add directory from actions panel via typed path or external folder picker (PowerShell on Windows, zenity/kdialog on Linux)
 - Remove directory from actions panel
-- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates, sub-second periodic playback-state sync (track/position/pause), and lossless bidirectional file streaming fallback (host->listener and host<-listener over the same session socket)
+- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates, sub-second periodic playback-state sync (track/position/pause), periodic measured ping RTT updates, and lossless bidirectional file streaming fallback (host->listener and host<-listener over the same session socket)
 - Invite code is reversible and carries host IPv4 + port (obfuscated, not cryptographically secure); optional room password can be embedded into the same code for one-step join
 - Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
 
@@ -67,11 +67,11 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - `Up/Down` (Lyrics tab): move selected lyric line
 - `Enter` (Lyrics edit mode): insert line after selection
 - `Ctrl+t` (Lyrics edit mode): stamp selected line with current playback time
-- `c` / `j` / `l` (Online tab): host room / join demo room / leave room
+- `h` / `j` / `l` (Online tab): host room / join demo room / leave room
 - `o` / `q` (Online tab): toggle room mode / cycle stream quality profile
-- `p` / `x` (Online tab): add/remove simulated listeners (local demo without network peers)
-- `[` / `]` / `a` / `g` (Online tab): decrease/increase manual delay, toggle auto-ping delay, recalibrate ping
+- `[` / `]` / `a` / `g` (Online tab): decrease/increase manual delay, toggle auto-ping delay, refresh ping display
 - `s` (Online tab): add current track to shared queue
+- Join prompt modal: type invite, `V` paste clipboard, `Enter` join, `Esc` cancel (persists across tabs)
 - `Ctrl+C`: quit
 
 ### Online Networking Defaults

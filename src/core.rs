@@ -678,27 +678,6 @@ impl TuneCore {
         }
     }
 
-    pub fn online_add_simulated_peer(&mut self) {
-        if let Some(session) = self.online.session.as_mut() {
-            let nickname = session.add_simulated_listener();
-            self.set_status(&format!("{nickname} joined room"));
-        } else {
-            self.set_status("Join or host a room first");
-        }
-    }
-
-    pub fn online_remove_simulated_peer(&mut self) {
-        if let Some(session) = self.online.session.as_mut() {
-            if let Some(nickname) = session.remove_latest_listener() {
-                self.set_status(&format!("{nickname} left room"));
-            } else {
-                self.set_status("No remote peers to remove");
-            }
-        } else {
-            self.set_status("Join or host a room first");
-        }
-    }
-
     pub fn online_queue_current_track(&mut self, path: Option<&Path>) {
         let Some(path) = path else {
             self.set_status("No active track to add to shared queue");

@@ -8,7 +8,8 @@ use crate::online_net::{
     decode_invite_code, resolve_advertise_addr,
 };
 use crate::stats::{self, ListenSessionRecord, StatsStore};
-use anyhow::Result;
+use anyhow::{Context, Result};
+use arboard::Clipboard;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers, MouseEvent, MouseEventKind,
@@ -821,6 +822,9 @@ pub fn run() -> Result<()> {
                     &*audio,
                     panel_view.as_ref(),
                     stats_snapshot.as_ref(),
+                    online_runtime
+                        .join_prompt_active
+                        .then_some(online_runtime.join_code_input.as_str()),
                 )
             })?;
             core.dirty = false;
@@ -832,6 +836,14 @@ pub fn run() -> Result<()> {
         }
 
         let event = event::read()?;
+        if let Event::Paste(text) = &event
+            && online_runtime.join_prompt_active
+        {
+            append_invite_input(&mut online_runtime, text);
+            core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
+            core.dirty = true;
+            continue;
+        }
         if let Event::Mouse(mouse) = event {
             handle_mouse(&mut core, mouse, library_rect);
             continue;
@@ -856,13 +868,13 @@ pub fn run() -> Result<()> {
             continue;
         }
 
+        if handle_online_inline_input(&mut core, &*audio, key, &mut online_runtime) {
+            continue;
+        }
         if handle_stats_inline_input(&mut core, key) {
             continue;
         }
         if handle_lyrics_inline_input(&mut core, &*audio, key) {
-            continue;
-        }
-        if handle_online_inline_input(&mut core, &*audio, key, &mut online_runtime) {
             continue;
         }
 
@@ -1308,14 +1320,6 @@ fn handle_online_inline_input(
     key: KeyEvent,
     online_runtime: &mut OnlineRuntime,
 ) -> bool {
-    if core.header_section != HeaderSection::Online {
-        return false;
-    }
-
-    if key.code == KeyCode::Tab || key.code == KeyCode::Char('/') {
-        return false;
-    }
-
     if online_runtime.join_prompt_active {
         match key.code {
             KeyCode::Esc => {
@@ -1328,6 +1332,34 @@ fn handle_online_inline_input(
             KeyCode::Backspace => {
                 online_runtime.join_code_input.pop();
                 core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
+                core.dirty = true;
+                return true;
+            }
+            KeyCode::Char('v') | KeyCode::Char('V')
+                if !key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                match paste_invite_from_clipboard(online_runtime) {
+                    Ok(()) => {
+                        core.status =
+                            format!("Pasted invite code: {}", online_runtime.join_code_input);
+                    }
+                    Err(err) => {
+                        core.status = format!("Clipboard paste failed: {err}");
+                    }
+                }
+                core.dirty = true;
+                return true;
+            }
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                match paste_invite_from_clipboard(online_runtime) {
+                    Ok(()) => {
+                        core.status =
+                            format!("Pasted invite code: {}", online_runtime.join_code_input);
+                    }
+                    Err(err) => {
+                        core.status = format!("Clipboard paste failed: {err}");
+                    }
+                }
                 core.dirty = true;
                 return true;
             }
@@ -1344,19 +1376,30 @@ fn handle_online_inline_input(
                 return true;
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if !ch.is_ascii_whitespace() {
-                    online_runtime.join_code_input.push(ch);
-                    core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
-                    core.dirty = true;
-                }
+                append_invite_char(online_runtime, ch);
+                core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
+                core.dirty = true;
                 return true;
             }
             _ => return true,
         }
     }
 
+    if core.header_section != HeaderSection::Online {
+        return false;
+    }
+
+    if key.code == KeyCode::Tab || key.code == KeyCode::Char('/') {
+        return false;
+    }
+
     match key.code {
-        KeyCode::Char('c') => {
+        KeyCode::Char('h') => {
+            if core.online.session.is_some() {
+                core.status = String::from("Already in online room. Press l to leave first");
+                core.dirty = true;
+                return true;
+            }
             online_runtime.shutdown();
             online_runtime.last_transport_seq = 0;
             core.online_host_room(&online_runtime.local_nickname);
@@ -1411,6 +1454,11 @@ fn handle_online_inline_input(
             true
         }
         KeyCode::Char('j') => {
+            if core.online.session.is_some() {
+                core.status = String::from("Already in online room. Press l to leave first");
+                core.dirty = true;
+                return true;
+            }
             if let Some(room_code_input) = optional_env("TUNETUI_ONLINE_ROOM_CODE") {
                 join_from_invite_code(core, online_runtime, &room_code_input);
             } else {
@@ -1443,14 +1491,6 @@ fn handle_online_inline_input(
             {
                 network.send_local_action(NetworkLocalAction::SetQuality(session.quality));
             }
-            true
-        }
-        KeyCode::Char('p') => {
-            core.online_add_simulated_peer();
-            true
-        }
-        KeyCode::Char('x') => {
-            core.online_remove_simulated_peer();
             true
         }
         KeyCode::Char('g') => {
@@ -1512,6 +1552,29 @@ fn handle_online_inline_input(
         }
         _ => false,
     }
+}
+
+fn append_invite_char(online_runtime: &mut OnlineRuntime, ch: char) {
+    if ch.is_ascii_whitespace() {
+        return;
+    }
+    if online_runtime.join_code_input.len() >= 96 {
+        return;
+    }
+    online_runtime.join_code_input.push(ch.to_ascii_uppercase());
+}
+
+fn append_invite_input(online_runtime: &mut OnlineRuntime, value: &str) {
+    for ch in value.chars() {
+        append_invite_char(online_runtime, ch);
+    }
+}
+
+fn paste_invite_from_clipboard(online_runtime: &mut OnlineRuntime) -> anyhow::Result<()> {
+    let mut clipboard = Clipboard::new().context("clipboard unavailable")?;
+    let value = clipboard.get_text().context("clipboard text unavailable")?;
+    append_invite_input(online_runtime, &value);
+    Ok(())
 }
 
 fn inferred_online_nickname() -> String {
