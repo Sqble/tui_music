@@ -51,6 +51,7 @@ struct OnlineRuntime {
     password_prompt_mode: OnlinePasswordPromptMode,
     password_input: String,
     pending_join_invite_code: String,
+    room_code_revealed: bool,
     host_invite_modal_active: bool,
     host_invite_code: String,
     host_invite_button: HostInviteModalButton,
@@ -73,6 +74,7 @@ impl OnlineRuntime {
         self.password_prompt_mode = OnlinePasswordPromptMode::Host;
         self.password_input.clear();
         self.pending_join_invite_code.clear();
+        self.room_code_revealed = false;
         self.host_invite_modal_active = false;
         self.host_invite_code.clear();
         self.host_invite_button = HostInviteModalButton::Copy;
@@ -838,6 +840,7 @@ pub fn run() -> Result<()> {
         password_prompt_mode: OnlinePasswordPromptMode::Host,
         password_input: String::new(),
         pending_join_invite_code: String::new(),
+        room_code_revealed: false,
         host_invite_modal_active: false,
         host_invite_code: String::new(),
         host_invite_button: HostInviteModalButton::Copy,
@@ -914,6 +917,7 @@ pub fn run() -> Result<()> {
                             .then_some(online_runtime.join_code_input.as_str()),
                         online_password_prompt: password_prompt_modal.as_ref(),
                         host_invite_modal: host_invite_modal.as_ref(),
+                        room_code_revealed: online_runtime.room_code_revealed,
                     },
                 )
             })?;
@@ -1577,6 +1581,30 @@ fn handle_online_inline_input(
                 (&online_runtime.network, core.online.session.as_ref())
             {
                 network.send_local_action(NetworkLocalAction::SetQuality(session.quality));
+            }
+            true
+        }
+        KeyCode::Char('t') | KeyCode::Char('T') => {
+            online_runtime.room_code_revealed = !online_runtime.room_code_revealed;
+            core.status = if online_runtime.room_code_revealed {
+                String::from("Room code shown")
+            } else {
+                String::from("Room code hidden")
+            };
+            core.dirty = true;
+            true
+        }
+        KeyCode::Char('2') => {
+            if let Some(session) = core.online.session.as_ref() {
+                match copy_invite_to_clipboard(&session.room_code) {
+                    Ok(()) => {
+                        core.status = String::from("Copied room code");
+                    }
+                    Err(err) => {
+                        core.status = format!("Clipboard copy failed: {err}");
+                    }
+                }
+                core.dirty = true;
             }
             true
         }
@@ -4857,6 +4885,7 @@ mod tests {
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),
             pending_join_invite_code: String::new(),
+            room_code_revealed: false,
             host_invite_modal_active: true,
             host_invite_code: String::from("T1ABCDE"),
             host_invite_button: HostInviteModalButton::Copy,
@@ -4895,6 +4924,7 @@ mod tests {
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),
             pending_join_invite_code: String::new(),
+            room_code_revealed: false,
             host_invite_modal_active: true,
             host_invite_code: String::from("T1ABCDE"),
             host_invite_button: HostInviteModalButton::Copy,
@@ -4928,6 +4958,7 @@ mod tests {
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),
             pending_join_invite_code: String::new(),
+            room_code_revealed: false,
             host_invite_modal_active: false,
             host_invite_code: String::new(),
             host_invite_button: HostInviteModalButton::Copy,
@@ -4967,6 +4998,7 @@ mod tests {
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),
             pending_join_invite_code: String::new(),
+            room_code_revealed: false,
             host_invite_modal_active: false,
             host_invite_code: String::new(),
             host_invite_button: HostInviteModalButton::Copy,
@@ -5001,6 +5033,7 @@ mod tests {
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),
             pending_join_invite_code: String::new(),
+            room_code_revealed: false,
             host_invite_modal_active: false,
             host_invite_code: String::new(),
             host_invite_button: HostInviteModalButton::Copy,

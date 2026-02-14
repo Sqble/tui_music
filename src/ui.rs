@@ -41,6 +41,7 @@ pub struct OverlayViews<'a> {
     pub join_prompt_input: Option<&'a str>,
     pub online_password_prompt: Option<&'a OnlinePasswordPromptView>,
     pub host_invite_modal: Option<&'a HostInviteModalView>,
+    pub room_code_revealed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -430,7 +431,7 @@ pub fn draw(
                 draw_lyrics_section(frame, &body, colors, core, audio);
             }
             HeaderSection::Online => {
-                draw_online_section(frame, &body, colors, core);
+                draw_online_section(frame, &body, colors, core, overlays.room_code_revealed);
             }
         }
     }
@@ -454,7 +455,7 @@ pub fn draw(
     } else if core.header_section == HeaderSection::Lyrics {
         "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: h host, j join, l leave, o mode, q quality, s queue, / actions, Tab tabs"
+        "Keys: h host, j join, l leave, o mode, q quality, t hide/show code, 2 copy code, s queue, / actions"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -691,7 +692,13 @@ fn draw_placeholder_section(
     );
 }
 
-fn draw_online_section(frame: &mut Frame, body: &[Rect], colors: ThemePalette, core: &TuneCore) {
+fn draw_online_section(
+    frame: &mut Frame,
+    body: &[Rect],
+    colors: ThemePalette,
+    core: &TuneCore,
+    room_code_revealed: bool,
+) {
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
@@ -713,19 +720,32 @@ fn draw_online_section(frame: &mut Frame, body: &[Rect], colors: ThemePalette, c
         return;
     };
 
+    let code_display = if room_code_revealed {
+        session.room_code.clone()
+    } else {
+        String::from("[hidden]")
+    };
+
     let mut left_lines = vec![Line::from(vec![
-        Span::styled("Room ", Style::default().fg(colors.muted)),
-        Span::styled(
-            session.room_code.as_str(),
-            Style::default()
-                .fg(colors.accent)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  |  Mode ", Style::default().fg(colors.muted)),
+        Span::styled("Mode ", Style::default().fg(colors.muted)),
         Span::styled(session.mode.label(), Style::default().fg(colors.text)),
         Span::styled("  |  Stream ", Style::default().fg(colors.muted)),
         Span::styled(session.quality.label(), Style::default().fg(colors.alert)),
     ])];
+
+    left_lines.push(Line::from(vec![
+        Span::styled("Room code ", Style::default().fg(colors.muted)),
+        Span::styled(
+            code_display,
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  [t] show/hide  [2] copy",
+            Style::default().fg(colors.muted),
+        ),
+    ]));
 
     left_lines.push(Line::from(Span::styled(
         format!(

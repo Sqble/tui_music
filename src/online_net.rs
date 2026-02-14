@@ -7,7 +7,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
+use std::net::{
+    IpAddr, Ipv4Addr, Shutdown as NetShutdown, SocketAddr, TcpListener, TcpStream, UdpSocket,
+};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
@@ -731,7 +733,12 @@ fn client_loop(
 
     loop {
         match cmd_rx.recv() {
-            Ok(NetworkCommand::Shutdown) => break,
+            Ok(NetworkCommand::Shutdown) => {
+                if let Ok(stream) = writer.lock() {
+                    let _ = stream.shutdown(NetShutdown::Both);
+                }
+                break;
+            }
             Ok(NetworkCommand::LocalAction(action)) => {
                 let msg = WireClientMessage::Action(action_to_wire(action));
                 if let Err(err) = send_json_line_shared(&writer, &msg) {
@@ -756,6 +763,10 @@ fn client_loop(
             }
             Err(_) => break,
         }
+    }
+
+    if let Ok(stream) = writer.lock() {
+        let _ = stream.shutdown(NetShutdown::Both);
     }
 }
 
