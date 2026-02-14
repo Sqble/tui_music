@@ -31,6 +31,18 @@ pub struct HostInviteModalView {
     pub copy_selected: bool,
 }
 
+pub struct OnlinePasswordPromptView {
+    pub title: String,
+    pub subtitle: String,
+    pub masked_input: String,
+}
+
+pub struct OverlayViews<'a> {
+    pub join_prompt_input: Option<&'a str>,
+    pub online_password_prompt: Option<&'a OnlinePasswordPromptView>,
+    pub host_invite_modal: Option<&'a HostInviteModalView>,
+}
+
 #[derive(Clone, Copy)]
 struct ThemePalette {
     bg: Color,
@@ -178,8 +190,7 @@ pub fn draw(
     audio: &dyn AudioEngine,
     action_panel: Option<&ActionPanelView>,
     stats_snapshot: Option<&StatsSnapshot>,
-    join_prompt_input: Option<&str>,
-    host_invite_modal: Option<&HostInviteModalView>,
+    overlays: OverlayViews<'_>,
 ) {
     let colors = palette(core.theme);
     frame.render_widget(
@@ -443,7 +454,7 @@ pub fn draw(
     } else if core.header_section == HeaderSection::Lyrics {
         "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: h host, j join, l leave, o mode, q quality, [/ ] delay, a auto delay, g ping, s queue"
+        "Keys: h host, j join, l leave, o mode, q quality, s queue, / actions, Tab tabs"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -463,10 +474,13 @@ pub fn draw(
     if let Some(panel) = action_panel {
         draw_action_panel(frame, panel, &colors);
     }
-    if let Some(invite_input) = join_prompt_input {
+    if let Some(invite_input) = overlays.join_prompt_input {
         draw_join_prompt(frame, invite_input, &colors);
     }
-    if let Some(host_invite_modal) = host_invite_modal {
+    if let Some(password_prompt) = overlays.online_password_prompt {
+        draw_online_password_prompt(frame, password_prompt, &colors);
+    }
+    if let Some(host_invite_modal) = overlays.host_invite_modal {
         draw_host_invite_modal(frame, host_invite_modal, &colors);
     }
 }
@@ -503,6 +517,47 @@ fn draw_join_prompt(frame: &mut Frame, invite_input: &str, colors: &ThemePalette
         )),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+fn draw_online_password_prompt(
+    frame: &mut Frame,
+    prompt: &OnlinePasswordPromptView,
+    colors: &ThemePalette,
+) {
+    let popup = centered_rect(frame.area(), 58, 34);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        panel_block(&prompt.title, colors.popup_bg, colors.text, colors.border),
+        popup,
+    );
+    let inner = popup.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let masked = if prompt.masked_input.is_empty() {
+        String::from("(empty)")
+    } else {
+        prompt.masked_input.clone()
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            prompt.subtitle.as_str(),
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(masked, Style::default().fg(colors.accent))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press Enter to continue, Esc to cancel.",
+            Style::default().fg(colors.muted),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn draw_host_invite_modal(frame: &mut Frame, modal: &HostInviteModalView, colors: &ThemePalette) {

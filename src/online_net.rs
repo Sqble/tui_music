@@ -3,6 +3,7 @@ use anyhow::Context;
 use base64::Engine;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -14,11 +15,12 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_PEERS: usize = 8;
-const INVITE_PREFIX_NO_PASSWORD: &str = "T1";
-const INVITE_PREFIX_WITH_PASSWORD: &str = "T1P";
+const INVITE_PREFIX_SECURE: &str = "T2";
 const INVITE_MAX_PASSWORD_BYTES: usize = 32;
 const INVITE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-const INVITE_OBFUSCATION_KEY: &[u8] = b"TuneTuiInviteKeyV1";
+const INVITE_SALT_BYTES: usize = 12;
+const INVITE_CIPHER_BYTES: usize = 6;
+const INVITE_TAG_BYTES: usize = 8;
 const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
 const STUN_BINDING_REQUEST: u16 = 0x0001;
 const STUN_BINDING_SUCCESS_RESPONSE: u16 = 0x0101;
@@ -32,7 +34,6 @@ const PING_TIMEOUT: Duration = Duration::from_millis(5_000);
 pub struct DecodedInvite {
     pub server_addr: String,
     pub room_code: String,
-    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -208,77 +209,88 @@ pub fn resolve_advertise_addr(bind_addr: &str) -> anyhow::Result<String> {
     Ok(format!("{ip}:{port}"))
 }
 
-pub fn build_invite_code(
-    server_addr: &str,
-    password: Option<&str>,
-    include_password: bool,
-) -> anyhow::Result<String> {
+pub fn build_invite_code(server_addr: &str, password: &str) -> anyhow::Result<String> {
     let socket = parse_socket_addr_v4(server_addr)?;
-    let password_bytes = password.unwrap_or("").as_bytes();
+    let password_bytes = password.trim().as_bytes();
+    if password_bytes.is_empty() {
+        anyhow::bail!("password is required for secure invite code");
+    }
     if password_bytes.len() > INVITE_MAX_PASSWORD_BYTES {
         anyhow::bail!("password too long for invite code (max {INVITE_MAX_PASSWORD_BYTES} bytes)");
     }
 
-    let password_len = if include_password {
-        password_bytes.len()
-    } else {
-        0
-    };
-    let mut payload = Vec::with_capacity(8 + password_len);
-    payload.push(1);
-    payload.extend_from_slice(&socket.ip().octets());
-    payload.extend_from_slice(&socket.port().to_be_bytes());
-    payload.push(password_len as u8);
-    if password_len > 0 {
-        payload.extend_from_slice(&password_bytes[..password_len]);
+    let mut salt = [0_u8; INVITE_SALT_BYTES];
+    rand::rng().fill(&mut salt);
+
+    let mut clear = [0_u8; INVITE_CIPHER_BYTES];
+    clear[..4].copy_from_slice(&socket.ip().octets());
+    clear[4..].copy_from_slice(&socket.port().to_be_bytes());
+
+    let (enc_key, mac_key) = derive_invite_keys(password.trim(), &salt);
+    let keystream = invite_keystream(&enc_key, INVITE_CIPHER_BYTES);
+    let mut cipher = [0_u8; INVITE_CIPHER_BYTES];
+    for (idx, byte) in clear.iter().enumerate() {
+        cipher[idx] = *byte ^ keystream[idx];
     }
 
-    obfuscate_payload(&mut payload);
+    let tag_full = invite_mac(&mac_key, &salt, &cipher);
+    let mut payload =
+        Vec::with_capacity(1 + INVITE_SALT_BYTES + INVITE_CIPHER_BYTES + INVITE_TAG_BYTES);
+    payload.push(2);
+    payload.extend_from_slice(&salt);
+    payload.extend_from_slice(&cipher);
+    payload.extend_from_slice(&tag_full[..INVITE_TAG_BYTES]);
+
     let encoded = base32_encode_no_padding(&payload);
-    let prefix = if password_len > 0 {
-        INVITE_PREFIX_WITH_PASSWORD
-    } else {
-        INVITE_PREFIX_NO_PASSWORD
-    };
-    Ok(format!("{prefix}{encoded}"))
+    Ok(format!("{INVITE_PREFIX_SECURE}{encoded}"))
 }
 
-pub fn decode_invite_code(code: &str) -> anyhow::Result<DecodedInvite> {
+pub fn decode_invite_code(code: &str, password: &str) -> anyhow::Result<DecodedInvite> {
     let trimmed = code.trim().to_ascii_uppercase();
-    let with_password = if let Some(rest) = trimmed.strip_prefix(INVITE_PREFIX_WITH_PASSWORD) {
-        (true, rest)
-    } else if let Some(rest) = trimmed.strip_prefix(INVITE_PREFIX_NO_PASSWORD) {
-        (false, rest)
-    } else {
+    let Some(rest) = trimmed.strip_prefix(INVITE_PREFIX_SECURE) else {
         anyhow::bail!("invalid invite code prefix");
     };
 
-    let mut bytes = base32_decode_no_padding(with_password.1)?;
-    obfuscate_payload(&mut bytes);
-    if bytes.len() < 8 {
-        anyhow::bail!("invite payload is too short");
-    }
-    if bytes[0] != 1 {
-        anyhow::bail!("unsupported invite code version");
+    let password = password.trim();
+    if password.is_empty() {
+        anyhow::bail!("password is required");
     }
 
-    let ip = Ipv4Addr::new(bytes[1], bytes[2], bytes[3], bytes[4]);
-    let port = u16::from_be_bytes([bytes[5], bytes[6]]);
-    let password_len = bytes[7] as usize;
-    let expected_len = 8 + password_len;
+    let bytes = base32_decode_no_padding(rest)?;
+    let expected_len = 1 + INVITE_SALT_BYTES + INVITE_CIPHER_BYTES + INVITE_TAG_BYTES;
     if bytes.len() != expected_len {
         anyhow::bail!("invite payload length mismatch");
     }
-    let password = if password_len == 0 {
-        None
-    } else {
-        Some(String::from_utf8(bytes[8..].to_vec()).context("invite password is not utf-8")?)
-    };
+    if bytes[0] != 2 {
+        anyhow::bail!("unsupported invite code version");
+    }
+
+    let mut salt = [0_u8; INVITE_SALT_BYTES];
+    salt.copy_from_slice(&bytes[1..1 + INVITE_SALT_BYTES]);
+    let mut cipher = [0_u8; INVITE_CIPHER_BYTES];
+    let cipher_start = 1 + INVITE_SALT_BYTES;
+    cipher.copy_from_slice(&bytes[cipher_start..cipher_start + INVITE_CIPHER_BYTES]);
+    let tag_start = cipher_start + INVITE_CIPHER_BYTES;
+    let tag = &bytes[tag_start..tag_start + INVITE_TAG_BYTES];
+
+    let (enc_key, mac_key) = derive_invite_keys(password, &salt);
+    let expected_tag = invite_mac(&mac_key, &salt, &cipher);
+    if !constant_time_eq(tag, &expected_tag[..INVITE_TAG_BYTES]) {
+        anyhow::bail!("invalid invite password or code checksum");
+    }
+
+    let keystream = invite_keystream(&enc_key, INVITE_CIPHER_BYTES);
+    let mut clear = [0_u8; INVITE_CIPHER_BYTES];
+    for (idx, byte) in cipher.iter().enumerate() {
+        clear[idx] = *byte ^ keystream[idx];
+    }
+
+    let ip = Ipv4Addr::new(clear[0], clear[1], clear[2], clear[3]);
+    let port = u16::from_be_bytes([clear[4], clear[5]]);
 
     Ok(DecodedInvite {
         server_addr: format!("{ip}:{port}"),
         room_code: trimmed,
-        password,
     })
 }
 
@@ -417,12 +429,57 @@ fn is_public_ipv4(ip: Ipv4Addr) -> bool {
         && !ip.is_unspecified()
 }
 
-fn obfuscate_payload(payload: &mut [u8]) {
-    for (index, byte) in payload.iter_mut().enumerate() {
-        let key = INVITE_OBFUSCATION_KEY[index % INVITE_OBFUSCATION_KEY.len()];
-        let mix = (index as u8).wrapping_mul(31).wrapping_add(17);
-        *byte ^= key ^ mix;
+fn derive_invite_keys(password: &str, salt: &[u8; INVITE_SALT_BYTES]) -> ([u8; 32], [u8; 32]) {
+    let mut enc = Sha256::new();
+    enc.update(b"tunetui-invite-enc-v2");
+    enc.update(password.as_bytes());
+    enc.update(salt);
+    let enc_key: [u8; 32] = enc.finalize().into();
+
+    let mut mac = Sha256::new();
+    mac.update(b"tunetui-invite-mac-v2");
+    mac.update(password.as_bytes());
+    mac.update(salt);
+    let mac_key: [u8; 32] = mac.finalize().into();
+
+    (enc_key, mac_key)
+}
+
+fn invite_keystream(enc_key: &[u8; 32], len: usize) -> Vec<u8> {
+    let mut stream = Vec::with_capacity(len);
+    let mut counter: u64 = 0;
+    while stream.len() < len {
+        let mut digest = Sha256::new();
+        digest.update(b"tunetui-invite-stream-v2");
+        digest.update(enc_key);
+        digest.update(counter.to_be_bytes());
+        let block = digest.finalize();
+        let remaining = len - stream.len();
+        let take = remaining.min(block.len());
+        stream.extend_from_slice(&block[..take]);
+        counter = counter.saturating_add(1);
     }
+    stream
+}
+
+fn invite_mac(mac_key: &[u8; 32], salt: &[u8; INVITE_SALT_BYTES], cipher: &[u8]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"tunetui-invite-tag-v2");
+    digest.update(mac_key);
+    digest.update(salt);
+    digest.update(cipher);
+    digest.finalize().into()
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0_u8;
+    for (lhs, rhs) in left.iter().zip(right.iter()) {
+        diff |= lhs ^ rhs;
+    }
+    diff == 0
 }
 
 fn base32_encode_no_padding(data: &[u8]) -> String {
@@ -1781,20 +1838,31 @@ mod tests {
     use std::path::Path;
 
     #[test]
-    fn invite_code_round_trips_without_password() {
-        let code = build_invite_code("192.168.1.33:7878", None, false).expect("code build");
-        let decoded = decode_invite_code(&code).expect("decode");
+    fn invite_code_round_trips_with_password_key() {
+        let code = build_invite_code("192.168.1.33:7878", "party123").expect("code build");
+        let decoded = decode_invite_code(&code, "party123").expect("decode");
         assert_eq!(decoded.server_addr, "192.168.1.33:7878");
         assert_eq!(decoded.room_code, code);
-        assert_eq!(decoded.password, None);
     }
 
     #[test]
-    fn invite_code_round_trips_with_password() {
-        let code = build_invite_code("10.0.0.8:9000", Some("party123"), true).expect("code build");
-        let decoded = decode_invite_code(&code).expect("decode");
-        assert_eq!(decoded.server_addr, "10.0.0.8:9000");
-        assert_eq!(decoded.password.as_deref(), Some("party123"));
+    fn invite_code_rejects_wrong_password() {
+        let code = build_invite_code("10.0.0.8:9000", "party123").expect("code build");
+        let decoded = decode_invite_code(&code, "wrong-pass");
+        assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn invite_code_requires_password() {
+        let code = build_invite_code("10.0.0.8:9000", "party123").expect("code build");
+        let decoded = decode_invite_code(&code, "");
+        assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn invite_code_uses_secure_prefix() {
+        let code = build_invite_code("10.0.0.8:9000", "party123").expect("code build");
+        assert!(code.starts_with(INVITE_PREFIX_SECURE));
     }
 
     #[test]

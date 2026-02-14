@@ -47,6 +47,10 @@ struct OnlineRuntime {
     last_transport_seq: u64,
     join_prompt_active: bool,
     join_code_input: String,
+    password_prompt_active: bool,
+    password_prompt_mode: OnlinePasswordPromptMode,
+    password_input: String,
+    pending_join_invite_code: String,
     host_invite_modal_active: bool,
     host_invite_code: String,
     host_invite_button: HostInviteModalButton,
@@ -65,6 +69,10 @@ impl OnlineRuntime {
         self.pending_stream_path = None;
         self.remote_logical_track = None;
         self.last_remote_transport_origin = None;
+        self.password_prompt_active = false;
+        self.password_prompt_mode = OnlinePasswordPromptMode::Host;
+        self.password_input.clear();
+        self.pending_join_invite_code.clear();
         self.host_invite_modal_active = false;
         self.host_invite_code.clear();
         self.host_invite_button = HostInviteModalButton::Copy;
@@ -79,6 +87,33 @@ impl OnlineRuntime {
             copy_selected: matches!(self.host_invite_button, HostInviteModalButton::Copy),
         })
     }
+
+    fn password_prompt_view(&self) -> Option<crate::ui::OnlinePasswordPromptView> {
+        if !self.password_prompt_active {
+            return None;
+        }
+        let (title, subtitle) = match self.password_prompt_mode {
+            OnlinePasswordPromptMode::Host => (
+                "Set Room Password",
+                "This password encrypts the invite code and protects joins.",
+            ),
+            OnlinePasswordPromptMode::Join => (
+                "Enter Room Password",
+                "Needed to decrypt invite code and verify checksum.",
+            ),
+        };
+        Some(crate::ui::OnlinePasswordPromptView {
+            title: String::from(title),
+            subtitle: String::from(subtitle),
+            masked_input: "*".repeat(self.password_input.chars().count()),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnlinePasswordPromptMode {
+    Host,
+    Join,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -515,6 +550,9 @@ enum ActionPanelState {
     PlaybackSettings {
         selected: usize,
     },
+    OnlineDelaySettings {
+        selected: usize,
+    },
     ThemeSettings {
         selected: usize,
     },
@@ -680,6 +718,13 @@ impl ActionPanelState {
                 options: playback_settings_options(core),
                 selected: *selected,
             }),
+            Self::OnlineDelaySettings { selected } => Some(crate::ui::ActionPanelView {
+                title: String::from("Online Delay Settings"),
+                hint: String::from("Enter apply  Backspace back"),
+                search_query: None,
+                options: online_delay_settings_options(core),
+                selected: *selected,
+            }),
             Self::ThemeSettings { selected } => Some(crate::ui::ActionPanelView {
                 title: String::from("Theme"),
                 hint: String::from("Enter apply  Backspace back"),
@@ -789,6 +834,10 @@ pub fn run() -> Result<()> {
         last_transport_seq: 0,
         join_prompt_active: false,
         join_code_input: String::new(),
+        password_prompt_active: false,
+        password_prompt_mode: OnlinePasswordPromptMode::Host,
+        password_input: String::new(),
+        pending_join_invite_code: String::new(),
         host_invite_modal_active: false,
         host_invite_code: String::new(),
         host_invite_button: HostInviteModalButton::Copy,
@@ -840,6 +889,7 @@ pub fn run() -> Result<()> {
                 library_rect = crate::ui::library_rect(frame.area());
                 let panel_view = action_panel.to_view(&core, &*audio, &recent_root_actions);
                 let host_invite_modal = online_runtime.host_invite_modal_view();
+                let password_prompt_modal = online_runtime.password_prompt_view();
                 let stats_snapshot = (core.header_section == HeaderSection::Stats).then(|| {
                     stats_store.query(
                         &crate::stats::StatsQuery {
@@ -858,10 +908,13 @@ pub fn run() -> Result<()> {
                     &*audio,
                     panel_view.as_ref(),
                     stats_snapshot.as_ref(),
-                    (core.header_section == HeaderSection::Online
-                        && online_runtime.join_prompt_active)
-                        .then_some(online_runtime.join_code_input.as_str()),
-                    host_invite_modal.as_ref(),
+                    crate::ui::OverlayViews {
+                        join_prompt_input: (core.header_section == HeaderSection::Online
+                            && online_runtime.join_prompt_active)
+                            .then_some(online_runtime.join_code_input.as_str()),
+                        online_password_prompt: password_prompt_modal.as_ref(),
+                        host_invite_modal: host_invite_modal.as_ref(),
+                    },
                 )
             })?;
             core.dirty = false;
@@ -873,6 +926,18 @@ pub fn run() -> Result<()> {
         }
 
         let event = event::read()?;
+        if let Event::Paste(text) = &event
+            && core.header_section == HeaderSection::Online
+            && online_runtime.password_prompt_active
+        {
+            append_password_input(&mut online_runtime, text);
+            core.status = format!(
+                "Password length: {}",
+                online_runtime.password_input.chars().count()
+            );
+            core.dirty = true;
+            continue;
+        }
         if let Event::Paste(text) = &event
             && core.header_section == HeaderSection::Online
             && online_runtime.join_prompt_active
@@ -901,8 +966,13 @@ pub fn run() -> Result<()> {
                 &mut *audio,
                 &mut action_panel,
                 &mut recent_root_actions,
+                Some(&online_runtime),
                 key.code,
             );
+            continue;
+        }
+
+        if handle_online_password_prompt_input(&mut core, key, &mut online_runtime) {
             continue;
         }
 
@@ -1366,6 +1436,10 @@ fn handle_online_inline_input(
         return false;
     }
 
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+
     if online_runtime.join_prompt_active {
         match key.code {
             KeyCode::Esc => {
@@ -1422,10 +1496,15 @@ fn handle_online_inline_input(
                     core.dirty = true;
                     return true;
                 }
-                let invite_code = online_runtime.join_code_input.trim().to_string();
+                online_runtime.pending_join_invite_code =
+                    online_runtime.join_code_input.trim().to_string();
                 online_runtime.join_prompt_active = false;
                 online_runtime.join_code_input.clear();
-                join_from_invite_code(core, online_runtime, &invite_code);
+                online_runtime.password_prompt_active = true;
+                online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
+                online_runtime.password_input.clear();
+                core.status = String::from("Enter room password, then press Enter");
+                core.dirty = true;
                 return true;
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -1449,60 +1528,11 @@ fn handle_online_inline_input(
                 core.dirty = true;
                 return true;
             }
-            online_runtime.shutdown();
-            online_runtime.last_transport_seq = 0;
-            core.online_host_room(&online_runtime.local_nickname);
-            let bind_addr = std::env::var("TUNETUI_ONLINE_BIND_ADDR")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or_else(|| String::from(ONLINE_DEFAULT_BIND_ADDR));
-            let advertise_addr = std::env::var("TUNETUI_ONLINE_ADVERTISE_ADDR")
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .or_else(|| resolve_advertise_addr(&bind_addr).ok())
-                .unwrap_or_else(|| String::from("127.0.0.1:7878"));
-            let password = optional_env("TUNETUI_ONLINE_PASSWORD");
-            let include_password = env_bool("TUNETUI_ONLINE_INCLUDE_PASSWORD", true);
-            let invite_code =
-                match build_invite_code(&advertise_addr, password.as_deref(), include_password) {
-                    Ok(code) => code,
-                    Err(err) => {
-                        core.online_leave_room();
-                        core.status = format!("Invite code build failed: {err}");
-                        core.dirty = true;
-                        return true;
-                    }
-                };
-            if let Some(active) = core.online.session.as_mut() {
-                active.room_code = invite_code.clone();
-            }
-            let Some(session) = core.online.session.clone() else {
-                core.status = String::from("Online room initialization failed");
-                core.dirty = true;
-                return true;
-            };
-            match OnlineNetwork::start_host(&bind_addr, session, password.clone()) {
-                Ok(network) => {
-                    online_runtime.network = Some(network);
-                    online_runtime.host_invite_modal_active = true;
-                    online_runtime.host_invite_code = invite_code.clone();
-                    online_runtime.host_invite_button = HostInviteModalButton::Copy;
-                    core.status = format!(
-                        "Hosting {bind_addr} invite {invite_code}{}",
-                        if password.is_some() && !include_password {
-                            " (password required separately)"
-                        } else {
-                            ""
-                        }
-                    );
-                    core.dirty = true;
-                }
-                Err(err) => {
-                    core.online_leave_room();
-                    core.status = format!("Online host failed: {err}");
-                    core.dirty = true;
-                }
-            }
+            online_runtime.password_prompt_active = true;
+            online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
+            online_runtime.password_input.clear();
+            core.status = String::from("Set room password, then press Enter");
+            core.dirty = true;
             true
         }
         KeyCode::Char('j') => {
@@ -1512,7 +1542,12 @@ fn handle_online_inline_input(
                 return true;
             }
             if let Some(room_code_input) = optional_env("TUNETUI_ONLINE_ROOM_CODE") {
-                join_from_invite_code(core, online_runtime, &room_code_input);
+                online_runtime.pending_join_invite_code = room_code_input;
+                online_runtime.password_prompt_active = true;
+                online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
+                online_runtime.password_input.clear();
+                core.status = String::from("Enter room password, then press Enter");
+                core.dirty = true;
             } else {
                 online_runtime.join_prompt_active = true;
                 online_runtime.join_code_input.clear();
@@ -1545,49 +1580,6 @@ fn handle_online_inline_input(
             }
             true
         }
-        KeyCode::Char('g') => {
-            core.online_recalibrate_ping();
-            true
-        }
-        KeyCode::Char('[') => {
-            core.online_adjust_manual_delay(-10);
-            if let (Some(network), Some(session)) =
-                (&online_runtime.network, core.online.session.as_ref())
-                && let Some(local) = session.local_participant()
-            {
-                network.send_local_action(NetworkLocalAction::DelayUpdate {
-                    manual_extra_delay_ms: local.manual_extra_delay_ms,
-                    auto_ping_delay: local.auto_ping_delay,
-                });
-            }
-            true
-        }
-        KeyCode::Char(']') => {
-            core.online_adjust_manual_delay(10);
-            if let (Some(network), Some(session)) =
-                (&online_runtime.network, core.online.session.as_ref())
-                && let Some(local) = session.local_participant()
-            {
-                network.send_local_action(NetworkLocalAction::DelayUpdate {
-                    manual_extra_delay_ms: local.manual_extra_delay_ms,
-                    auto_ping_delay: local.auto_ping_delay,
-                });
-            }
-            true
-        }
-        KeyCode::Char('a') => {
-            core.online_toggle_auto_delay();
-            if let (Some(network), Some(session)) =
-                (&online_runtime.network, core.online.session.as_ref())
-                && let Some(local) = session.local_participant()
-            {
-                network.send_local_action(NetworkLocalAction::DelayUpdate {
-                    manual_extra_delay_ms: local.manual_extra_delay_ms,
-                    auto_ping_delay: local.auto_ping_delay,
-                });
-            }
-            true
-        }
         KeyCode::Char('s') => {
             let queued_path = audio
                 .current_track()
@@ -1602,7 +1594,131 @@ fn handle_online_inline_input(
             }
             true
         }
-        _ => false,
+        _ => true,
+    }
+}
+
+fn handle_online_password_prompt_input(
+    core: &mut TuneCore,
+    key: KeyEvent,
+    online_runtime: &mut OnlineRuntime,
+) -> bool {
+    if core.header_section != HeaderSection::Online || !online_runtime.password_prompt_active {
+        return false;
+    }
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            online_runtime.password_prompt_active = false;
+            online_runtime.password_input.clear();
+            online_runtime.pending_join_invite_code.clear();
+            core.status = String::from("Password entry cancelled");
+            core.dirty = true;
+            true
+        }
+        KeyCode::Backspace => {
+            online_runtime.password_input.pop();
+            core.status = format!(
+                "Password length: {}",
+                online_runtime.password_input.chars().count()
+            );
+            core.dirty = true;
+            true
+        }
+        KeyCode::Enter => {
+            let password = online_runtime.password_input.trim().to_string();
+            if password.is_empty() {
+                core.status = String::from("Password is required");
+                core.dirty = true;
+                return true;
+            }
+            match online_runtime.password_prompt_mode {
+                OnlinePasswordPromptMode::Host => {
+                    online_runtime.password_prompt_active = false;
+                    online_runtime.password_input.clear();
+                    start_host_with_password(core, online_runtime, &password);
+                }
+                OnlinePasswordPromptMode::Join => {
+                    let invite_code = online_runtime.pending_join_invite_code.trim().to_string();
+                    if invite_code.is_empty() {
+                        core.status = String::from("Invite code missing");
+                        core.dirty = true;
+                        return true;
+                    }
+                    online_runtime.password_prompt_active = false;
+                    online_runtime.password_input.clear();
+                    online_runtime.pending_join_invite_code.clear();
+                    join_from_invite_code(core, online_runtime, &invite_code, &password);
+                }
+            }
+            true
+        }
+        KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            append_password_char(online_runtime, ch);
+            core.status = format!(
+                "Password length: {}",
+                online_runtime.password_input.chars().count()
+            );
+            core.dirty = true;
+            true
+        }
+        _ => true,
+    }
+}
+
+fn start_host_with_password(
+    core: &mut TuneCore,
+    online_runtime: &mut OnlineRuntime,
+    password: &str,
+) {
+    online_runtime.shutdown();
+    online_runtime.last_transport_seq = 0;
+    core.online_host_room(&online_runtime.local_nickname);
+    let bind_addr = std::env::var("TUNETUI_ONLINE_BIND_ADDR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| String::from(ONLINE_DEFAULT_BIND_ADDR));
+    let advertise_addr = std::env::var("TUNETUI_ONLINE_ADVERTISE_ADDR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| resolve_advertise_addr(&bind_addr).ok())
+        .unwrap_or_else(|| String::from("127.0.0.1:7878"));
+    let invite_code = match build_invite_code(&advertise_addr, password) {
+        Ok(code) => code,
+        Err(err) => {
+            core.online_leave_room();
+            core.status = format!("Invite code build failed: {err}");
+            core.dirty = true;
+            return;
+        }
+    };
+
+    if let Some(active) = core.online.session.as_mut() {
+        active.room_code = invite_code.clone();
+    }
+    let Some(session) = core.online.session.clone() else {
+        core.status = String::from("Online room initialization failed");
+        core.dirty = true;
+        return;
+    };
+
+    match OnlineNetwork::start_host(&bind_addr, session, Some(password.to_string())) {
+        Ok(network) => {
+            online_runtime.network = Some(network);
+            online_runtime.host_invite_modal_active = true;
+            online_runtime.host_invite_code = invite_code.clone();
+            online_runtime.host_invite_button = HostInviteModalButton::Copy;
+            core.status = format!("Hosting {bind_addr} invite {invite_code}");
+            core.dirty = true;
+        }
+        Err(err) => {
+            core.online_leave_room();
+            core.status = format!("Online host failed: {err}");
+            core.dirty = true;
+        }
     }
 }
 
@@ -1689,6 +1805,22 @@ fn append_invite_input(online_runtime: &mut OnlineRuntime, value: &str) {
     }
 }
 
+fn append_password_char(online_runtime: &mut OnlineRuntime, ch: char) {
+    if ch.is_control() {
+        return;
+    }
+    if online_runtime.password_input.len() >= 64 {
+        return;
+    }
+    online_runtime.password_input.push(ch);
+}
+
+fn append_password_input(online_runtime: &mut OnlineRuntime, value: &str) {
+    for ch in value.chars() {
+        append_password_char(online_runtime, ch);
+    }
+}
+
 fn paste_invite_from_clipboard(online_runtime: &mut OnlineRuntime) -> anyhow::Result<()> {
     let mut clipboard = Clipboard::new().context("clipboard unavailable")?;
     let value = clipboard.get_text().context("clipboard text unavailable")?;
@@ -1737,44 +1869,30 @@ fn optional_env(key: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn env_bool(key: &str, default: bool) -> bool {
-    let Some(value) = optional_env(key) else {
-        return default;
-    };
-    match value.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" => false,
-        _ => default,
-    }
-}
-
 fn join_from_invite_code(
     core: &mut TuneCore,
     online_runtime: &mut OnlineRuntime,
     invite_code: &str,
+    password: &str,
 ) {
     online_runtime.shutdown();
     online_runtime.last_transport_seq = 0;
 
-    let decoded = match decode_invite_code(invite_code) {
+    let decoded = match decode_invite_code(invite_code, password) {
         Ok(decoded) => decoded,
         Err(err) => {
-            core.status = format!("Invalid invite code: {err}");
+            core.status = format!("Invite decryption failed: {err}");
             core.dirty = true;
             return;
         }
     };
 
-    let join_password = decoded
-        .password
-        .clone()
-        .or_else(|| optional_env("TUNETUI_ONLINE_PASSWORD"));
     core.online_join_room(&decoded.room_code, &online_runtime.local_nickname);
     match OnlineNetwork::start_client(
         &decoded.server_addr,
         &decoded.room_code,
         &online_runtime.local_nickname,
-        join_password,
+        Some(password.to_string()),
     ) {
         Ok(network) => {
             online_runtime.network = Some(network);
@@ -1832,6 +1950,20 @@ fn publish_current_playback_state(
             paused: audio.is_paused(),
         },
     );
+}
+
+fn publish_online_delay_update(core: &TuneCore, online_runtime: Option<&OnlineRuntime>) {
+    let Some(runtime) = online_runtime else {
+        return;
+    };
+    if let (Some(network), Some(session)) = (&runtime.network, core.online.session.as_ref())
+        && let Some(local) = session.local_participant()
+    {
+        network.send_local_action(NetworkLocalAction::DelayUpdate {
+            manual_extra_delay_ms: local.manual_extra_delay_ms,
+            auto_ping_delay: local.auto_ping_delay,
+        });
+    }
 }
 
 fn maybe_publish_online_playback_sync(
@@ -2404,7 +2536,33 @@ fn playback_settings_options(core: &TuneCore) -> Vec<String> {
             "Stats tracking: {}",
             if core.stats_enabled { "On" } else { "Off" }
         ),
+        String::from("Online sync delay settings"),
         String::from("Back"),
+    ]
+}
+
+fn online_delay_settings_options(core: &TuneCore) -> Vec<String> {
+    let detail = core
+        .online
+        .session
+        .as_ref()
+        .and_then(|session| session.local_participant())
+        .map(|local| {
+            format!(
+                "Manual {}ms  Effective {}ms  Auto {}",
+                local.manual_extra_delay_ms,
+                local.effective_delay_ms(),
+                if local.auto_ping_delay { "On" } else { "Off" }
+            )
+        })
+        .unwrap_or_else(|| String::from("Join or host a room first"));
+
+    vec![
+        String::from("Manual delay -10ms"),
+        String::from("Manual delay +10ms"),
+        String::from("Toggle auto-ping delay"),
+        String::from("Refresh ping calibration"),
+        format!("Back ({detail})"),
     ]
 }
 
@@ -2510,6 +2668,7 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
         | ActionPanelState::AudioSettings { selected }
         | ActionPanelState::AudioOutput { selected }
         | ActionPanelState::PlaybackSettings { selected }
+        | ActionPanelState::OnlineDelaySettings { selected }
         | ActionPanelState::ThemeSettings { selected }
         | ActionPanelState::LyricsImportTxt { selected, .. }
         | ActionPanelState::AddDirectory { selected, .. }
@@ -2526,7 +2685,7 @@ fn handle_action_panel_input(
     key: KeyCode,
 ) {
     let mut recent_root_actions = Vec::new();
-    handle_action_panel_input_with_recent(core, audio, panel, &mut recent_root_actions, key);
+    handle_action_panel_input_with_recent(core, audio, panel, &mut recent_root_actions, None, key);
 }
 
 fn handle_action_panel_input_with_recent(
@@ -2534,6 +2693,7 @@ fn handle_action_panel_input_with_recent(
     audio: &mut dyn AudioEngine,
     panel: &mut ActionPanelState,
     recent_root_actions: &mut Vec<RootActionId>,
+    online_runtime: Option<&OnlineRuntime>,
     key: KeyCode,
 ) {
     if let ActionPanelState::Root { selected, query } = panel {
@@ -2630,7 +2790,8 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::PlaylistCreate { .. } => 1,
         ActionPanelState::AudioSettings { .. } => 3,
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
-        ActionPanelState::PlaybackSettings { .. } => 5,
+        ActionPanelState::PlaybackSettings { .. } => 6,
+        ActionPanelState::OnlineDelaySettings { .. } => 5,
         ActionPanelState::ThemeSettings { .. } => 6,
         ActionPanelState::LyricsImportTxt { .. } => 3,
         ActionPanelState::AddDirectory { .. } => 2,
@@ -2716,6 +2877,9 @@ fn handle_action_panel_input_with_recent(
                     ),
                     query: String::new(),
                 },
+                ActionPanelState::OnlineDelaySettings { .. } => {
+                    ActionPanelState::PlaybackSettings { selected: 4 }
+                }
                 ActionPanelState::AddDirectory { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
                         RootActionId::AddDirectory,
@@ -3062,6 +3226,10 @@ fn handle_action_panel_input_with_recent(
                     core.dirty = true;
                     auto_save_state(core, &*audio);
                 }
+                4 => {
+                    *panel = ActionPanelState::OnlineDelaySettings { selected: 0 };
+                    core.dirty = true;
+                }
                 _ => {
                     *panel = ActionPanelState::Root {
                         selected: root_selected_for_action(
@@ -3070,6 +3238,28 @@ fn handle_action_panel_input_with_recent(
                         ),
                         query: String::new(),
                     };
+                    core.dirty = true;
+                }
+            },
+            ActionPanelState::OnlineDelaySettings { selected } => match selected {
+                0 => {
+                    core.online_adjust_manual_delay(-10);
+                    publish_online_delay_update(core, online_runtime);
+                }
+                1 => {
+                    core.online_adjust_manual_delay(10);
+                    publish_online_delay_update(core, online_runtime);
+                }
+                2 => {
+                    core.online_toggle_auto_delay();
+                    publish_online_delay_update(core, online_runtime);
+                }
+                3 => {
+                    core.online_recalibrate_ping();
+                    publish_online_delay_update(core, online_runtime);
+                }
+                _ => {
+                    *panel = ActionPanelState::PlaybackSettings { selected: 4 };
                     core.dirty = true;
                 }
             },
@@ -3847,6 +4037,7 @@ mod tests {
                 &mut audio,
                 &mut panel,
                 &mut recent_root_actions,
+                None,
                 KeyCode::Char(ch),
             );
         }
@@ -3855,6 +4046,7 @@ mod tests {
             &mut audio,
             &mut panel,
             &mut recent_root_actions,
+            None,
             KeyCode::Enter,
         );
 
@@ -4661,6 +4853,10 @@ mod tests {
             last_transport_seq: 0,
             join_prompt_active: false,
             join_code_input: String::new(),
+            password_prompt_active: false,
+            password_prompt_mode: OnlinePasswordPromptMode::Host,
+            password_input: String::new(),
+            pending_join_invite_code: String::new(),
             host_invite_modal_active: true,
             host_invite_code: String::from("T1ABCDE"),
             host_invite_button: HostInviteModalButton::Copy,
@@ -4695,6 +4891,10 @@ mod tests {
             last_transport_seq: 0,
             join_prompt_active: false,
             join_code_input: String::new(),
+            password_prompt_active: false,
+            password_prompt_mode: OnlinePasswordPromptMode::Host,
+            password_input: String::new(),
+            pending_join_invite_code: String::new(),
             host_invite_modal_active: true,
             host_invite_code: String::from("T1ABCDE"),
             host_invite_button: HostInviteModalButton::Copy,
@@ -4711,6 +4911,120 @@ mod tests {
             &mut runtime,
         ));
         assert!(!runtime.host_invite_modal_active);
+    }
+
+    #[test]
+    fn online_tab_consumes_library_navigation_keys() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = OnlineRuntime {
+            network: None,
+            local_nickname: String::from("tester"),
+            last_transport_seq: 0,
+            join_prompt_active: false,
+            join_code_input: String::new(),
+            password_prompt_active: false,
+            password_prompt_mode: OnlinePasswordPromptMode::Host,
+            password_input: String::new(),
+            pending_join_invite_code: String::new(),
+            host_invite_modal_active: false,
+            host_invite_code: String::new(),
+            host_invite_button: HostInviteModalButton::Copy,
+            streamed_track_cache: HashMap::new(),
+            pending_stream_path: None,
+            remote_logical_track: None,
+            last_remote_transport_origin: None,
+            last_periodic_sync_at: Instant::now(),
+        };
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+    }
+
+    #[test]
+    fn online_tab_does_not_consume_ctrl_c() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = OnlineRuntime {
+            network: None,
+            local_nickname: String::from("tester"),
+            last_transport_seq: 0,
+            join_prompt_active: false,
+            join_code_input: String::new(),
+            password_prompt_active: false,
+            password_prompt_mode: OnlinePasswordPromptMode::Host,
+            password_input: String::new(),
+            pending_join_invite_code: String::new(),
+            host_invite_modal_active: false,
+            host_invite_code: String::new(),
+            host_invite_button: HostInviteModalButton::Copy,
+            streamed_track_cache: HashMap::new(),
+            pending_stream_path: None,
+            remote_logical_track: None,
+            last_remote_transport_origin: None,
+            last_periodic_sync_at: Instant::now(),
+        };
+
+        assert!(!handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &mut runtime,
+        ));
+    }
+
+    #[test]
+    fn online_tab_does_not_apply_manual_delay_shortcuts_directly() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        core.online_host_room("tester");
+        let audio = NullAudioEngine::new();
+        let mut runtime = OnlineRuntime {
+            network: None,
+            local_nickname: String::from("tester"),
+            last_transport_seq: 0,
+            join_prompt_active: false,
+            join_code_input: String::new(),
+            password_prompt_active: false,
+            password_prompt_mode: OnlinePasswordPromptMode::Host,
+            password_input: String::new(),
+            pending_join_invite_code: String::new(),
+            host_invite_modal_active: false,
+            host_invite_code: String::new(),
+            host_invite_button: HostInviteModalButton::Copy,
+            streamed_track_cache: HashMap::new(),
+            pending_stream_path: None,
+            remote_logical_track: None,
+            last_remote_transport_origin: None,
+            last_periodic_sync_at: Instant::now(),
+        };
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        let manual = core
+            .online
+            .session
+            .as_ref()
+            .and_then(|session| session.local_participant())
+            .map(|local| local.manual_extra_delay_ms)
+            .unwrap_or_default();
+        assert_eq!(manual, 0);
     }
 
     #[cfg(not(windows))]
