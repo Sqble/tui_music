@@ -22,7 +22,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::collections::HashMap;
-use std::io::stdout;
+use std::io::{Write, stdout};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1708,8 +1708,17 @@ fn copy_invite_to_clipboard(invite_code: &str) -> anyhow::Result<()> {
 
 fn copy_invite_via_osc52(invite_code: &str) -> anyhow::Result<()> {
     let encoded = base64::engine::general_purpose::STANDARD.encode(invite_code.as_bytes());
-    print!("\x1b]52;c;{encoded}\x07");
-    std::io::Write::flush(&mut stdout()).context("stdout flush failed")
+    let mut out = stdout();
+    if std::env::var_os("TMUX").is_some() {
+        write!(out, "\x1bPtmux;\x1b\x1b]52;c;{encoded}\x07\x1b\\")
+            .context("tmux osc52 write failed")?;
+    } else if std::env::var_os("STY").is_some() {
+        write!(out, "\x1bP\x1b]52;c;{encoded}\x07\x1b\\").context("screen osc52 write failed")?;
+    } else {
+        write!(out, "\x1b]52;c;{encoded}\x07\x1b]52;c;{encoded}\x1b\\")
+            .context("osc52 write failed")?;
+    }
+    std::io::Write::flush(&mut out).context("stdout flush failed")
 }
 
 fn inferred_online_nickname() -> String {
