@@ -24,7 +24,37 @@ pub fn config_root() -> Result<PathBuf> {
         return Ok(PathBuf::from(override_dir));
     }
 
-    let home = env::var("USERPROFILE").context("USERPROFILE is not set")?;
+    #[cfg(windows)]
+    {
+        platform_config_root_from_windows_env(env::var("USERPROFILE").ok())
+    }
+
+    #[cfg(not(windows))]
+    {
+        platform_config_root_from_unix_env(env::var("XDG_CONFIG_HOME").ok(), env::var("HOME").ok())
+    }
+}
+
+#[cfg(windows)]
+fn platform_config_root_from_windows_env(userprofile: Option<String>) -> Result<PathBuf> {
+    let home = userprofile
+        .filter(|value| !value.trim().is_empty())
+        .context("USERPROFILE is not set")?;
+    Ok(PathBuf::from(home).join(".config").join(APP_DIR))
+}
+
+#[cfg(not(windows))]
+fn platform_config_root_from_unix_env(
+    xdg_config_home: Option<String>,
+    home: Option<String>,
+) -> Result<PathBuf> {
+    if let Some(xdg) = xdg_config_home.filter(|value| !value.trim().is_empty()) {
+        return Ok(PathBuf::from(xdg).join(APP_DIR));
+    }
+
+    let home = home
+        .filter(|value| !value.trim().is_empty())
+        .context("HOME is not set")?;
     Ok(PathBuf::from(home).join(".config").join(APP_DIR))
 }
 
@@ -404,6 +434,33 @@ mod tests {
         save_state_to_path(&path, &state).expect("save");
         let loaded = load_state_from_path(&path).expect("load");
         assert_eq!(loaded.playback_mode, crate::model::PlaybackMode::Loop);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn config_root_uses_userprofile_on_windows() {
+        let root = platform_config_root_from_windows_env(Some(String::from(r"C:\Users\Tune")))
+            .expect("windows config root");
+        assert_eq!(root, PathBuf::from(r"C:\Users\Tune\.config\tunetui"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn config_root_prefers_xdg_config_home_on_unix() {
+        let root = platform_config_root_from_unix_env(
+            Some(String::from("/tmp/xdg")),
+            Some(String::from("/home/tune")),
+        )
+        .expect("unix config root");
+        assert_eq!(root, PathBuf::from("/tmp/xdg/tunetui"));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn config_root_falls_back_to_home_dot_config_on_unix() {
+        let root = platform_config_root_from_unix_env(None, Some(String::from("/home/tune")))
+            .expect("unix fallback config root");
+        assert_eq!(root, PathBuf::from("/home/tune/.config/tunetui"));
     }
 
     #[test]

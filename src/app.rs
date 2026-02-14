@@ -661,8 +661,15 @@ pub fn run() -> Result<()> {
             }
             KeyCode::Tab => core.cycle_header_section(),
             KeyCode::Char('t') => {
-                minimize_to_tray();
-                core.status = String::from("Minimized to tray");
+                #[cfg(windows)]
+                {
+                    minimize_to_tray();
+                    core.status = String::from("Minimized to tray");
+                }
+                #[cfg(not(windows))]
+                {
+                    core.status = String::from("Tray minimize is only available on Windows");
+                }
                 core.dirty = true;
             }
             KeyCode::Char('+') | KeyCode::Char('=') => {
@@ -1953,7 +1960,80 @@ fn choose_folder_externally() -> Result<Option<PathBuf>> {
 
 #[cfg(not(windows))]
 fn choose_folder_externally() -> Result<Option<PathBuf>> {
-    Ok(None)
+    let home = std::env::var("HOME").unwrap_or_else(|_| String::from("/"));
+
+    let attempts: [(&str, Vec<&str>); 2] = [
+        (
+            "zenity",
+            vec![
+                "--file-selection",
+                "--directory",
+                "--title=Select music folder",
+            ],
+        ),
+        ("kdialog", vec!["--getexistingdirectory", home.as_str()]),
+    ];
+
+    let mut picker_available = false;
+    for (command, args) in attempts {
+        match try_external_folder_picker(command, &args)? {
+            FolderPickerResult::Unavailable => continue,
+            FolderPickerResult::Cancelled => {
+                picker_available = true;
+                break;
+            }
+            FolderPickerResult::Selected(path) => return Ok(Some(path)),
+        }
+    }
+
+    if picker_available {
+        Ok(None)
+    } else {
+        Err(anyhow::anyhow!(
+            "No external folder picker found. Install zenity or kdialog, or type a path manually."
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+enum FolderPickerResult {
+    Unavailable,
+    Cancelled,
+    Selected(PathBuf),
+}
+
+#[cfg(not(windows))]
+fn try_external_folder_picker(command: &str, args: &[&str]) -> Result<FolderPickerResult> {
+    let output = match Command::new(command).args(args).output() {
+        Ok(output) => output,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(FolderPickerResult::Unavailable);
+        }
+        Err(err) => {
+            return Err(anyhow::anyhow!(
+                "failed to launch folder picker {command}: {err}"
+            ));
+        }
+    };
+
+    if !output.status.success() {
+        return Ok(FolderPickerResult::Cancelled);
+    }
+
+    match parse_folder_picker_selection(&output.stdout) {
+        Some(path) => Ok(FolderPickerResult::Selected(path)),
+        None => Ok(FolderPickerResult::Cancelled),
+    }
+}
+
+#[cfg(not(windows))]
+fn parse_folder_picker_selection(stdout: &[u8]) -> Option<PathBuf> {
+    let selected = String::from_utf8_lossy(stdout).trim().to_string();
+    if selected.is_empty() {
+        return None;
+    }
+    let cleaned = selected.strip_prefix("file://").unwrap_or(&selected);
+    Some(PathBuf::from(cleaned))
 }
 
 #[cfg(windows)]
@@ -3220,5 +3300,26 @@ mod tests {
 
         assert!(audio.stopped);
         assert_eq!(core.status, "Reached end of queue");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn parse_folder_picker_selection_handles_plain_path() {
+        let parsed = parse_folder_picker_selection(b"/home/tune/music\n");
+        assert_eq!(parsed, Some(PathBuf::from("/home/tune/music")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn parse_folder_picker_selection_strips_file_scheme() {
+        let parsed = parse_folder_picker_selection(b"file:///home/tune/music\n");
+        assert_eq!(parsed, Some(PathBuf::from("/home/tune/music")));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn parse_folder_picker_selection_handles_empty_output() {
+        let parsed = parse_folder_picker_selection(b"\n");
+        assert_eq!(parsed, None);
     }
 }
