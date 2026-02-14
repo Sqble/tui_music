@@ -546,10 +546,8 @@ fn draw_lyrics_section(
     let focused = core
         .lyrics_selected_line
         .min(doc.lines.len().saturating_sub(1));
-    let top = focused.saturating_sub(6);
-    let bottom = (focused + 7).min(doc.lines.len());
     let mut playback_lines = Vec::new();
-    for idx in top..bottom {
+    for idx in 0..doc.lines.len() {
         let line = &doc.lines[idx];
         let mut style = Style::default().fg(colors.muted);
         if idx == focused {
@@ -573,6 +571,9 @@ fn draw_lyrics_section(
         ]));
     }
 
+    let left_viewport_height = horizontal[0].height.saturating_sub(2) as usize;
+    let left_scroll_top = centered_scroll_top(focused, left_viewport_height);
+
     let left = Paragraph::new(playback_lines)
         .block(panel_block(
             "Lyrics Playback",
@@ -580,6 +581,7 @@ fn draw_lyrics_section(
             colors.text,
             colors.border,
         ))
+        .scroll((left_scroll_top, 0))
         .wrap(Wrap { trim: false });
     frame.render_widget(left, horizontal[0]);
 
@@ -628,9 +630,7 @@ fn draw_lyrics_section(
             )));
             right_lines.push(Line::from(""));
 
-            let start = focused.saturating_sub(5);
-            let end = (focused + 6).min(doc.lines.len());
-            for idx in start..end {
+            for idx in 0..doc.lines.len() {
                 let line = &doc.lines[idx];
                 let stamp = line
                     .timestamp_ms
@@ -648,6 +648,21 @@ fn draw_lyrics_section(
                     style,
                 )));
             }
+
+            let right_viewport_height = horizontal[1].height.saturating_sub(2) as usize;
+            let scroll_top = editor_scroll_top(focused, right_viewport_height, 5);
+
+            let right = Paragraph::new(right_lines)
+                .block(panel_block(
+                    "Lyrics Editor",
+                    colors.panel_alt_bg,
+                    colors.text,
+                    colors.border,
+                ))
+                .scroll((scroll_top, 0))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(right, horizontal[1]);
+            return;
         }
     }
 
@@ -660,6 +675,17 @@ fn draw_lyrics_section(
         ))
         .wrap(Wrap { trim: true });
     frame.render_widget(right, horizontal[1]);
+}
+
+fn centered_scroll_top(focused: usize, viewport_height: usize) -> u16 {
+    let top = focused.saturating_sub(viewport_height.saturating_div(2));
+    top.min(u16::MAX as usize) as u16
+}
+
+fn editor_scroll_top(focused: usize, viewport_height: usize, header_lines: usize) -> u16 {
+    let top =
+        header_lines.saturating_add(focused.saturating_sub(viewport_height.saturating_div(2)));
+    top.min(u16::MAX as usize) as u16
 }
 
 fn draw_stats_section(
@@ -1368,4 +1394,24 @@ fn timeline_line(
         progress_bar(Some(volume_ratio), volume_bar_width),
         volume_percent
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn centered_scroll_top_centers_focus_when_possible() {
+        assert_eq!(centered_scroll_top(30, 10), 25);
+    }
+
+    #[test]
+    fn centered_scroll_top_handles_small_focus() {
+        assert_eq!(centered_scroll_top(2, 12), 0);
+    }
+
+    #[test]
+    fn editor_scroll_top_includes_header_offset() {
+        assert_eq!(editor_scroll_top(30, 10, 5), 30);
+    }
 }

@@ -410,16 +410,25 @@ fn build_trend_series(
         (TrendUnit::AllTime, step)
     };
 
-    let bucket_len = ((span / step_seconds).saturating_add(1)).clamp(2, 256) as usize;
+    let bucket_len = ((span / step_seconds).saturating_add(1)).clamp(2, 512) as usize;
     let mut buckets = vec![0_u64; bucket_len];
     for event in events {
-        let index = ((event.started_at_epoch_seconds.saturating_sub(start)) / step_seconds)
-            .clamp(0, (bucket_len as i64) - 1) as usize;
-        let bucket_value = match sort {
-            StatsSort::Plays => u64::from(event.counted_play),
-            StatsSort::ListenTime => u64::from(event.listened_seconds),
-        };
-        buckets[index] = buckets[index].saturating_add(bucket_value);
+        match sort {
+            StatsSort::Plays => {
+                let index = ((event.started_at_epoch_seconds.saturating_sub(start)) / step_seconds)
+                    .clamp(0, (bucket_len as i64) - 1) as usize;
+                buckets[index] = buckets[index].saturating_add(u64::from(event.counted_play));
+            }
+            StatsSort::ListenTime => {
+                add_listen_time_to_buckets(
+                    &mut buckets,
+                    start,
+                    step_seconds,
+                    event.started_at_epoch_seconds,
+                    u64::from(event.listened_seconds),
+                );
+            }
+        }
     }
 
     let mut end_epoch_seconds =
@@ -436,6 +445,45 @@ fn build_trend_series(
         end_epoch_seconds,
         buckets,
         show_clock_time_labels: true,
+    }
+}
+
+fn add_listen_time_to_buckets(
+    buckets: &mut [u64],
+    start_epoch_seconds: i64,
+    step_seconds: i64,
+    event_start_epoch_seconds: i64,
+    listened_seconds: u64,
+) {
+    if buckets.is_empty() || listened_seconds == 0 {
+        return;
+    }
+
+    let bucket_len = buckets.len();
+    let series_end = start_epoch_seconds
+        .saturating_add(step_seconds.saturating_mul(bucket_len.saturating_sub(1) as i64));
+    let event_start = event_start_epoch_seconds.max(start_epoch_seconds);
+    let event_end = event_start.saturating_add(listened_seconds as i64);
+    let mut allocated = 0_u64;
+
+    for (idx, bucket) in buckets.iter_mut().enumerate() {
+        let bucket_start =
+            start_epoch_seconds.saturating_add(step_seconds.saturating_mul(idx as i64));
+        let bucket_end = bucket_start.saturating_add(step_seconds);
+        let overlap_start = event_start.max(bucket_start);
+        let overlap_end = event_end.min(bucket_end);
+        if overlap_end <= overlap_start {
+            continue;
+        }
+        let slice = (overlap_end.saturating_sub(overlap_start)) as u64;
+        *bucket = bucket.saturating_add(slice);
+        allocated = allocated.saturating_add(slice);
+    }
+
+    if event_end > series_end && allocated < listened_seconds {
+        if let Some(last) = buckets.last_mut() {
+            *last = last.saturating_add(listened_seconds.saturating_sub(allocated));
+        }
     }
 }
 
@@ -722,5 +770,45 @@ mod tests {
 
         assert_eq!(trend.unit, TrendUnit::Minutes);
         assert_eq!(trend.end_epoch_seconds, 60);
+    }
+
+    #[test]
+    fn minute_trend_distributes_single_long_session_across_buckets() {
+        let events = vec![ListenEvent {
+            track_path: PathBuf::from("C:/music/A.mp3"),
+            title: "A".to_string(),
+            artist: None,
+            album: None,
+            started_at_epoch_seconds: 0,
+            listened_seconds: 4_740,
+            counted_play: true,
+        }];
+
+        let trend = build_trend_series(StatsRange::Today, StatsSort::ListenTime, 4_740, &events);
+
+        assert_eq!(trend.unit, TrendUnit::Minutes);
+        assert_eq!(trend.buckets.iter().copied().max().unwrap_or(0), 60);
+        assert_eq!(trend.buckets.iter().sum::<u64>(), 4_740);
+    }
+
+    #[test]
+    fn minute_trend_does_not_stack_tail_into_last_bucket_near_six_hours() {
+        let mut events = Vec::new();
+        for index in 0..20 {
+            events.push(ListenEvent {
+                track_path: PathBuf::from(format!("C:/music/{index}.mp3")),
+                title: format!("{index}"),
+                artist: None,
+                album: None,
+                started_at_epoch_seconds: 16_200 + (index as i64) * 180,
+                listened_seconds: 180,
+                counted_play: true,
+            });
+        }
+
+        let trend = build_trend_series(StatsRange::Today, StatsSort::ListenTime, 21_000, &events);
+
+        assert_eq!(trend.unit, TrendUnit::Minutes);
+        assert!(trend.buckets.iter().copied().max().unwrap_or(0) <= 60);
     }
 }
