@@ -608,11 +608,18 @@ fn draw_online_section(frame: &mut Frame, body: &[Rect], colors: ThemePalette, c
             .add_modifier(Modifier::BOLD),
     ))];
     for (index, item) in session.shared_queue.iter().rev().take(10).enumerate() {
+        let owner_suffix = item
+            .owner_nickname
+            .as_deref()
+            .filter(|owner| !owner.is_empty())
+            .map(|owner| format!(" @{}", truncate_for_line(owner, 12)))
+            .unwrap_or_default();
         right_lines.push(Line::from(Span::styled(
             format!(
-                "{:>2}. {} [{}]",
+                "{:>2}. {}{} [{}]",
                 index + 1,
                 truncate_for_line(&item.title, 28),
+                owner_suffix,
                 item.delivery.label()
             ),
             Style::default().fg(colors.muted),
@@ -636,7 +643,7 @@ fn draw_online_section(frame: &mut Frame, body: &[Rect], colors: ThemePalette, c
         Style::default().fg(colors.muted),
     )));
     right_lines.push(Line::from(Span::styled(
-        "Discovery/signaling can be layered later without replacing room state model.",
+        "Stream fallback works both directions over the existing room socket.",
         Style::default().fg(colors.muted),
     )));
 

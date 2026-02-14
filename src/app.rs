@@ -1676,7 +1676,7 @@ fn drain_online_network_events(
                         Ok(()) => {
                             online_runtime.remote_logical_track = Some(requested_path.clone());
                             core.status = format!(
-                                "Streaming from host: {}",
+                                "Streaming fallback active: {}",
                                 requested_path
                                     .file_name()
                                     .and_then(|name| name.to_str())
@@ -1846,11 +1846,15 @@ fn ensure_remote_track(
         Err(err) => {
             if online_runtime.pending_stream_path.as_ref() != Some(&path.to_path_buf()) {
                 if let Some(network) = online_runtime.network.as_ref() {
-                    network.request_track_stream(path.to_path_buf());
+                    let source_nickname = preferred_stream_source(core, network.role(), path);
+                    network.request_track_stream(path.to_path_buf(), source_nickname.clone());
                     online_runtime.pending_stream_path = Some(path.to_path_buf());
                     online_runtime.remote_logical_track = Some(path.to_path_buf());
-                    core.status =
-                        String::from("Remote track missing locally, requesting host stream...");
+                    core.status = if let Some(source) = source_nickname {
+                        format!("Remote track missing locally, requesting stream from {source}...")
+                    } else {
+                        String::from("Remote track missing locally, requesting stream...")
+                    };
                 } else {
                     core.status = concise_audio_error(&err);
                 }
@@ -1858,6 +1862,29 @@ fn ensure_remote_track(
             false
         }
     }
+}
+
+fn preferred_stream_source(core: &TuneCore, role: &NetworkRole, path: &Path) -> Option<String> {
+    if !matches!(role, NetworkRole::Host) {
+        return None;
+    }
+    let session = core.online.session.as_ref()?;
+    let local_nickname = session
+        .local_participant()
+        .map(|entry| entry.nickname.as_str());
+    session
+        .shared_queue
+        .iter()
+        .rev()
+        .find(|item| {
+            item.path == path
+                && item.owner_nickname.as_deref().is_some_and(|owner| {
+                    local_nickname
+                        .map(|local| !owner.eq_ignore_ascii_case(local))
+                        .unwrap_or(true)
+                })
+        })
+        .and_then(|item| item.owner_nickname.clone())
 }
 
 fn stats_scroll_down(core: &mut TuneCore) {

@@ -3,7 +3,7 @@ use anyhow::Context;
 use base64::Engine;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -25,6 +25,7 @@ const STUN_BINDING_SUCCESS_RESPONSE: u16 = 0x0101;
 const STUN_ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const STUN_ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const STREAM_CHUNK_BYTES: usize = 24 * 1024;
+const MAX_STREAM_FILE_BYTES: u64 = 1_073_741_824;
 
 pub struct DecodedInvite {
     pub server_addr: String,
@@ -63,7 +64,10 @@ pub enum LocalAction {
 #[derive(Debug)]
 enum NetworkCommand {
     LocalAction(LocalAction),
-    RequestTrackStream { path: PathBuf },
+    RequestTrackStream {
+        path: PathBuf,
+        source_nickname: Option<String>,
+    },
     Shutdown,
 }
 
@@ -158,7 +162,8 @@ impl OnlineNetwork {
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        thread::spawn(move || client_loop(stream, cmd_rx, event_tx));
+        let local_nickname = nickname.to_string();
+        thread::spawn(move || client_loop(stream, local_nickname, cmd_rx, event_tx));
 
         Ok(Self {
             role: NetworkRole::Client,
@@ -171,10 +176,11 @@ impl OnlineNetwork {
         let _ = self.cmd_tx.send(NetworkCommand::LocalAction(action));
     }
 
-    pub fn request_track_stream(&self, path: PathBuf) {
-        let _ = self
-            .cmd_tx
-            .send(NetworkCommand::RequestTrackStream { path });
+    pub fn request_track_stream(&self, path: PathBuf, source_nickname: Option<String>) {
+        let _ = self.cmd_tx.send(NetworkCommand::RequestTrackStream {
+            path,
+            source_nickname,
+        });
     }
 
     pub fn try_recv_event(&self) -> Option<NetworkEvent> {
@@ -458,7 +464,8 @@ fn base32_decode_no_padding(value: &str) -> anyhow::Result<Vec<u8>> {
 }
 
 fn client_loop(
-    mut stream: TcpStream,
+    stream: TcpStream,
+    local_nickname: String,
     cmd_rx: Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
 ) {
@@ -472,11 +479,19 @@ fn client_loop(
         }
     };
 
+    let writer = Arc::new(Mutex::new(stream));
+    let upload_guard = Arc::new(Mutex::new(ClientUploadGuard {
+        local_nickname,
+        allowed_paths: HashSet::new(),
+    }));
+
     let read_event_tx = event_tx.clone();
+    let read_writer = Arc::clone(&writer);
+    let read_upload_guard = Arc::clone(&upload_guard);
     thread::spawn(move || {
         let mut reader = BufReader::new(&mut read_stream);
         let mut line = String::new();
-        let mut inbound_stream: Option<InboundStreamDownload> = None;
+        let mut inbound_streams: HashMap<u64, InboundStreamDownload> = HashMap::new();
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -490,21 +505,77 @@ fn client_loop(
                     let parsed = serde_json::from_str::<WireServerMessage>(line.trim_end());
                     match parsed {
                         Ok(WireServerMessage::Session(session)) => {
+                            if let Ok(mut guard) = read_upload_guard.lock() {
+                                let local_nickname = guard.local_nickname.clone();
+                                let allowed_paths = session
+                                    .shared_queue
+                                    .iter()
+                                    .filter(|item| {
+                                        item.owner_nickname.as_deref().is_some_and(|owner| {
+                                            owner.eq_ignore_ascii_case(&local_nickname)
+                                        })
+                                    })
+                                    .map(|item| item.path.clone())
+                                    .collect();
+                                guard.allowed_paths = allowed_paths;
+                            }
                             let _ = read_event_tx.send(NetworkEvent::SessionSync(session));
                         }
-                        Ok(WireServerMessage::StreamStart { path, total_bytes }) => {
-                            match InboundStreamDownload::new(&path, total_bytes) {
-                                Ok(state) => inbound_stream = Some(state),
-                                Err(err) => {
-                                    let _ = read_event_tx.send(NetworkEvent::Status(format!(
-                                        "Stream start failed: {err}"
-                                    )));
-                                    inbound_stream = None;
-                                }
+                        Ok(WireServerMessage::StreamRequest { path, request_id }) => {
+                            let permitted = read_upload_guard
+                                .lock()
+                                .ok()
+                                .is_some_and(|guard| guard.allowed_paths.contains(&path));
+                            if !permitted {
+                                let _ = send_json_line_shared(
+                                    &read_writer,
+                                    &WireClientMessage::StreamEnd {
+                                        request_id,
+                                        path,
+                                        success: false,
+                                        error: Some(String::from(
+                                            "stream denied: path not owned by this client",
+                                        )),
+                                    },
+                                );
+                                continue;
                             }
+                            let stream_writer = Arc::clone(&read_writer);
+                            thread::spawn(move || {
+                                if let Err(err) =
+                                    stream_file_to_host(&stream_writer, &path, request_id)
+                                {
+                                    let _ = send_json_line_shared(
+                                        &stream_writer,
+                                        &WireClientMessage::StreamEnd {
+                                            request_id,
+                                            path,
+                                            success: false,
+                                            error: Some(format!("stream failed: {err}")),
+                                        },
+                                    );
+                                }
+                            });
                         }
-                        Ok(WireServerMessage::StreamChunk { data_base64 }) => {
-                            let Some(state) = inbound_stream.as_mut() else {
+                        Ok(WireServerMessage::StreamStart {
+                            request_id,
+                            path,
+                            total_bytes,
+                        }) => match InboundStreamDownload::new(&path, total_bytes) {
+                            Ok(state) => {
+                                inbound_streams.insert(request_id, state);
+                            }
+                            Err(err) => {
+                                let _ = read_event_tx.send(NetworkEvent::Status(format!(
+                                    "Stream start failed: {err}"
+                                )));
+                            }
+                        },
+                        Ok(WireServerMessage::StreamChunk {
+                            request_id,
+                            data_base64,
+                        }) => {
+                            let Some(state) = inbound_streams.get_mut(&request_id) else {
                                 continue;
                             };
                             let decoded = base64::engine::general_purpose::STANDARD
@@ -515,7 +586,7 @@ fn client_loop(
                                         let _ = read_event_tx.send(NetworkEvent::Status(format!(
                                             "Stream write failed: {err}"
                                         )));
-                                        inbound_stream = None;
+                                        inbound_streams.remove(&request_id);
                                     } else {
                                         state.received_bytes =
                                             state.received_bytes.saturating_add(bytes.len() as u64);
@@ -525,16 +596,17 @@ fn client_loop(
                                     let _ = read_event_tx.send(NetworkEvent::Status(format!(
                                         "Stream decode failed: {err}"
                                     )));
-                                    inbound_stream = None;
+                                    inbound_streams.remove(&request_id);
                                 }
                             }
                         }
                         Ok(WireServerMessage::StreamEnd {
+                            request_id,
                             path,
                             success,
                             error,
                         }) => {
-                            let Some(mut state) = inbound_stream.take() else {
+                            let Some(mut state) = inbound_streams.remove(&request_id) else {
                                 continue;
                             };
                             if state.requested_path != path {
@@ -597,15 +669,21 @@ fn client_loop(
             Ok(NetworkCommand::Shutdown) => break,
             Ok(NetworkCommand::LocalAction(action)) => {
                 let msg = WireClientMessage::Action(action_to_wire(action));
-                if let Err(err) = send_json_line(&mut stream, &msg) {
+                if let Err(err) = send_json_line_shared(&writer, &msg) {
                     let _ =
                         event_tx.send(NetworkEvent::Status(format!("Online send failed: {err}")));
                     break;
                 }
             }
-            Ok(NetworkCommand::RequestTrackStream { path }) => {
-                let msg = WireClientMessage::StreamRequest { path };
-                if let Err(err) = send_json_line(&mut stream, &msg) {
+            Ok(NetworkCommand::RequestTrackStream {
+                path,
+                source_nickname: _,
+            }) => {
+                let msg = WireClientMessage::StreamRequest {
+                    path,
+                    request_id: next_request_id(),
+                };
+                if let Err(err) = send_json_line_shared(&writer, &msg) {
                     let _ =
                         event_tx.send(NetworkEvent::Status(format!("Online send failed: {err}")));
                     break;
@@ -625,6 +703,8 @@ fn host_loop(
 ) {
     let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>();
     let mut peers: HashMap<u32, PeerConnection> = HashMap::new();
+    let mut pending_pull_requests: HashMap<(u32, u64), PathBuf> = HashMap::new();
+    let mut inbound_streams: HashMap<(u32, u64), InboundStreamDownload> = HashMap::new();
     let mut next_peer_id: u32 = 1;
 
     let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
@@ -653,6 +733,8 @@ fn host_loop(
                     session,
                     expected_password.as_deref(),
                     &mut peers,
+                    &mut pending_pull_requests,
+                    &mut inbound_streams,
                     &event_tx,
                 ),
                 Err(TryRecvError::Empty) => break,
@@ -678,10 +760,36 @@ fn host_loop(
                     broadcast_state(&mut peers, session);
                     let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
                 }
-                Ok(NetworkCommand::RequestTrackStream { .. }) => {
-                    let _ = event_tx.send(NetworkEvent::Status(String::from(
-                        "Host does not request stream from peers",
-                    )));
+                Ok(NetworkCommand::RequestTrackStream {
+                    path,
+                    source_nickname,
+                }) => {
+                    let Some(source_nickname) = source_nickname else {
+                        let _ = event_tx.send(NetworkEvent::Status(String::from(
+                            "Stream request missing source peer",
+                        )));
+                        continue;
+                    };
+                    let Some((peer_id, peer)) = peers
+                        .iter()
+                        .find(|(_, peer)| peer.nickname.eq_ignore_ascii_case(&source_nickname))
+                    else {
+                        let _ = event_tx.send(NetworkEvent::Status(format!(
+                            "Source peer offline: {source_nickname}",
+                        )));
+                        continue;
+                    };
+                    let request_id = next_request_id();
+                    pending_pull_requests.insert((*peer_id, request_id), path.clone());
+                    if let Err(err) = send_json_line_shared(
+                        &peer.writer,
+                        &WireServerMessage::StreamRequest { path, request_id },
+                    ) {
+                        pending_pull_requests.remove(&(*peer_id, request_id));
+                        let _ = event_tx.send(NetworkEvent::Status(format!(
+                            "Peer stream request failed: {err}",
+                        )));
+                    }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
@@ -697,6 +805,8 @@ fn handle_inbound(
     session: &mut OnlineSession,
     expected_password: Option<&str>,
     peers: &mut HashMap<u32, PeerConnection>,
+    pending_pull_requests: &mut HashMap<(u32, u64), PathBuf>,
+    inbound_streams: &mut HashMap<(u32, u64), InboundStreamDownload>,
     event_tx: &Sender<NetworkEvent>,
 ) {
     match inbound {
@@ -790,14 +900,19 @@ fn handle_inbound(
             broadcast_state(peers, session);
             let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
         }
-        Inbound::StreamRequest { peer_id, path } => {
+        Inbound::StreamRequest {
+            peer_id,
+            path,
+            request_id,
+        } => {
             if let Some(peer) = peers.get(&peer_id) {
                 let writer = Arc::clone(&peer.writer);
                 thread::spawn(move || {
-                    if let Err(err) = stream_file_to_peer(&writer, &path) {
+                    if let Err(err) = stream_file_to_client(&writer, &path, request_id) {
                         let _ = send_json_line_shared(
                             &writer,
                             &WireServerMessage::StreamEnd {
+                                request_id,
                                 path,
                                 success: false,
                                 error: Some(format!("stream failed: {err}")),
@@ -807,17 +922,127 @@ fn handle_inbound(
                 });
             }
         }
+        Inbound::StreamStart {
+            peer_id,
+            request_id,
+            path,
+            total_bytes,
+        } => {
+            let key = (peer_id, request_id);
+            let expected_path = pending_pull_requests.get(&key);
+            if expected_path != Some(&path) {
+                let _ = event_tx.send(NetworkEvent::Status(String::from(
+                    "Peer stream start path mismatch",
+                )));
+                pending_pull_requests.remove(&key);
+                inbound_streams.remove(&key);
+                return;
+            }
+            match InboundStreamDownload::new(&path, total_bytes) {
+                Ok(state) => {
+                    inbound_streams.insert(key, state);
+                }
+                Err(err) => {
+                    let _ = event_tx.send(NetworkEvent::Status(format!(
+                        "Peer stream start failed: {err}",
+                    )));
+                    pending_pull_requests.remove(&key);
+                }
+            }
+        }
+        Inbound::StreamChunk {
+            peer_id,
+            request_id,
+            data_base64,
+        } => {
+            let key = (peer_id, request_id);
+            let Some(state) = inbound_streams.get_mut(&key) else {
+                return;
+            };
+            match base64::engine::general_purpose::STANDARD.decode(data_base64.as_bytes()) {
+                Ok(bytes) => {
+                    if let Err(err) = state.file.write_all(&bytes) {
+                        let _ = event_tx.send(NetworkEvent::Status(format!(
+                            "Peer stream write failed: {err}",
+                        )));
+                        inbound_streams.remove(&key);
+                        pending_pull_requests.remove(&key);
+                    } else {
+                        state.received_bytes =
+                            state.received_bytes.saturating_add(bytes.len() as u64);
+                    }
+                }
+                Err(err) => {
+                    let _ = event_tx.send(NetworkEvent::Status(format!(
+                        "Peer stream decode failed: {err}",
+                    )));
+                    inbound_streams.remove(&key);
+                    pending_pull_requests.remove(&key);
+                }
+            }
+        }
+        Inbound::StreamEnd {
+            peer_id,
+            request_id,
+            path,
+            success,
+            error,
+        } => {
+            let key = (peer_id, request_id);
+            let Some(mut state) = inbound_streams.remove(&key) else {
+                pending_pull_requests.remove(&key);
+                return;
+            };
+            pending_pull_requests.remove(&key);
+            if state.requested_path != path {
+                let _ = fs::remove_file(&state.local_temp_path);
+                let _ = event_tx.send(NetworkEvent::Status(String::from(
+                    "Peer stream end path mismatch",
+                )));
+                return;
+            }
+            if !success {
+                let _ = fs::remove_file(&state.local_temp_path);
+                let _ = event_tx.send(NetworkEvent::Status(
+                    error.unwrap_or_else(|| String::from("Peer stream failed")),
+                ));
+                return;
+            }
+            if state.received_bytes != state.total_bytes {
+                let _ = fs::remove_file(&state.local_temp_path);
+                let _ = event_tx.send(NetworkEvent::Status(format!(
+                    "Peer stream size mismatch: expected {} bytes got {} bytes",
+                    state.total_bytes, state.received_bytes
+                )));
+                return;
+            }
+            if let Err(err) = state.file.flush() {
+                let _ = fs::remove_file(&state.local_temp_path);
+                let _ = event_tx.send(NetworkEvent::Status(format!(
+                    "Peer stream finalize failed: {err}",
+                )));
+                return;
+            }
+            let _ = event_tx.send(NetworkEvent::StreamTrackReady {
+                requested_path: state.requested_path,
+                local_temp_path: state.local_temp_path,
+            });
+        }
         Inbound::Disconnected { peer_id } => {
             if let Some(peer) = peers.remove(&peer_id) {
                 session
                     .participants
                     .retain(|participant| participant.nickname != peer.nickname);
+                pending_pull_requests.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
+                inbound_streams.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
                 broadcast_state(peers, session);
                 let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
             }
         }
         Inbound::ReadError { peer_id, error } => {
             peers.remove(&peer_id);
+            pending_pull_requests.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
+            inbound_streams.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
             let _ = event_tx.send(NetworkEvent::Status(format!("peer read error: {error}")));
         }
     }
@@ -832,11 +1057,7 @@ fn apply_action_to_session(
         LocalAction::SetMode(mode) => session.mode = mode,
         LocalAction::SetQuality(quality) => session.quality = quality,
         LocalAction::QueueAdd(item) => {
-            session.shared_queue.push(SharedQueueItem {
-                path: item.path,
-                title: item.title,
-                delivery: item.delivery,
-            });
+            session.shared_queue.push(item);
             if session.shared_queue.len() > 512 {
                 let remove = session.shared_queue.len() - 512;
                 session.shared_queue.drain(0..remove);
@@ -960,8 +1181,48 @@ fn host_peer_reader(peer_id: u32, stream: TcpStream, inbound_tx: Sender<Inbound>
                     Ok(WireClientMessage::Action(action)) => {
                         let _ = inbound_tx.send(Inbound::Action { peer_id, action });
                     }
-                    Ok(WireClientMessage::StreamRequest { path }) => {
-                        let _ = inbound_tx.send(Inbound::StreamRequest { peer_id, path });
+                    Ok(WireClientMessage::StreamRequest { path, request_id }) => {
+                        let _ = inbound_tx.send(Inbound::StreamRequest {
+                            peer_id,
+                            path,
+                            request_id,
+                        });
+                    }
+                    Ok(WireClientMessage::StreamStart {
+                        request_id,
+                        path,
+                        total_bytes,
+                    }) => {
+                        let _ = inbound_tx.send(Inbound::StreamStart {
+                            peer_id,
+                            request_id,
+                            path,
+                            total_bytes,
+                        });
+                    }
+                    Ok(WireClientMessage::StreamChunk {
+                        request_id,
+                        data_base64,
+                    }) => {
+                        let _ = inbound_tx.send(Inbound::StreamChunk {
+                            peer_id,
+                            request_id,
+                            data_base64,
+                        });
+                    }
+                    Ok(WireClientMessage::StreamEnd {
+                        request_id,
+                        path,
+                        success,
+                        error,
+                    }) => {
+                        let _ = inbound_tx.send(Inbound::StreamEnd {
+                            peer_id,
+                            request_id,
+                            path,
+                            success,
+                            error,
+                        });
                     }
                     Ok(WireClientMessage::Hello { .. }) => {}
                     Err(err) => {
@@ -1001,13 +1262,19 @@ fn send_json_line_shared<T: Serialize>(
     send_json_line(&mut locked, value)
 }
 
-fn stream_file_to_peer(writer: &Arc<Mutex<TcpStream>>, path: &Path) -> anyhow::Result<()> {
+fn stream_file_to_client(
+    writer: &Arc<Mutex<TcpStream>>,
+    path: &Path,
+    request_id: u64,
+) -> anyhow::Result<()> {
+    validate_stream_source(path)?;
     let file_size = fs::metadata(path)
         .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
         .len();
     send_json_line_shared(
         writer,
         &WireServerMessage::StreamStart {
+            request_id,
             path: path.to_path_buf(),
             total_bytes: file_size,
         },
@@ -1025,6 +1292,7 @@ fn stream_file_to_peer(writer: &Arc<Mutex<TcpStream>>, path: &Path) -> anyhow::R
         send_json_line_shared(
             writer,
             &WireServerMessage::StreamChunk {
+                request_id,
                 data_base64: encoded,
             },
         )?;
@@ -1033,11 +1301,75 @@ fn stream_file_to_peer(writer: &Arc<Mutex<TcpStream>>, path: &Path) -> anyhow::R
     send_json_line_shared(
         writer,
         &WireServerMessage::StreamEnd {
+            request_id,
             path: path.to_path_buf(),
             success: true,
             error: None,
         },
     )
+}
+
+fn stream_file_to_host(
+    writer: &Arc<Mutex<TcpStream>>,
+    path: &Path,
+    request_id: u64,
+) -> anyhow::Result<()> {
+    validate_stream_source(path)?;
+    let file_size = fs::metadata(path)
+        .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
+        .len();
+    send_json_line_shared(
+        writer,
+        &WireClientMessage::StreamStart {
+            request_id,
+            path: path.to_path_buf(),
+            total_bytes: file_size,
+        },
+    )?;
+
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open stream source {}", path.display()))?;
+    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&buffer[..read]);
+        send_json_line_shared(
+            writer,
+            &WireClientMessage::StreamChunk {
+                request_id,
+                data_base64: encoded,
+            },
+        )?;
+    }
+
+    send_json_line_shared(
+        writer,
+        &WireClientMessage::StreamEnd {
+            request_id,
+            path: path.to_path_buf(),
+            success: true,
+            error: None,
+        },
+    )
+}
+
+fn validate_stream_source(path: &Path) -> anyhow::Result<()> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("failed to read stream metadata for {}", path.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("stream source must be a file");
+    }
+    if metadata.len() > MAX_STREAM_FILE_BYTES {
+        anyhow::bail!("stream source exceeds size limit");
+    }
+    Ok(())
+}
+
+fn next_request_id() -> u64 {
+    rand::rng().random()
 }
 
 #[derive(Debug)]
@@ -1062,6 +1394,25 @@ enum Inbound {
     StreamRequest {
         peer_id: u32,
         path: PathBuf,
+        request_id: u64,
+    },
+    StreamStart {
+        peer_id: u32,
+        request_id: u64,
+        path: PathBuf,
+        total_bytes: u64,
+    },
+    StreamChunk {
+        peer_id: u32,
+        request_id: u64,
+        data_base64: String,
+    },
+    StreamEnd {
+        peer_id: u32,
+        request_id: u64,
+        path: PathBuf,
+        success: bool,
+        error: Option<String>,
     },
     Disconnected {
         peer_id: u32,
@@ -1082,6 +1433,22 @@ enum WireClientMessage {
     Action(WireAction),
     StreamRequest {
         path: PathBuf,
+        request_id: u64,
+    },
+    StreamStart {
+        request_id: u64,
+        path: PathBuf,
+        total_bytes: u64,
+    },
+    StreamChunk {
+        request_id: u64,
+        data_base64: String,
+    },
+    StreamEnd {
+        request_id: u64,
+        path: PathBuf,
+        success: bool,
+        error: Option<String>,
     },
 }
 
@@ -1093,14 +1460,21 @@ enum WireServerMessage {
         session: Option<OnlineSession>,
     },
     Session(OnlineSession),
+    StreamRequest {
+        path: PathBuf,
+        request_id: u64,
+    },
     StreamStart {
+        request_id: u64,
         path: PathBuf,
         total_bytes: u64,
     },
     StreamChunk {
+        request_id: u64,
         data_base64: String,
     },
     StreamEnd {
+        request_id: u64,
         path: PathBuf,
         success: bool,
         error: Option<String>,
@@ -1114,6 +1488,12 @@ struct InboundStreamDownload {
     file: File,
     received_bytes: u64,
     total_bytes: u64,
+}
+
+#[derive(Debug)]
+struct ClientUploadGuard {
+    local_nickname: String,
+    allowed_paths: HashSet<PathBuf>,
 }
 
 impl InboundStreamDownload {
@@ -1222,6 +1602,7 @@ fn wire_to_action(action: WireAction) -> LocalAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn invite_code_round_trips_without_password() {
@@ -1266,5 +1647,28 @@ mod tests {
 
         let parsed = parse_stun_mapped_ipv4(&packet, &txid).expect("parsed mapped ip");
         assert_eq!(parsed, Ipv4Addr::new(74, 199, 151, 6));
+    }
+
+    #[test]
+    fn stream_wire_messages_preserve_request_id() {
+        let msg = WireServerMessage::StreamRequest {
+            path: PathBuf::from("track.flac"),
+            request_id: 42,
+        };
+        let encoded = serde_json::to_string(&msg).expect("serialize");
+        let decoded: WireServerMessage = serde_json::from_str(&encoded).expect("deserialize");
+        match decoded {
+            WireServerMessage::StreamRequest { path, request_id } => {
+                assert_eq!(path, PathBuf::from("track.flac"));
+                assert_eq!(request_id, 42);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_stream_source_rejects_missing_path() {
+        let result = validate_stream_source(Path::new("does_not_exist.flac"));
+        assert!(result.is_err());
     }
 }

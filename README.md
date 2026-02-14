@@ -29,7 +29,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
 - Add directory from actions panel via typed path or external folder picker (PowerShell on Windows, zenity/kdialog on Linux)
 - Remove directory from actions panel
-- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates, sub-second periodic playback-state sync (track/position/pause), and lossless host file streaming fallback when listener lacks the local file
+- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates, sub-second periodic playback-state sync (track/position/pause), and lossless bidirectional file streaming fallback (host->listener and host<-listener over the same session socket)
 - Invite code is reversible and carries host IPv4 + port (obfuscated, not cryptographically secure); optional room password can be embedded into the same code for one-step join
 - Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
 
@@ -83,6 +83,7 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - Password for host/join: `TUNETUI_ONLINE_PASSWORD` (optional)
 - Include password in invite code: `TUNETUI_ONLINE_INCLUDE_PASSWORD` (`true`/`false`, default `true`)
 - Nickname: `TUNETUI_ONLINE_NICKNAME` (fallback `USERNAME`/`USER`/`you`)
+- Reverse stream safety: peer uploads are only served for shared-queue items owned by that peer and are capped at 1 GiB per file
 
 ## Fuzzing
 

@@ -723,7 +723,10 @@ impl TuneCore {
             return;
         }
 
-        session.push_shared_track(path, title.clone());
+        let owner_nickname = session
+            .local_participant()
+            .map(|entry| entry.nickname.clone());
+        session.push_shared_track(path, title.clone(), owner_nickname);
         self.set_status(&format!("Shared queue + {title}"));
     }
 

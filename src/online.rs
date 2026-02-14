@@ -69,6 +69,8 @@ pub struct SharedQueueItem {
     pub path: PathBuf,
     pub title: String,
     pub delivery: QueueDelivery,
+    #[serde(default)]
+    pub owner_nickname: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -245,7 +247,12 @@ impl OnlineSession {
         Some(self.participants.remove(index).nickname)
     }
 
-    pub fn push_shared_track(&mut self, path: &Path, title: String) {
+    pub fn push_shared_track(
+        &mut self,
+        path: &Path,
+        title: String,
+        owner_nickname: Option<String>,
+    ) {
         let delivery = if path.exists() {
             QueueDelivery::PreferLocalWithStreamFallback
         } else {
@@ -255,6 +262,7 @@ impl OnlineSession {
             path: path.to_path_buf(),
             title,
             delivery,
+            owner_nickname,
         });
         if self.shared_queue.len() > MAX_SHARED_QUEUE_ITEMS {
             let remove = self
@@ -308,6 +316,7 @@ fn generate_room_code() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn host_session_starts_in_collaborative_lossless_mode() {
@@ -336,5 +345,16 @@ mod tests {
             auto_ping_delay: true,
         };
         assert_eq!(participant.effective_delay_ms(), 75);
+    }
+
+    #[test]
+    fn shared_queue_item_owner_defaults_when_missing() {
+        let value = json!({
+            "path": "song.flac",
+            "title": "Song",
+            "delivery": "HostStreamOnly"
+        });
+        let item: SharedQueueItem = serde_json::from_value(value).expect("deserializes");
+        assert_eq!(item.owner_nickname, None);
     }
 }
