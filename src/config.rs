@@ -554,8 +554,8 @@ mod tests {
 
     #[test]
     fn lyrics_path_for_track_uses_config_lyrics_directory() {
-        let path =
-            lyrics_path_for_track(Path::new(r"D:\Music\Artist\song.mp3")).expect("lyrics path");
+        let track_path = PathBuf::from("Music").join("Artist").join("song.mp3");
+        let path = lyrics_path_for_track(&track_path).expect("lyrics path");
         assert!(path.to_string_lossy().contains("tunetui"));
         assert!(path.to_string_lossy().contains("lyrics"));
         assert!(path.extension().and_then(|ext| ext.to_str()) == Some("lrc"));

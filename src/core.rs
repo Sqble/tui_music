@@ -3,9 +3,9 @@ use crate::library;
 use crate::lyrics::{self, LyricLine, LyricsDocument, LyricsSource};
 use crate::model::{PersistedState, PlaybackMode, Playlist, Theme, Track};
 use crate::stats::{StatsRange, StatsSort};
-use rand::SeedableRng;
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -1381,11 +1381,10 @@ mod tests {
         let mut state = PersistedState::default();
         state.folders.push(PathBuf::from(r"E:\LOCALMUSIC"));
         let core = TuneCore::from_persisted(state);
-        assert!(
-            core.browser_entries
-                .iter()
-                .any(|entry| entry.kind == BrowserEntryKind::Folder)
-        );
+        assert!(core
+            .browser_entries
+            .iter()
+            .any(|entry| entry.kind == BrowserEntryKind::Folder));
     }
 
     #[test]
@@ -1473,11 +1472,10 @@ mod tests {
     #[test]
     fn root_browser_includes_all_songs_entry() {
         let core = TuneCore::from_persisted(PersistedState::default());
-        assert!(
-            core.browser_entries
-                .iter()
-                .any(|entry| entry.kind == BrowserEntryKind::AllSongs)
-        );
+        assert!(core
+            .browser_entries
+            .iter()
+            .any(|entry| entry.kind == BrowserEntryKind::AllSongs));
     }
 
     #[test]
@@ -1490,11 +1488,10 @@ mod tests {
             },
         );
         let core = TuneCore::from_persisted(state);
-        assert!(
-            core.browser_entries
-                .iter()
-                .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix")
-        );
+        assert!(core
+            .browser_entries
+            .iter()
+            .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix"));
     }
 
     #[test]
@@ -1572,11 +1569,12 @@ mod tests {
 
     #[test]
     fn navigate_back_stops_at_added_root() {
+        let library_root = PathBuf::from("localmusic");
         let mut state = PersistedState::default();
-        state.folders.push(PathBuf::from(r"E:\LOCALMUSIC"));
+        state.folders.push(library_root.clone());
         let mut core = TuneCore::from_persisted(state);
 
-        core.browser_path = Some(PathBuf::from(r"e:\localmusic"));
+        core.browser_path = Some(library_root);
         core.navigate_back();
 
         assert_eq!(core.browser_path, None);
@@ -1584,13 +1582,15 @@ mod tests {
 
     #[test]
     fn navigate_back_does_not_escape_added_root() {
+        let library_root = PathBuf::from("localmusic");
+        let albums_path = library_root.join("Albums");
         let mut state = PersistedState::default();
-        state.folders.push(PathBuf::from(r"E:\LOCALMUSIC"));
+        state.folders.push(library_root.clone());
         let mut core = TuneCore::from_persisted(state);
 
-        core.browser_path = Some(PathBuf::from(r"E:\LOCALMUSIC\Albums"));
+        core.browser_path = Some(albums_path);
         core.navigate_back();
-        assert_eq!(core.browser_path, Some(PathBuf::from(r"E:\LOCALMUSIC")));
+        assert_eq!(core.browser_path, Some(library_root));
 
         core.navigate_back();
         assert_eq!(core.browser_path, None);
@@ -1757,22 +1757,27 @@ mod tests {
 
     #[test]
     fn adding_folder_selection_to_playlist_adds_all_folder_tracks() {
+        let folder = PathBuf::from("music").join("folder");
+        let folder_track_a = folder.join("a.mp3");
+        let folder_sub = folder.join("sub");
+        let folder_track_b = folder_sub.join("b.mp3");
+        let other_track = PathBuf::from("music").join("other").join("c.mp3");
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.tracks = vec![
             Track {
-                path: PathBuf::from(r"music\folder\a.mp3"),
+                path: folder_track_a.clone(),
                 title: String::from("a"),
                 artist: None,
                 album: None,
             },
             Track {
-                path: PathBuf::from(r"music\folder\sub\b.mp3"),
+                path: folder_track_b.clone(),
                 title: String::from("b"),
                 artist: None,
                 album: None,
             },
             Track {
-                path: PathBuf::from(r"music\other\c.mp3"),
+                path: other_track,
                 title: String::from("c"),
                 artist: None,
                 album: None,
@@ -1781,7 +1786,7 @@ mod tests {
         core.track_lookup = build_track_lookup(&core.tracks);
         core.browser_entries = vec![BrowserEntry {
             kind: BrowserEntryKind::Folder,
-            path: PathBuf::from(r"music\folder"),
+            path: folder,
             label: String::from("[DIR] folder"),
         }];
 
@@ -1789,18 +1794,8 @@ mod tests {
 
         let playlist = core.playlists.get("mix").expect("playlist exists");
         assert_eq!(playlist.tracks.len(), 2);
-        assert!(
-            playlist
-                .tracks
-                .iter()
-                .any(|p| p == &PathBuf::from(r"music\folder\a.mp3"))
-        );
-        assert!(
-            playlist
-                .tracks
-                .iter()
-                .any(|p| p == &PathBuf::from(r"music\folder\sub\b.mp3"))
-        );
+        assert!(playlist.tracks.iter().any(|p| p == &folder_track_a));
+        assert!(playlist.tracks.iter().any(|p| p == &folder_track_b));
     }
 
     #[test]
@@ -1894,20 +1889,17 @@ mod tests {
     fn remove_playlist_refreshes_root_browser_entries() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.create_playlist("mix");
-        assert!(
-            core.browser_entries
-                .iter()
-                .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix")
-        );
+        assert!(core
+            .browser_entries
+            .iter()
+            .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix"));
 
         core.remove_playlist("mix");
 
-        assert!(
-            !core
-                .browser_entries
-                .iter()
-                .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix")
-        );
+        assert!(!core
+            .browser_entries
+            .iter()
+            .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix"));
     }
 
     #[test]
