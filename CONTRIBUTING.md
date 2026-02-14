@@ -10,6 +10,10 @@ Run all checks before opening a PR:
 powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
 ```
 
+```bash
+bash scripts/verify.sh
+```
+
 Equivalent manual commands:
 
 ```bash
