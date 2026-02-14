@@ -10,6 +10,7 @@ use crate::online_net::{
 use crate::stats::{self, ListenSessionRecord, StatsStore};
 use anyhow::{Context, Result};
 use arboard::Clipboard;
+use base64::Engine;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
     KeyModifiers, MouseEvent, MouseEventKind,
@@ -1696,11 +1697,19 @@ fn paste_invite_from_clipboard(online_runtime: &mut OnlineRuntime) -> anyhow::Re
 }
 
 fn copy_invite_to_clipboard(invite_code: &str) -> anyhow::Result<()> {
-    let mut clipboard = Clipboard::new().context("clipboard unavailable")?;
-    clipboard
-        .set_text(invite_code.to_string())
-        .context("clipboard write failed")?;
-    Ok(())
+    if let Ok(mut clipboard) = Clipboard::new()
+        && clipboard.set_text(invite_code.to_string()).is_ok()
+    {
+        return Ok(());
+    }
+
+    copy_invite_via_osc52(invite_code)
+}
+
+fn copy_invite_via_osc52(invite_code: &str) -> anyhow::Result<()> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(invite_code.as_bytes());
+    print!("\x1b]52;c;{encoded}\x07");
+    std::io::Write::flush(&mut stdout()).context("stdout flush failed")
 }
 
 fn inferred_online_nickname() -> String {

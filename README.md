@@ -73,6 +73,7 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - `s` (Online tab): add current track to shared queue
 - Join prompt modal: type invite, `V` paste clipboard, `Enter` join, `Esc` cancel (persists across tabs)
 - Host invite modal after `h`: room code shown centered with `Copy to clipboard` and `OK` buttons (`Tab`/arrow to select, `Enter` activate, `C` quick-copy)
+- Clipboard copy falls back to terminal OSC 52 when native clipboard access is unavailable (useful over SSH; terminal/tmux must allow clipboard escape sequences)
 - `Ctrl+C`: quit
 
 ### Online Networking Defaults
