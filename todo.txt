@@ -1,15 +1,7 @@
 
-stat tracking, stat tracking enabled config option, its saved in another file in the same .config/tunetui/
-graphs, total listen time, per song plays with filter and sort
-last 7 days or 30 or all time 
-
-scrub song playback
 
 listen together with another person even on another network (through ssh)
 
-linux build 
-
-lyrics support - aswell as a built in editor for editing  the lyrics metadata
 
 extract instrumental support
 

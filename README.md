@@ -14,7 +14,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Automatic track advance when a song ends, including while minimized to tray (Windows)
 - Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\state.json` on Windows)
 - Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with listen events and aggregates
-- Keyboard-driven TUI with actions panel
+- Keyboard-driven TUI with actions panel search, recent actions (session-local, last 3), and overflow scrollbar
 - Right-aligned status tabs with `E` cycling (Library, Lyrics, Stats, Online)
 - Stats tab with totals, ASCII charts, top songs, and recent listen log
 - Lyrics tab with live line sync from `.lrc` sidecars or embedded lyric metadata
@@ -55,6 +55,7 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - `r`: rescan folders
 - `s`: save state
 - `/`: actions panel
+- `Type/Backspace` (actions panel): filter actions by search
 - `Tab`: cycle header sections (Library/Lyrics/Stats/Online)
 - `Left/Right` (Stats tab): move filter focus
 - `Enter` (Stats tab): cycle focused range/sort filter

@@ -480,11 +480,10 @@ fn add_listen_time_to_buckets(
         allocated = allocated.saturating_add(slice);
     }
 
-    if event_end > series_end
-        && allocated < listened_seconds
-        && let Some(last) = buckets.last_mut()
-    {
-        *last = last.saturating_add(listened_seconds.saturating_sub(allocated));
+    if event_end > series_end && allocated < listened_seconds {
+        if let Some(last) = buckets.last_mut() {
+            *last = last.saturating_add(listened_seconds.saturating_sub(allocated));
+        }
     }
 }
 

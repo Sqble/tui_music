@@ -7,7 +7,10 @@ use crate::core::TuneCore;
 use crate::model::Theme;
 use crate::stats::{ListenEvent, StatsRange, StatsSnapshot, StatsSort, TrendSeries};
 use ratatui::prelude::*;
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    ScrollbarState, Wrap,
+};
 use std::sync::OnceLock;
 use std::time::Duration;
 use time::{OffsetDateTime, UtcOffset};
@@ -17,6 +20,7 @@ const APP_TITLE_WITH_VERSION: &str = "TuneTUI v1.0.0-alpha-2  ";
 pub struct ActionPanelView {
     pub title: String,
     pub hint: String,
+    pub search_query: Option<String>,
     pub options: Vec<String>,
     pub selected: usize,
 }
@@ -1280,24 +1284,78 @@ fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemeP
     let popup = centered_rect(frame.area(), 62, 58);
     frame.render_widget(Clear, popup);
 
+    let panel_block_widget = panel_block(&panel.title, colors.popup_bg, colors.text, colors.border);
+    frame.render_widget(panel_block_widget, popup);
+
+    let inner = popup.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let has_search = panel.search_query.is_some();
+    let search_height = u16::from(has_search);
+    let hint_height = 1;
+    if inner.height <= search_height.saturating_add(hint_height) {
+        return;
+    }
+
+    let list_height = inner.height.saturating_sub(search_height + hint_height);
+    let list_height_usize = usize::from(list_height);
+
+    if let Some(query) = &panel.search_query {
+        let search_line = format!("Search: {query}");
+        let search_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                search_line,
+                Style::default().fg(colors.accent),
+            )),
+            search_area,
+        );
+    }
+
+    let list_y = inner.y.saturating_add(search_height);
+    let show_scrollbar = list_overflows(panel.options.len(), list_height_usize) && inner.width > 1;
+    let list_width = if show_scrollbar {
+        inner.width.saturating_sub(1)
+    } else {
+        inner.width
+    };
+    let list_area = Rect {
+        x: inner.x,
+        y: list_y,
+        width: list_width,
+        height: list_height,
+    };
+
+    let selected = if panel.options.is_empty() {
+        None
+    } else {
+        Some(panel.selected.min(panel.options.len() - 1))
+    };
+    let scroll_top = selected
+        .map(|focused| centered_scroll_top(focused, list_height_usize))
+        .unwrap_or(0);
+
     let items: Vec<ListItem> = panel
         .options
         .iter()
         .map(|item| ListItem::new(Span::styled(item, Style::default().fg(colors.text))))
         .collect();
 
-    let mut state = ListState::default();
-    if !panel.options.is_empty() {
-        state.select(Some(panel.selected.min(panel.options.len() - 1)));
-    }
+    let mut state = ListState::default()
+        .with_selected(selected)
+        .with_offset(usize::from(scroll_top));
 
     let list = List::new(items)
-        .block(panel_block(
-            &panel.title,
-            colors.popup_bg,
-            colors.text,
-            colors.border,
-        ))
         .highlight_style(
             Style::default()
                 .bg(colors.popup_selected_bg)
@@ -1305,12 +1363,30 @@ fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemeP
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol("-> ");
-    frame.render_stateful_widget(list, popup, &mut state);
+    frame.render_stateful_widget(list, list_area, &mut state);
+
+    if show_scrollbar {
+        let scrollbar_area = Rect {
+            x: list_area.x.saturating_add(list_area.width),
+            y: list_area.y,
+            width: 1,
+            height: list_area.height,
+        };
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_style(Style::default().fg(colors.border))
+            .thumb_style(Style::default().fg(colors.accent));
+        let mut scrollbar_state = ScrollbarState::new(panel.options.len())
+            .position(usize::from(scroll_top))
+            .viewport_content_length(list_height_usize);
+        frame.render_stateful_widget(scrollbar, scrollbar_area, &mut scrollbar_state);
+    }
 
     let hint_area = Rect {
-        x: popup.x.saturating_add(2),
-        y: popup.y.saturating_add(popup.height.saturating_sub(2)),
-        width: popup.width.saturating_sub(4),
+        x: inner.x,
+        y: inner.y.saturating_add(inner.height.saturating_sub(1)),
+        width: inner.width,
         height: 1,
     };
     frame.render_widget(
@@ -1320,6 +1396,10 @@ fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemeP
         )),
         hint_area,
     );
+}
+
+fn list_overflows(total_items: usize, viewport_height: usize) -> bool {
+    total_items > viewport_height
 }
 
 fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -1413,5 +1493,16 @@ mod tests {
     #[test]
     fn editor_scroll_top_includes_header_offset() {
         assert_eq!(editor_scroll_top(30, 10, 5), 30);
+    }
+
+    #[test]
+    fn action_panel_scroll_top_uses_centered_strategy() {
+        assert_eq!(centered_scroll_top(15, 6), 12);
+    }
+
+    #[test]
+    fn action_panel_scrollbar_only_when_overflow_exists() {
+        assert!(list_overflows(8, 5));
+        assert!(!list_overflows(5, 5));
     }
 }

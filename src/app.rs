@@ -272,11 +272,156 @@ fn duration_to_recorded_seconds(duration: Duration) -> u32 {
     rounded.min(u64::from(u32::MAX)) as u32
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RootActionId {
+    AddDirectory,
+    AddSelectedToPlaylist,
+    AddNowPlayingToPlaylist,
+    SetPlaybackMode,
+    PlaybackSettings,
+    PlayPlaylist,
+    RemoveSelectedFromPlaylist,
+    CreatePlaylist,
+    RemovePlaylist,
+    RemoveDirectory,
+    RescanLibrary,
+    AudioDriverSettings,
+    Theme,
+    SaveState,
+    ClearListenHistory,
+    MinimizeToTray,
+    ImportTxtToLyrics,
+    ClosePanel,
+}
+
+const ROOT_ACTIONS: [RootActionId; 18] = [
+    RootActionId::AddDirectory,
+    RootActionId::AddSelectedToPlaylist,
+    RootActionId::AddNowPlayingToPlaylist,
+    RootActionId::SetPlaybackMode,
+    RootActionId::PlaybackSettings,
+    RootActionId::PlayPlaylist,
+    RootActionId::RemoveSelectedFromPlaylist,
+    RootActionId::CreatePlaylist,
+    RootActionId::RemovePlaylist,
+    RootActionId::RemoveDirectory,
+    RootActionId::RescanLibrary,
+    RootActionId::AudioDriverSettings,
+    RootActionId::Theme,
+    RootActionId::SaveState,
+    RootActionId::ClearListenHistory,
+    RootActionId::MinimizeToTray,
+    RootActionId::ImportTxtToLyrics,
+    RootActionId::ClosePanel,
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RootVisibleAction {
+    action: RootActionId,
+    label: String,
+}
+
+fn root_action_label(action: RootActionId) -> &'static str {
+    match action {
+        RootActionId::AddDirectory => "Add directory",
+        RootActionId::AddSelectedToPlaylist => "Add selected item to playlist",
+        RootActionId::AddNowPlayingToPlaylist => "Add now playing song to playlist",
+        RootActionId::SetPlaybackMode => "Set playback mode",
+        RootActionId::PlaybackSettings => "Playback settings",
+        RootActionId::PlayPlaylist => "Play playlist",
+        RootActionId::RemoveSelectedFromPlaylist => "Remove selected from playlist",
+        RootActionId::CreatePlaylist => "Create playlist",
+        RootActionId::RemovePlaylist => "Remove playlist",
+        RootActionId::RemoveDirectory => "Remove directory",
+        RootActionId::RescanLibrary => "Rescan library",
+        RootActionId::AudioDriverSettings => "Audio driver settings",
+        RootActionId::Theme => "Theme",
+        RootActionId::SaveState => "Save state",
+        RootActionId::ClearListenHistory => "Clear listen history (backup)",
+        RootActionId::MinimizeToTray => "Minimize to tray",
+        RootActionId::ImportTxtToLyrics => "Import TXT to lyrics",
+        RootActionId::ClosePanel => "Close panel",
+    }
+}
+
+fn root_action_index(action: RootActionId) -> usize {
+    ROOT_ACTIONS
+        .iter()
+        .position(|entry| *entry == action)
+        .unwrap_or(0)
+}
+
+fn root_action_matches_query(action: RootActionId, query_lower: &str) -> bool {
+    if query_lower.is_empty() {
+        return true;
+    }
+    root_action_label(action)
+        .to_ascii_lowercase()
+        .contains(query_lower)
+}
+
+fn root_visible_actions(
+    query: &str,
+    recent_root_actions: &[RootActionId],
+) -> Vec<RootVisibleAction> {
+    let query_lower = query.trim().to_ascii_lowercase();
+    let mut seen = [false; ROOT_ACTIONS.len()];
+    let mut visible = Vec::with_capacity(ROOT_ACTIONS.len());
+
+    for action in recent_root_actions.iter().copied() {
+        let index = root_action_index(action);
+        if seen[index] || !root_action_matches_query(action, &query_lower) {
+            continue;
+        }
+        seen[index] = true;
+        visible.push(RootVisibleAction {
+            action,
+            label: format!("Recent: {}", root_action_label(action)),
+        });
+    }
+
+    for action in ROOT_ACTIONS {
+        let index = root_action_index(action);
+        if seen[index] || !root_action_matches_query(action, &query_lower) {
+            continue;
+        }
+        seen[index] = true;
+        visible.push(RootVisibleAction {
+            action,
+            label: String::from(root_action_label(action)),
+        });
+    }
+
+    visible
+}
+
+fn root_selected_for_action(action: RootActionId, recent_root_actions: &[RootActionId]) -> usize {
+    root_visible_actions("", recent_root_actions)
+        .iter()
+        .position(|entry| entry.action == action)
+        .unwrap_or(0)
+}
+
+fn update_recent_root_actions(recent_root_actions: &mut Vec<RootActionId>, action: RootActionId) {
+    if matches!(action, RootActionId::ClosePanel) {
+        return;
+    }
+    if let Some(index) = recent_root_actions
+        .iter()
+        .position(|entry| *entry == action)
+    {
+        recent_root_actions.remove(index);
+    }
+    recent_root_actions.insert(0, action);
+    recent_root_actions.truncate(3);
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ActionPanelState {
     Closed,
     Root {
         selected: usize,
+        query: String,
     },
     Mode {
         selected: usize,
@@ -325,7 +470,10 @@ enum ActionPanelState {
 
 impl ActionPanelState {
     fn open(&mut self) {
-        *self = Self::Root { selected: 0 };
+        *self = Self::Root {
+            selected: 0,
+            query: String::new(),
+        };
     }
 
     fn close(&mut self) {
@@ -340,37 +488,31 @@ impl ActionPanelState {
         &self,
         core: &TuneCore,
         audio: &dyn AudioEngine,
+        recent_root_actions: &[RootActionId],
     ) -> Option<crate::ui::ActionPanelView> {
         match self {
             Self::Closed => None,
-            Self::Root { selected } => Some(crate::ui::ActionPanelView {
-                title: String::from("Actions"),
-                hint: String::from("Enter select  Esc close  Up/Down navigate"),
-                options: vec![
-                    String::from("Add directory"),
-                    String::from("Add selected item to playlist"),
-                    String::from("Add now playing song to playlist"),
-                    String::from("Set playback mode"),
-                    String::from("Playback settings"),
-                    String::from("Play playlist"),
-                    String::from("Remove selected from playlist"),
-                    String::from("Create playlist"),
-                    String::from("Remove playlist"),
-                    String::from("Remove directory"),
-                    String::from("Rescan library"),
-                    String::from("Audio driver settings"),
-                    String::from("Theme"),
-                    String::from("Save state"),
-                    String::from("Clear listen history (backup)"),
-                    String::from("Minimize to tray"),
-                    String::from("Import TXT to lyrics"),
-                    String::from("Close panel"),
-                ],
-                selected: *selected,
-            }),
+            Self::Root { selected, query } => {
+                let visible_actions = root_visible_actions(query, recent_root_actions);
+                Some(crate::ui::ActionPanelView {
+                    title: String::from("Actions"),
+                    hint: String::from("Type search  Enter select  Esc close  Up/Down navigate"),
+                    search_query: Some(query.clone()),
+                    options: if visible_actions.is_empty() {
+                        vec![String::from("(no matching actions)")]
+                    } else {
+                        visible_actions
+                            .into_iter()
+                            .map(|entry| entry.label)
+                            .collect()
+                    },
+                    selected: *selected,
+                })
+            }
             Self::Mode { selected } => Some(crate::ui::ActionPanelView {
                 title: String::from("Playback Mode"),
                 hint: String::from("Enter apply  Backspace back"),
+                search_query: None,
                 options: vec![
                     String::from("Normal"),
                     String::from("Shuffle"),
@@ -384,6 +526,7 @@ impl ActionPanelState {
                 Some(crate::ui::ActionPanelView {
                     title: String::from("Play Playlist"),
                     hint: String::from("Enter play  Backspace back"),
+                    search_query: None,
                     options: if playlists.is_empty() {
                         vec![String::from("(no playlists)")]
                     } else {
@@ -397,6 +540,7 @@ impl ActionPanelState {
                 Some(crate::ui::ActionPanelView {
                     title: String::from("Add To Playlist"),
                     hint: String::from("Enter add  Backspace back"),
+                    search_query: None,
                     options: if playlists.is_empty() {
                         vec![String::from("(no playlists)")]
                     } else {
@@ -410,6 +554,7 @@ impl ActionPanelState {
                 Some(crate::ui::ActionPanelView {
                     title: String::from("Add Now Playing To Playlist"),
                     hint: String::from("Enter add  Backspace back"),
+                    search_query: None,
                     options: if playlists.is_empty() {
                         vec![String::from("(no playlists)")]
                     } else {
@@ -421,6 +566,7 @@ impl ActionPanelState {
             Self::PlaylistCreate { selected, input } => Some(crate::ui::ActionPanelView {
                 title: String::from("Create Playlist"),
                 hint: String::from("Type name + Enter  Backspace back"),
+                search_query: None,
                 options: vec![if input.is_empty() {
                     String::from("Name: ")
                 } else {
@@ -433,6 +579,7 @@ impl ActionPanelState {
                 Some(crate::ui::ActionPanelView {
                     title: String::from("Remove Playlist"),
                     hint: String::from("Enter remove  Backspace back"),
+                    search_query: None,
                     options: if playlists.is_empty() {
                         vec![String::from("(no playlists)")]
                     } else {
@@ -444,6 +591,7 @@ impl ActionPanelState {
             Self::AudioSettings { selected } => Some(crate::ui::ActionPanelView {
                 title: String::from("Audio Driver Settings"),
                 hint: String::from("Enter select  Backspace back"),
+                search_query: None,
                 options: vec![
                     String::from("Reload audio driver"),
                     String::from("Select output speaker"),
@@ -456,6 +604,7 @@ impl ActionPanelState {
                 Some(crate::ui::ActionPanelView {
                     title: String::from("Output Speaker"),
                     hint: String::from("Enter apply  Backspace back"),
+                    search_query: None,
                     options,
                     selected: *selected,
                 })
@@ -463,12 +612,14 @@ impl ActionPanelState {
             Self::PlaybackSettings { selected } => Some(crate::ui::ActionPanelView {
                 title: String::from("Playback Settings"),
                 hint: String::from("Enter toggle/select  Backspace back"),
+                search_query: None,
                 options: playback_settings_options(core),
                 selected: *selected,
             }),
             Self::ThemeSettings { selected } => Some(crate::ui::ActionPanelView {
                 title: String::from("Theme"),
                 hint: String::from("Enter apply  Backspace back"),
+                search_query: None,
                 options: theme_options(core.theme),
                 selected: *selected,
             }),
@@ -479,6 +630,7 @@ impl ActionPanelState {
             } => Some(crate::ui::ActionPanelView {
                 title: String::from("Import TXT To Lyrics"),
                 hint: String::from("Type path/seconds then Enter on Import"),
+                search_query: None,
                 options: vec![
                     if path_input.is_empty() {
                         String::from("TXT path: ")
@@ -497,6 +649,7 @@ impl ActionPanelState {
             Self::AddDirectory { selected, input } => Some(crate::ui::ActionPanelView {
                 title: String::from("Add Directory"),
                 hint: String::from("Enter choose folder  Down type path"),
+                search_query: None,
                 options: vec![
                     String::from("Choose folder externally"),
                     if input.is_empty() {
@@ -512,6 +665,7 @@ impl ActionPanelState {
                 Some(crate::ui::ActionPanelView {
                     title: String::from("Remove Directory"),
                     hint: String::from("Enter remove  Backspace back"),
+                    search_query: None,
                     options: if paths.is_empty() {
                         vec![String::from("(no folders)")]
                     } else {
@@ -561,6 +715,7 @@ pub fn run() -> Result<()> {
     terminal.clear()?;
 
     let mut action_panel = ActionPanelState::Closed;
+    let mut recent_root_actions: Vec<RootActionId> = Vec::new();
     let mut last_tick = Instant::now();
     let mut library_rect = ratatui::prelude::Rect::default();
     let mut stats_enabled_last = core.stats_enabled;
@@ -602,7 +757,7 @@ pub fn run() -> Result<()> {
         if core.dirty || last_tick.elapsed() > Duration::from_millis(250) {
             terminal.draw(|frame| {
                 library_rect = crate::ui::library_rect(frame.area());
-                let panel_view = action_panel.to_view(&core, &*audio);
+                let panel_view = action_panel.to_view(&core, &*audio, &recent_root_actions);
                 let stats_snapshot = (core.header_section == HeaderSection::Stats).then(|| {
                     stats_store.query(
                         &crate::stats::StatsQuery {
@@ -646,7 +801,13 @@ pub fn run() -> Result<()> {
         }
 
         if action_panel.is_open() {
-            handle_action_panel_input(&mut core, &mut *audio, &mut action_panel, key.code);
+            handle_action_panel_input_with_recent(
+                &mut core,
+                &mut *audio,
+                &mut action_panel,
+                &mut recent_root_actions,
+                key.code,
+            );
             continue;
         }
 
@@ -1469,7 +1630,7 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
     };
 
     match panel {
-        ActionPanelState::Root { selected }
+        ActionPanelState::Root { selected, .. }
         | ActionPanelState::Mode { selected }
         | ActionPanelState::PlaylistPlay { selected }
         | ActionPanelState::PlaylistAdd { selected }
@@ -1487,12 +1648,42 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
     }
 }
 
+#[cfg(test)]
 fn handle_action_panel_input(
     core: &mut TuneCore,
     audio: &mut dyn AudioEngine,
     panel: &mut ActionPanelState,
     key: KeyCode,
 ) {
+    let mut recent_root_actions = Vec::new();
+    handle_action_panel_input_with_recent(core, audio, panel, &mut recent_root_actions, key);
+}
+
+fn handle_action_panel_input_with_recent(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    panel: &mut ActionPanelState,
+    recent_root_actions: &mut Vec<RootActionId>,
+    key: KeyCode,
+) {
+    if let ActionPanelState::Root { selected, query } = panel {
+        match key {
+            KeyCode::Char(ch) => {
+                query.push(ch);
+                *selected = 0;
+                core.dirty = true;
+                return;
+            }
+            KeyCode::Backspace if !query.is_empty() => {
+                query.pop();
+                *selected = 0;
+                core.dirty = true;
+                return;
+            }
+            _ => {}
+        }
+    }
+
     if let ActionPanelState::AddDirectory { selected, input } = panel {
         match key {
             KeyCode::Char(ch) if *selected == 1 => {
@@ -1558,7 +1749,9 @@ fn handle_action_panel_input(
 
     let option_count = match panel {
         ActionPanelState::Closed => 0,
-        ActionPanelState::Root { .. } => 18,
+        ActionPanelState::Root { query, .. } => {
+            root_visible_actions(query, recent_root_actions).len()
+        }
         ActionPanelState::Mode { .. } => 4,
         ActionPanelState::PlaylistPlay { .. }
         | ActionPanelState::PlaylistAdd { .. }
@@ -1573,6 +1766,14 @@ fn handle_action_panel_input(
         ActionPanelState::AddDirectory { .. } => 2,
         ActionPanelState::RemoveDirectory { .. } => sorted_folder_paths(core).len().max(1),
     };
+
+    if let ActionPanelState::Root { selected, .. } = panel {
+        if option_count == 0 {
+            *selected = 0;
+        } else if *selected >= option_count {
+            *selected = option_count - 1;
+        }
+    }
 
     match key {
         KeyCode::Esc => {
@@ -1589,23 +1790,90 @@ fn handle_action_panel_input(
         }
         KeyCode::Left | KeyCode::Backspace => {
             *panel = match panel {
-                ActionPanelState::Mode { .. } => ActionPanelState::Root { selected: 3 },
-                ActionPanelState::PlaylistPlay { .. } => ActionPanelState::Root { selected: 5 },
-                ActionPanelState::PlaylistAdd { .. } => ActionPanelState::Root { selected: 1 },
-                ActionPanelState::PlaylistAddNowPlaying { .. } => {
-                    ActionPanelState::Root { selected: 2 }
-                }
-                ActionPanelState::PlaylistCreate { .. } => ActionPanelState::Root { selected: 7 },
-                ActionPanelState::PlaylistRemove { .. } => ActionPanelState::Root { selected: 8 },
-                ActionPanelState::AudioSettings { .. } => ActionPanelState::Root { selected: 11 },
-                ActionPanelState::PlaybackSettings { .. } => ActionPanelState::Root { selected: 4 },
-                ActionPanelState::AddDirectory { .. } => ActionPanelState::Root { selected: 0 },
+                ActionPanelState::Mode { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::SetPlaybackMode,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::PlaylistPlay { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::PlayPlaylist,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::PlaylistAdd { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::AddSelectedToPlaylist,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::PlaylistAddNowPlaying { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::AddNowPlayingToPlaylist,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::PlaylistCreate { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::CreatePlaylist,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::PlaylistRemove { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::RemovePlaylist,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::AudioSettings { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::AudioDriverSettings,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::PlaybackSettings { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::PlaybackSettings,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::AddDirectory { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::AddDirectory,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
                 ActionPanelState::AudioOutput { .. } => {
                     ActionPanelState::AudioSettings { selected: 0 }
                 }
-                ActionPanelState::ThemeSettings { .. } => ActionPanelState::Root { selected: 12 },
-                ActionPanelState::LyricsImportTxt { .. } => ActionPanelState::Root { selected: 16 },
-                ActionPanelState::RemoveDirectory { .. } => ActionPanelState::Root { selected: 9 },
+                ActionPanelState::ThemeSettings { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(RootActionId::Theme, recent_root_actions),
+                    query: String::new(),
+                },
+                ActionPanelState::LyricsImportTxt { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::ImportTxtToLyrics,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::RemoveDirectory { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::RemoveDirectory,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
                 ActionPanelState::Root { .. } | ActionPanelState::Closed => {
                     ActionPanelState::Closed
                 }
@@ -1613,124 +1881,136 @@ fn handle_action_panel_input(
             core.dirty = true;
         }
         KeyCode::Enter => match panel.clone() {
-            ActionPanelState::Root { selected } => match selected {
-                0 => {
-                    *panel = ActionPanelState::AddDirectory {
-                        selected: 1,
-                        input: String::new(),
-                    };
+            ActionPanelState::Root { selected, query } => {
+                let visible_actions = root_visible_actions(&query, recent_root_actions);
+                let Some(selected_action) = visible_actions.get(selected).map(|entry| entry.action)
+                else {
+                    core.status = String::from("No matching actions");
                     core.dirty = true;
-                }
-                1 => {
-                    if sorted_playlist_names(core).is_empty() {
-                        core.status = String::from("No playlists available");
+                    return;
+                };
+
+                update_recent_root_actions(recent_root_actions, selected_action);
+
+                match selected_action {
+                    RootActionId::AddDirectory => {
+                        *panel = ActionPanelState::AddDirectory {
+                            selected: 1,
+                            input: String::new(),
+                        };
+                        core.dirty = true;
+                    }
+                    RootActionId::AddSelectedToPlaylist => {
+                        if sorted_playlist_names(core).is_empty() {
+                            core.status = String::from("No playlists available");
+                            core.dirty = true;
+                            panel.close();
+                        } else {
+                            *panel = ActionPanelState::PlaylistAdd { selected: 0 };
+                            core.dirty = true;
+                        }
+                    }
+                    RootActionId::AddNowPlayingToPlaylist => {
+                        if sorted_playlist_names(core).is_empty() {
+                            core.status = String::from("No playlists available");
+                            core.dirty = true;
+                            panel.close();
+                        } else {
+                            *panel = ActionPanelState::PlaylistAddNowPlaying { selected: 0 };
+                            core.dirty = true;
+                        }
+                    }
+                    RootActionId::SetPlaybackMode => {
+                        *panel = ActionPanelState::Mode { selected: 0 };
+                        core.dirty = true;
+                    }
+                    RootActionId::PlaybackSettings => {
+                        *panel = ActionPanelState::PlaybackSettings { selected: 0 };
+                        core.dirty = true;
+                    }
+                    RootActionId::PlayPlaylist => {
+                        if sorted_playlist_names(core).is_empty() {
+                            core.status = String::from("No playlists available");
+                            core.dirty = true;
+                            panel.close();
+                        } else {
+                            *panel = ActionPanelState::PlaylistPlay { selected: 0 };
+                            core.dirty = true;
+                        }
+                    }
+                    RootActionId::RemoveSelectedFromPlaylist => {
+                        core.remove_selected_from_current_playlist();
+                        auto_save_state(core, &*audio);
+                        panel.close();
+                    }
+                    RootActionId::CreatePlaylist => {
+                        *panel = ActionPanelState::PlaylistCreate {
+                            selected: 0,
+                            input: String::new(),
+                        };
+                        core.dirty = true;
+                    }
+                    RootActionId::RemovePlaylist => {
+                        *panel = ActionPanelState::PlaylistRemove { selected: 0 };
+                        core.dirty = true;
+                    }
+                    RootActionId::RemoveDirectory => {
+                        *panel = ActionPanelState::RemoveDirectory { selected: 0 };
+                        core.dirty = true;
+                    }
+                    RootActionId::RescanLibrary => {
+                        core.rescan();
+                        panel.close();
+                    }
+                    RootActionId::AudioDriverSettings => {
+                        *panel = ActionPanelState::AudioSettings { selected: 0 };
+                        core.dirty = true;
+                    }
+                    RootActionId::Theme => {
+                        let selected = match core.theme {
+                            Theme::Dark | Theme::Ocean => 0,
+                            Theme::PitchBlack => 1,
+                            Theme::Galaxy => 2,
+                            Theme::Matrix | Theme::Forest => 3,
+                            Theme::Demonic => 4,
+                            Theme::CottonCandy | Theme::Sunset => 5,
+                        };
+                        *panel = ActionPanelState::ThemeSettings { selected };
+                        core.dirty = true;
+                    }
+                    RootActionId::SaveState => {
+                        if let Err(err) = save_state_with_audio(core, &*audio) {
+                            core.status = format!("save error: {err:#}");
+                            core.dirty = true;
+                        }
+                        panel.close();
+                    }
+                    RootActionId::ClearListenHistory => {
+                        core.clear_stats_requested = true;
+                        core.status = String::from("Clearing listen history...");
                         core.dirty = true;
                         panel.close();
-                    } else {
-                        *panel = ActionPanelState::PlaylistAdd { selected: 0 };
-                        core.dirty = true;
                     }
-                }
-                2 => {
-                    if sorted_playlist_names(core).is_empty() {
-                        core.status = String::from("No playlists available");
+                    RootActionId::MinimizeToTray => {
+                        minimize_to_tray();
+                        core.status = String::from("Minimized to tray");
                         core.dirty = true;
                         panel.close();
-                    } else {
-                        *panel = ActionPanelState::PlaylistAddNowPlaying { selected: 0 };
+                    }
+                    RootActionId::ImportTxtToLyrics => {
+                        *panel = ActionPanelState::LyricsImportTxt {
+                            selected: 0,
+                            path_input: String::new(),
+                            interval_input: String::from("3"),
+                        };
                         core.dirty = true;
                     }
-                }
-                3 => {
-                    *panel = ActionPanelState::Mode { selected: 0 };
-                    core.dirty = true;
-                }
-                4 => {
-                    *panel = ActionPanelState::PlaybackSettings { selected: 0 };
-                    core.dirty = true;
-                }
-                5 => {
-                    if sorted_playlist_names(core).is_empty() {
-                        core.status = String::from("No playlists available");
-                        core.dirty = true;
+                    RootActionId::ClosePanel => {
                         panel.close();
-                    } else {
-                        *panel = ActionPanelState::PlaylistPlay { selected: 0 };
                         core.dirty = true;
                     }
                 }
-                6 => {
-                    core.remove_selected_from_current_playlist();
-                    auto_save_state(core, &*audio);
-                    panel.close();
-                }
-                7 => {
-                    *panel = ActionPanelState::PlaylistCreate {
-                        selected: 0,
-                        input: String::new(),
-                    };
-                    core.dirty = true;
-                }
-                8 => {
-                    *panel = ActionPanelState::PlaylistRemove { selected: 0 };
-                    core.dirty = true;
-                }
-                9 => {
-                    *panel = ActionPanelState::RemoveDirectory { selected: 0 };
-                    core.dirty = true;
-                }
-                10 => {
-                    core.rescan();
-                    panel.close();
-                }
-                11 => {
-                    *panel = ActionPanelState::AudioSettings { selected: 0 };
-                    core.dirty = true;
-                }
-                12 => {
-                    let selected = match core.theme {
-                        Theme::Dark | Theme::Ocean => 0,
-                        Theme::PitchBlack => 1,
-                        Theme::Galaxy => 2,
-                        Theme::Matrix | Theme::Forest => 3,
-                        Theme::Demonic => 4,
-                        Theme::CottonCandy | Theme::Sunset => 5,
-                    };
-                    *panel = ActionPanelState::ThemeSettings { selected };
-                    core.dirty = true;
-                }
-                13 => {
-                    if let Err(err) = save_state_with_audio(core, &*audio) {
-                        core.status = format!("save error: {err:#}");
-                        core.dirty = true;
-                    }
-                    panel.close();
-                }
-                14 => {
-                    core.clear_stats_requested = true;
-                    core.status = String::from("Clearing listen history...");
-                    core.dirty = true;
-                    panel.close();
-                }
-                15 => {
-                    minimize_to_tray();
-                    core.status = String::from("Minimized to tray");
-                    core.dirty = true;
-                    panel.close();
-                }
-                16 => {
-                    *panel = ActionPanelState::LyricsImportTxt {
-                        selected: 0,
-                        path_input: String::new(),
-                        interval_input: String::from("3"),
-                    };
-                    core.dirty = true;
-                }
-                _ => {
-                    panel.close();
-                    core.dirty = true;
-                }
-            },
+            }
             ActionPanelState::Mode { selected } => {
                 core.playback_mode = match selected {
                     0 => PlaybackMode::Normal,
@@ -1840,7 +2120,13 @@ fn handle_action_panel_input(
                     core.dirty = true;
                 }
                 _ => {
-                    *panel = ActionPanelState::Root { selected: 11 };
+                    *panel = ActionPanelState::Root {
+                        selected: root_selected_for_action(
+                            RootActionId::AudioDriverSettings,
+                            recent_root_actions,
+                        ),
+                        query: String::new(),
+                    };
                     core.dirty = true;
                 }
             },
@@ -1907,7 +2193,13 @@ fn handle_action_panel_input(
                     auto_save_state(core, &*audio);
                 }
                 _ => {
-                    *panel = ActionPanelState::Root { selected: 4 };
+                    *panel = ActionPanelState::Root {
+                        selected: root_selected_for_action(
+                            RootActionId::PlaybackSettings,
+                            recent_root_actions,
+                        ),
+                        query: String::new(),
+                    };
                     core.dirty = true;
                 }
             },
@@ -2654,7 +2946,10 @@ mod tests {
     fn action_panel_mode_selection_applies_mode() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 3 };
+        let mut panel = ActionPanelState::Root {
+            selected: 3,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::Mode { .. }));
@@ -2667,10 +2962,78 @@ mod tests {
     }
 
     #[test]
+    fn root_action_search_executes_selected_filtered_action() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Root {
+            selected: 0,
+            query: String::new(),
+        };
+        let mut recent_root_actions = Vec::new();
+
+        for ch in "theme".chars() {
+            handle_action_panel_input_with_recent(
+                &mut core,
+                &mut audio,
+                &mut panel,
+                &mut recent_root_actions,
+                KeyCode::Char(ch),
+            );
+        }
+        handle_action_panel_input_with_recent(
+            &mut core,
+            &mut audio,
+            &mut panel,
+            &mut recent_root_actions,
+            KeyCode::Enter,
+        );
+
+        assert!(matches!(panel, ActionPanelState::ThemeSettings { .. }));
+        assert_eq!(recent_root_actions, vec![RootActionId::Theme]);
+    }
+
+    #[test]
+    fn recent_root_actions_are_unique_and_capped_at_three() {
+        let mut recent = Vec::new();
+        update_recent_root_actions(&mut recent, RootActionId::AddDirectory);
+        update_recent_root_actions(&mut recent, RootActionId::Theme);
+        update_recent_root_actions(&mut recent, RootActionId::SaveState);
+        update_recent_root_actions(&mut recent, RootActionId::Theme);
+        update_recent_root_actions(&mut recent, RootActionId::PlaybackSettings);
+
+        assert_eq!(
+            recent,
+            vec![
+                RootActionId::PlaybackSettings,
+                RootActionId::Theme,
+                RootActionId::SaveState,
+            ]
+        );
+    }
+
+    #[test]
+    fn root_visible_actions_prioritize_recent_without_duplicates() {
+        let visible = root_visible_actions("", &[RootActionId::Theme, RootActionId::AddDirectory]);
+
+        assert_eq!(visible[0].action, RootActionId::Theme);
+        assert_eq!(visible[1].action, RootActionId::AddDirectory);
+        assert_eq!(
+            visible
+                .iter()
+                .filter(|entry| entry.action == RootActionId::Theme)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
     fn action_panel_playlist_add_requires_playlist() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 1 };
+        let mut panel = ActionPanelState::Root {
+            selected: 1,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
 
@@ -2683,7 +3046,10 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
         audio.current = Some(PathBuf::from("now.mp3"));
-        let mut panel = ActionPanelState::Root { selected: 2 };
+        let mut panel = ActionPanelState::Root {
+            selected: 2,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
 
@@ -2697,7 +3063,10 @@ mod tests {
         core.create_playlist("mix");
         let mut audio = TestAudioEngine::new();
         audio.current = Some(PathBuf::from("now.mp3"));
-        let mut panel = ActionPanelState::Root { selected: 2 };
+        let mut panel = ActionPanelState::Root {
+            selected: 2,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(
@@ -2720,7 +3089,10 @@ mod tests {
 
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 0 };
+        let mut panel = ActionPanelState::Root {
+            selected: 0,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(
@@ -2748,7 +3120,10 @@ mod tests {
         state.folders.push(PathBuf::from(r"E:\LOCALMUSIC"));
         let mut core = TuneCore::from_persisted(state);
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 9 };
+        let mut panel = ActionPanelState::Root {
+            selected: 9,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::RemoveDirectory { .. }));
@@ -2762,7 +3137,10 @@ mod tests {
     fn action_panel_create_playlist_from_input() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 7 };
+        let mut panel = ActionPanelState::Root {
+            selected: 7,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(
@@ -2790,7 +3168,10 @@ mod tests {
             .insert(String::from("mix"), crate::model::Playlist::default());
         let mut core = TuneCore::from_persisted(state);
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 8 };
+        let mut panel = ActionPanelState::Root {
+            selected: 8,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::PlaylistRemove { .. }));
@@ -2805,7 +3186,10 @@ mod tests {
     fn action_panel_audio_driver_reload_updates_status() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 11 };
+        let mut panel = ActionPanelState::Root {
+            selected: 11,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::AudioSettings { .. }));
@@ -2824,7 +3208,10 @@ mod tests {
     fn action_panel_audio_output_selection_sets_device() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 11 };
+        let mut panel = ActionPanelState::Root {
+            selected: 11,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
@@ -2850,7 +3237,10 @@ mod tests {
     fn playback_settings_toggle_loudness_and_crossfade() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 4 };
+        let mut panel = ActionPanelState::Root {
+            selected: 4,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::PlaybackSettings { .. }));
@@ -2932,7 +3322,10 @@ mod tests {
     fn theme_settings_updates_core() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
-        let mut panel = ActionPanelState::Root { selected: 12 };
+        let mut panel = ActionPanelState::Root {
+            selected: 12,
+            query: String::new(),
+        };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(
