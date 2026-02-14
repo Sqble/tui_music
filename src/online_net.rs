@@ -811,9 +811,32 @@ fn host_loop(
 
         if last_ping_sweep_at.elapsed() >= PING_INTERVAL {
             last_ping_sweep_at = Instant::now();
+            let mut timed_out_peers = Vec::new();
             pending_pings.retain(|peer_id, pending| {
-                peers.contains_key(peer_id) && pending.sent_at.elapsed() <= PING_TIMEOUT
+                if !peers.contains_key(peer_id) {
+                    return false;
+                }
+                if pending.sent_at.elapsed() > PING_TIMEOUT {
+                    timed_out_peers.push(*peer_id);
+                    return false;
+                }
+                true
             });
+            for peer_id in timed_out_peers {
+                let reason = format!("Peer timed out: {}", peer_display_name(&peers, peer_id));
+                disconnect_peer(
+                    peer_id,
+                    session,
+                    &mut InboundState {
+                        peers: &mut peers,
+                        pending_pull_requests: &mut pending_pull_requests,
+                        inbound_streams: &mut inbound_streams,
+                        pending_pings: &mut pending_pings,
+                    },
+                    &reason,
+                    &event_tx,
+                );
+            }
             for (peer_id, peer) in &peers {
                 if pending_pings.contains_key(peer_id) {
                     continue;
@@ -1092,25 +1115,78 @@ fn handle_inbound(
             });
         }
         Inbound::Disconnected { peer_id } => {
-            if let Some(peer) = peers.remove(&peer_id) {
-                session
-                    .participants
-                    .retain(|participant| participant.nickname != peer.nickname);
-                pending_pull_requests.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
-                inbound_streams.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
-                pending_pings.remove(&peer_id);
-                broadcast_state(peers, session);
-                let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
-            }
+            disconnect_peer(
+                peer_id,
+                session,
+                &mut InboundState {
+                    peers,
+                    pending_pull_requests,
+                    inbound_streams,
+                    pending_pings,
+                },
+                "Peer disconnected",
+                event_tx,
+            );
         }
         Inbound::ReadError { peer_id, error } => {
-            peers.remove(&peer_id);
-            pending_pull_requests.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
-            inbound_streams.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
-            pending_pings.remove(&peer_id);
-            let _ = event_tx.send(NetworkEvent::Status(format!("peer read error: {error}")));
+            disconnect_peer(
+                peer_id,
+                session,
+                &mut InboundState {
+                    peers,
+                    pending_pull_requests,
+                    inbound_streams,
+                    pending_pings,
+                },
+                &format!("Peer socket error: {error}"),
+                event_tx,
+            );
         }
     }
+}
+
+fn disconnect_peer(
+    peer_id: u32,
+    session: &mut OnlineSession,
+    state: &mut InboundState<'_>,
+    reason: &str,
+    event_tx: &Sender<NetworkEvent>,
+) {
+    let InboundState {
+        peers,
+        pending_pull_requests,
+        inbound_streams,
+        pending_pings,
+    } = state;
+    let nickname = peers.remove(&peer_id).map(|peer| peer.nickname);
+    pending_pull_requests.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
+    inbound_streams.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
+    pending_pings.remove(&peer_id);
+
+    let changed = if let Some(name) = nickname.as_deref() {
+        let before = session.participants.len();
+        session
+            .participants
+            .retain(|participant| !participant.nickname.eq_ignore_ascii_case(name));
+        session.participants.len() != before
+    } else {
+        false
+    };
+
+    if changed {
+        broadcast_state(peers, session);
+        let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
+    }
+
+    let suffix = nickname.unwrap_or_else(|| format!("peer-{peer_id}"));
+    let _ = event_tx.send(NetworkEvent::Status(format!("{reason}: {suffix}")));
+}
+
+fn peer_display_name(peers: &HashMap<u32, PeerConnection>, peer_id: u32) -> String {
+    peers
+        .get(&peer_id)
+        .map(|peer| peer.nickname.clone())
+        .unwrap_or_else(|| format!("peer-{peer_id}"))
 }
 
 fn apply_action_to_session(
@@ -1701,6 +1777,7 @@ fn wire_to_action(action: WireAction) -> LocalAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::TcpListener;
     use std::path::Path;
 
     #[test]
@@ -1796,5 +1873,80 @@ mod tests {
     fn smooth_ping_prefers_recent_history() {
         assert_eq!(smooth_ping(0, 38), 38);
         assert_eq!(smooth_ping(100, 20), 80);
+    }
+
+    #[test]
+    fn disconnect_peer_removes_matching_participant_case_insensitive() {
+        let mut session = OnlineSession::host("host");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("ListenerA"),
+            is_local: false,
+            is_host: false,
+            ping_ms: 25,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let client_stream = TcpStream::connect(addr).expect("connect client stream");
+        let (server_stream, _) = listener.accept().expect("accept server stream");
+
+        let mut peers = HashMap::new();
+        peers.insert(
+            9,
+            PeerConnection {
+                nickname: String::from("listenera"),
+                writer: Arc::new(Mutex::new(server_stream)),
+            },
+        );
+        drop(client_stream);
+
+        let mut pending_pull_requests = HashMap::new();
+        let mut inbound_streams = HashMap::new();
+        let mut pending_pings = HashMap::new();
+        pending_pings.insert(
+            9,
+            PendingPing {
+                nonce: 1,
+                sent_at: Instant::now(),
+            },
+        );
+        let (event_tx, event_rx) = mpsc::channel();
+
+        disconnect_peer(
+            9,
+            &mut session,
+            &mut InboundState {
+                peers: &mut peers,
+                pending_pull_requests: &mut pending_pull_requests,
+                inbound_streams: &mut inbound_streams,
+                pending_pings: &mut pending_pings,
+            },
+            "Peer disconnected",
+            &event_tx,
+        );
+
+        assert!(
+            !session
+                .participants
+                .iter()
+                .any(|participant| participant.nickname.eq_ignore_ascii_case("listenera"))
+        );
+        assert!(peers.is_empty());
+        assert!(pending_pings.is_empty());
+
+        let statuses: Vec<String> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                NetworkEvent::Status(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            statuses
+                .iter()
+                .any(|line| line.contains("Peer disconnected: listenera"))
+        );
     }
 }

@@ -1,0 +1,4 @@
+if a user disconnects its not disconnecting them from the room
+make it easy to copy the room code
+reiterate on shared queue and mode 
+manual delay message key is confusing

@@ -26,6 +26,11 @@ pub struct ActionPanelView {
     pub selected: usize,
 }
 
+pub struct HostInviteModalView {
+    pub invite_code: String,
+    pub copy_selected: bool,
+}
+
 #[derive(Clone, Copy)]
 struct ThemePalette {
     bg: Color,
@@ -174,6 +179,7 @@ pub fn draw(
     action_panel: Option<&ActionPanelView>,
     stats_snapshot: Option<&StatsSnapshot>,
     join_prompt_input: Option<&str>,
+    host_invite_modal: Option<&HostInviteModalView>,
 ) {
     let colors = palette(core.theme);
     frame.render_widget(
@@ -460,6 +466,9 @@ pub fn draw(
     if let Some(invite_input) = join_prompt_input {
         draw_join_prompt(frame, invite_input, &colors);
     }
+    if let Some(host_invite_modal) = host_invite_modal {
+        draw_host_invite_modal(frame, host_invite_modal, &colors);
+    }
 }
 
 fn draw_join_prompt(frame: &mut Frame, invite_input: &str, colors: &ThemePalette) {
@@ -494,6 +503,65 @@ fn draw_join_prompt(frame: &mut Frame, invite_input: &str, colors: &ThemePalette
         )),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+fn draw_host_invite_modal(frame: &mut Frame, modal: &HostInviteModalView, colors: &ThemePalette) {
+    let popup = centered_rect(frame.area(), 54, 36);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        panel_block("Room Ready", colors.popup_bg, colors.text, colors.border),
+        popup,
+    );
+
+    let inner = popup.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let copy_style = if modal.copy_selected {
+        Style::default()
+            .fg(colors.text)
+            .bg(colors.popup_selected_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(colors.muted)
+    };
+    let ok_style = if modal.copy_selected {
+        Style::default().fg(colors.muted)
+    } else {
+        Style::default()
+            .fg(colors.text)
+            .bg(colors.popup_selected_bg)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Share this invite code",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            modal.invite_code.as_str(),
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled("[ Copy to clipboard ]", copy_style)),
+        Line::from(""),
+        Line::from(Span::styled("[ OK ]", ok_style)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Use Up/Down or Tab. Enter activates selected button.",
+            Style::default().fg(colors.muted),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn header_section_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'static> {

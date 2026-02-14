@@ -46,6 +46,9 @@ struct OnlineRuntime {
     last_transport_seq: u64,
     join_prompt_active: bool,
     join_code_input: String,
+    host_invite_modal_active: bool,
+    host_invite_code: String,
+    host_invite_button: HostInviteModalButton,
     streamed_track_cache: HashMap<PathBuf, PathBuf>,
     pending_stream_path: Option<PathBuf>,
     remote_logical_track: Option<PathBuf>,
@@ -61,6 +64,34 @@ impl OnlineRuntime {
         self.pending_stream_path = None;
         self.remote_logical_track = None;
         self.last_remote_transport_origin = None;
+        self.host_invite_modal_active = false;
+        self.host_invite_code.clear();
+        self.host_invite_button = HostInviteModalButton::Copy;
+    }
+
+    fn host_invite_modal_view(&self) -> Option<crate::ui::HostInviteModalView> {
+        if !self.host_invite_modal_active {
+            return None;
+        }
+        Some(crate::ui::HostInviteModalView {
+            invite_code: self.host_invite_code.clone(),
+            copy_selected: matches!(self.host_invite_button, HostInviteModalButton::Copy),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HostInviteModalButton {
+    Copy,
+    Ok,
+}
+
+impl HostInviteModalButton {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Copy => Self::Ok,
+            Self::Ok => Self::Copy,
+        }
     }
 }
 
@@ -757,6 +788,9 @@ pub fn run() -> Result<()> {
         last_transport_seq: 0,
         join_prompt_active: false,
         join_code_input: String::new(),
+        host_invite_modal_active: false,
+        host_invite_code: String::new(),
+        host_invite_button: HostInviteModalButton::Copy,
         streamed_track_cache: HashMap::new(),
         pending_stream_path: None,
         remote_logical_track: None,
@@ -804,6 +838,7 @@ pub fn run() -> Result<()> {
             terminal.draw(|frame| {
                 library_rect = crate::ui::library_rect(frame.area());
                 let panel_view = action_panel.to_view(&core, &*audio, &recent_root_actions);
+                let host_invite_modal = online_runtime.host_invite_modal_view();
                 let stats_snapshot = (core.header_section == HeaderSection::Stats).then(|| {
                     stats_store.query(
                         &crate::stats::StatsQuery {
@@ -825,6 +860,7 @@ pub fn run() -> Result<()> {
                     (core.header_section == HeaderSection::Online
                         && online_runtime.join_prompt_active)
                         .then_some(online_runtime.join_code_input.as_str()),
+                    host_invite_modal.as_ref(),
                 )
             })?;
             core.dirty = false;
@@ -866,6 +902,10 @@ pub fn run() -> Result<()> {
                 &mut recent_root_actions,
                 key.code,
             );
+            continue;
+        }
+
+        if handle_host_invite_modal_input(&mut core, key, &mut online_runtime) {
             continue;
         }
 
@@ -1443,6 +1483,9 @@ fn handle_online_inline_input(
             match OnlineNetwork::start_host(&bind_addr, session, password.clone()) {
                 Ok(network) => {
                     online_runtime.network = Some(network);
+                    online_runtime.host_invite_modal_active = true;
+                    online_runtime.host_invite_code = invite_code.clone();
+                    online_runtime.host_invite_button = HostInviteModalButton::Copy;
                     core.status = format!(
                         "Hosting {bind_addr} invite {invite_code}{}",
                         if password.is_some() && !include_password {
@@ -1562,6 +1605,73 @@ fn handle_online_inline_input(
     }
 }
 
+fn handle_host_invite_modal_input(
+    core: &mut TuneCore,
+    key: KeyEvent,
+    online_runtime: &mut OnlineRuntime,
+) -> bool {
+    if !online_runtime.host_invite_modal_active {
+        return false;
+    }
+    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            online_runtime.host_invite_modal_active = false;
+            core.status = String::from("Invite dialog closed");
+            core.dirty = true;
+            true
+        }
+        KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Tab
+        | KeyCode::BackTab => {
+            online_runtime.host_invite_button = online_runtime.host_invite_button.toggle();
+            core.dirty = true;
+            true
+        }
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            match copy_invite_to_clipboard(&online_runtime.host_invite_code) {
+                Ok(()) => {
+                    core.status =
+                        format!("Copied invite code: {}", online_runtime.host_invite_code);
+                }
+                Err(err) => {
+                    core.status = format!("Clipboard copy failed: {err}");
+                }
+            }
+            core.dirty = true;
+            true
+        }
+        KeyCode::Enter => {
+            match online_runtime.host_invite_button {
+                HostInviteModalButton::Copy => {
+                    match copy_invite_to_clipboard(&online_runtime.host_invite_code) {
+                        Ok(()) => {
+                            core.status =
+                                format!("Copied invite code: {}", online_runtime.host_invite_code);
+                        }
+                        Err(err) => {
+                            core.status = format!("Clipboard copy failed: {err}");
+                        }
+                    }
+                }
+                HostInviteModalButton::Ok => {
+                    online_runtime.host_invite_modal_active = false;
+                    core.status = String::from("Invite dialog closed");
+                }
+            }
+            core.dirty = true;
+            true
+        }
+        _ => true,
+    }
+}
+
 fn append_invite_char(online_runtime: &mut OnlineRuntime, ch: char) {
     if ch.is_ascii_whitespace() {
         return;
@@ -1582,6 +1692,14 @@ fn paste_invite_from_clipboard(online_runtime: &mut OnlineRuntime) -> anyhow::Re
     let mut clipboard = Clipboard::new().context("clipboard unavailable")?;
     let value = clipboard.get_text().context("clipboard text unavailable")?;
     append_invite_input(online_runtime, &value);
+    Ok(())
+}
+
+fn copy_invite_to_clipboard(invite_code: &str) -> anyhow::Result<()> {
+    let mut clipboard = Clipboard::new().context("clipboard unavailable")?;
+    clipboard
+        .set_text(invite_code.to_string())
+        .context("clipboard write failed")?;
     Ok(())
 }
 
@@ -4514,6 +4632,67 @@ mod tests {
             None,
             Some("xterm-256color")
         ));
+    }
+
+    #[test]
+    fn host_invite_modal_tab_toggles_and_ok_closes_dialog() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut runtime = OnlineRuntime {
+            network: None,
+            local_nickname: String::from("tester"),
+            last_transport_seq: 0,
+            join_prompt_active: false,
+            join_code_input: String::new(),
+            host_invite_modal_active: true,
+            host_invite_code: String::from("T1ABCDE"),
+            host_invite_button: HostInviteModalButton::Copy,
+            streamed_track_cache: HashMap::new(),
+            pending_stream_path: None,
+            remote_logical_track: None,
+            last_remote_transport_origin: None,
+            last_periodic_sync_at: Instant::now(),
+        };
+
+        assert!(handle_host_invite_modal_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.host_invite_button, HostInviteModalButton::Ok);
+
+        assert!(handle_host_invite_modal_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(!runtime.host_invite_modal_active);
+    }
+
+    #[test]
+    fn host_invite_modal_escape_closes_dialog() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut runtime = OnlineRuntime {
+            network: None,
+            local_nickname: String::from("tester"),
+            last_transport_seq: 0,
+            join_prompt_active: false,
+            join_code_input: String::new(),
+            host_invite_modal_active: true,
+            host_invite_code: String::from("T1ABCDE"),
+            host_invite_button: HostInviteModalButton::Copy,
+            streamed_track_cache: HashMap::new(),
+            pending_stream_path: None,
+            remote_logical_track: None,
+            last_remote_transport_origin: None,
+            last_periodic_sync_at: Instant::now(),
+        };
+
+        assert!(handle_host_invite_modal_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(!runtime.host_invite_modal_active);
     }
 
     #[cfg(not(windows))]
