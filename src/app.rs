@@ -19,6 +19,7 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use std::collections::HashMap;
 use std::io::stdout;
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
@@ -45,6 +46,8 @@ struct OnlineRuntime {
     last_transport_seq: u64,
     join_prompt_active: bool,
     join_code_input: String,
+    streamed_track_cache: HashMap<PathBuf, PathBuf>,
+    pending_stream_path: Option<PathBuf>,
 }
 
 impl OnlineRuntime {
@@ -52,6 +55,7 @@ impl OnlineRuntime {
         if let Some(network) = self.network.take() {
             network.shutdown();
         }
+        self.pending_stream_path = None;
     }
 }
 
@@ -748,6 +752,8 @@ pub fn run() -> Result<()> {
         last_transport_seq: 0,
         join_prompt_active: false,
         join_code_input: String::new(),
+        streamed_track_cache: HashMap::new(),
+        pending_stream_path: None,
     };
 
     let result: Result<()> = loop {
@@ -1610,21 +1616,61 @@ fn drain_online_network_events(
     audio: &mut dyn AudioEngine,
     online_runtime: &mut OnlineRuntime,
 ) {
-    let Some(network) = online_runtime.network.as_ref() else {
-        return;
-    };
+    loop {
+        let event = {
+            let Some(network) = online_runtime.network.as_ref() else {
+                return;
+            };
+            network.try_recv_event()
+        };
+        let Some(event) = event else {
+            break;
+        };
 
-    while let Some(event) = network.try_recv_event() {
         match event {
             NetworkEvent::Status(message) => {
                 core.status = message;
                 core.dirty = true;
             }
+            NetworkEvent::StreamTrackReady {
+                requested_path,
+                local_temp_path,
+            } => {
+                online_runtime
+                    .streamed_track_cache
+                    .insert(requested_path.clone(), local_temp_path.clone());
+                if online_runtime.pending_stream_path.as_ref() == Some(&requested_path) {
+                    match audio.play(&local_temp_path) {
+                        Ok(()) => {
+                            core.status = format!(
+                                "Streaming from host: {}",
+                                requested_path
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or("track")
+                            );
+                            core.dirty = true;
+                        }
+                        Err(err) => {
+                            core.status =
+                                format!("Stream playback failed: {}", concise_audio_error(&err));
+                            core.dirty = true;
+                        }
+                    }
+                    online_runtime.pending_stream_path = None;
+                }
+            }
             NetworkEvent::SessionSync(mut session) => {
+                let role = online_runtime
+                    .network
+                    .as_ref()
+                    .map(OnlineNetwork::role)
+                    .copied()
+                    .unwrap_or(NetworkRole::Client);
                 normalize_local_online_participant(
                     &mut session,
                     &online_runtime.local_nickname,
-                    network.role(),
+                    &role,
                 );
                 if let Some(last_transport) = session.last_transport.as_ref()
                     && last_transport.seq > online_runtime.last_transport_seq
@@ -1634,7 +1680,12 @@ fn drain_online_network_events(
                         .origin_nickname
                         .eq_ignore_ascii_case(&online_runtime.local_nickname)
                     {
-                        apply_remote_transport(core, audio, &last_transport.command);
+                        apply_remote_transport(
+                            core,
+                            audio,
+                            online_runtime,
+                            &last_transport.command,
+                        );
                     }
                 }
                 core.online.session = Some(session);
@@ -1678,6 +1729,7 @@ fn normalize_local_online_participant(
 fn apply_remote_transport(
     core: &mut TuneCore,
     audio: &mut dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
     command: &TransportCommand,
 ) {
     match command {
@@ -1692,11 +1744,36 @@ fn apply_remote_transport(
             core.dirty = true;
         }
         TransportCommand::PlayTrack { path } => {
-            if let Err(err) = audio.play(path) {
-                core.status = concise_audio_error(&err);
+            if let Some(cached) = online_runtime.streamed_track_cache.get(path)
+                && cached.exists()
+            {
+                if let Err(err) = audio.play(cached) {
+                    core.status = format!(
+                        "Cached stream playback failed: {}",
+                        concise_audio_error(&err)
+                    );
+                } else {
+                    core.current_queue_index = core.queue_position_for_path(path);
+                    core.status = String::from("Remote switched track (cached stream)");
+                }
             } else {
-                core.current_queue_index = core.queue_position_for_path(path);
-                core.status = String::from("Remote switched track");
+                match audio.play(path) {
+                    Ok(()) => {
+                        core.current_queue_index = core.queue_position_for_path(path);
+                        core.status = String::from("Remote switched track");
+                    }
+                    Err(err) => {
+                        let Some(network) = online_runtime.network.as_ref() else {
+                            core.status = concise_audio_error(&err);
+                            core.dirty = true;
+                            return;
+                        };
+                        network.request_track_stream(path.to_path_buf());
+                        online_runtime.pending_stream_path = Some(path.to_path_buf());
+                        core.status =
+                            String::from("Remote track missing locally, requesting host stream...");
+                    }
+                }
             }
             core.dirty = true;
         }
