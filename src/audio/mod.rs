@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use rodio::Source;
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink};
+#[cfg(unix)]
+use std::ffi::CString;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -149,85 +151,86 @@ impl WasapiAudioEngine {
     }
 
     fn open_output_stream(output: Option<&str>) -> Result<(OutputStream, Sink)> {
-        let host = rodio::cpal::default_host();
-        let mut stream = if let Some(requested) = output {
-            let device = host
-                .output_devices()
-                .context("failed to enumerate output devices")?
-                .find(|candidate| candidate.name().ok().as_deref() == Some(requested))
-                .with_context(|| format!("audio output device not found: {requested}"))?;
-            OutputStreamBuilder::from_device(device)
-                .context("failed to open selected output device")?
-                .with_error_callback(|_| {})
-                .open_stream_or_fallback()
-                .context("failed to start selected output stream")?
-        } else {
-            match OutputStreamBuilder::from_default_device()
-                .context("failed to open default system output stream")
-                .and_then(|builder| {
-                    builder
-                        .with_error_callback(|_| {})
-                        .open_stream_or_fallback()
-                        .context("failed to start default output stream")
-                }) {
-                Ok(stream) => stream,
-                Err(default_err) => {
-                    let mut candidates: Vec<String> = host
-                        .output_devices()
-                        .ok()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|device| device.name().ok())
-                        .collect();
-                    candidates.sort_by_cached_key(|name| {
-                        let lower = name.to_ascii_lowercase();
-                        let rank = if lower.contains("pulse") {
-                            0_u8
-                        } else if lower.contains("pipewire") {
-                            1_u8
-                        } else if lower.contains("default") {
-                            2_u8
-                        } else {
-                            3_u8
-                        };
-                        (rank, lower)
-                    });
-                    candidates.dedup();
-
-                    let mut started: Option<OutputStream> = None;
-                    for candidate in candidates {
-                        let device = match host
+        let mut stream = with_silenced_stderr(|| {
+            let host = rodio::cpal::default_host();
+            if let Some(requested) = output {
+                let device = host
+                    .output_devices()
+                    .context("failed to enumerate output devices")?
+                    .find(|candidate| candidate.name().ok().as_deref() == Some(requested))
+                    .with_context(|| format!("audio output device not found: {requested}"))?;
+                OutputStreamBuilder::from_device(device)
+                    .context("failed to open selected output device")?
+                    .with_error_callback(|_| {})
+                    .open_stream_or_fallback()
+                    .context("failed to start selected output stream")
+            } else {
+                match OutputStreamBuilder::from_default_device()
+                    .context("failed to open default system output stream")
+                    .and_then(|builder| {
+                        builder
+                            .with_error_callback(|_| {})
+                            .open_stream_or_fallback()
+                            .context("failed to start default output stream")
+                    }) {
+                    Ok(stream) => Ok(stream),
+                    Err(default_err) => {
+                        let mut candidates: Vec<String> = host
                             .output_devices()
                             .ok()
                             .into_iter()
                             .flatten()
-                            .find(|entry| entry.name().ok().as_deref() == Some(candidate.as_str()))
-                        {
-                            Some(device) => device,
-                            None => continue,
-                        };
-                        let opened = OutputStreamBuilder::from_device(device)
-                            .context("failed to open fallback output device")
-                            .and_then(|builder| {
-                                builder
-                                    .with_error_callback(|_| {})
-                                    .open_stream_or_fallback()
-                                    .context("failed to start fallback output stream")
-                            });
-                        if let Ok(stream) = opened {
-                            started = Some(stream);
-                            break;
-                        }
-                    }
+                            .filter_map(|device| device.name().ok())
+                            .collect();
+                        candidates.sort_by_cached_key(|name| {
+                            let lower = name.to_ascii_lowercase();
+                            let rank = if lower.contains("pulse") {
+                                0_u8
+                            } else if lower.contains("pipewire") {
+                                1_u8
+                            } else if lower.contains("default") {
+                                2_u8
+                            } else {
+                                3_u8
+                            };
+                            (rank, lower)
+                        });
+                        candidates.dedup();
 
-                    started.with_context(|| {
-                        format!(
-                            "unable to start any audio output stream after default failed: {default_err:#}"
-                        )
-                    })?
+                        let mut started: Option<OutputStream> = None;
+                        for candidate in candidates {
+                            let device =
+                                match host.output_devices().ok().into_iter().flatten().find(
+                                    |entry| {
+                                        entry.name().ok().as_deref() == Some(candidate.as_str())
+                                    },
+                                ) {
+                                    Some(device) => device,
+                                    None => continue,
+                                };
+                            let opened = OutputStreamBuilder::from_device(device)
+                                .context("failed to open fallback output device")
+                                .and_then(|builder| {
+                                    builder
+                                        .with_error_callback(|_| {})
+                                        .open_stream_or_fallback()
+                                        .context("failed to start fallback output stream")
+                                });
+                            if let Ok(stream) = opened {
+                                started = Some(stream);
+                                break;
+                            }
+                        }
+
+                        started.with_context(|| {
+                            format!(
+                                "unable to start any audio output stream after default failed: {default_err:#}"
+                            )
+                        })
+                    }
                 }
             }
-        };
+        })?;
         stream.log_on_drop(false);
         let sink = Sink::connect_new(stream.mixer());
         Ok((stream, sink))
@@ -416,13 +419,15 @@ impl AudioEngine for WasapiAudioEngine {
     }
 
     fn available_outputs(&self) -> Vec<String> {
-        let mut outputs: Vec<String> = rodio::cpal::default_host()
-            .output_devices()
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|device| device.name().ok())
-            .collect();
+        let mut outputs: Vec<String> = with_silenced_stderr(|| {
+            rodio::cpal::default_host()
+                .output_devices()
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|device| device.name().ok())
+                .collect()
+        });
         outputs.sort_by_cached_key(|name| name.to_ascii_lowercase());
         outputs.dedup();
         outputs
@@ -480,6 +485,40 @@ impl AudioEngine for WasapiAudioEngine {
         }
         self.current.is_some() && !self.sink.is_paused() && self.sink.empty()
     }
+}
+
+#[cfg(unix)]
+fn with_silenced_stderr<T>(operation: impl FnOnce() -> T) -> T {
+    let saved = unsafe { libc::dup(libc::STDERR_FILENO) };
+    if saved < 0 {
+        return operation();
+    }
+
+    let devnull = CString::new("/dev/null")
+        .ok()
+        .and_then(|path| unsafe { Some(libc::open(path.as_ptr(), libc::O_WRONLY)) })
+        .unwrap_or(-1);
+
+    if devnull >= 0 {
+        unsafe {
+            libc::dup2(devnull, libc::STDERR_FILENO);
+            libc::close(devnull);
+        }
+    }
+
+    let result = operation();
+
+    unsafe {
+        libc::dup2(saved, libc::STDERR_FILENO);
+        libc::close(saved);
+    }
+
+    result
+}
+
+#[cfg(not(unix))]
+fn with_silenced_stderr<T>(operation: impl FnOnce() -> T) -> T {
+    operation()
 }
 
 pub struct NullAudioEngine {
