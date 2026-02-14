@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_EVENTS: usize = 20_000;
 const MIN_TRACKED_LISTEN_SECONDS: u32 = 10;
+const MINUTE_TREND_END_ADVANCE_SECONDS: i64 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatsRange {
@@ -421,8 +422,14 @@ fn build_trend_series(
         buckets[index] = buckets[index].saturating_add(bucket_value);
     }
 
-    let end_epoch_seconds =
+    let mut end_epoch_seconds =
         start.saturating_add(step_seconds.saturating_mul((bucket_len as i64) - 1));
+    if unit == TrendUnit::Minutes {
+        let lag = end.saturating_sub(end_epoch_seconds);
+        if lag >= MINUTE_TREND_END_ADVANCE_SECONDS {
+            end_epoch_seconds = end;
+        }
+    }
     TrendSeries {
         unit,
         start_epoch_seconds: start,
@@ -679,5 +686,41 @@ mod tests {
 
         assert_eq!(snapshot.recent.len(), 1);
         assert_eq!(snapshot.recent[0].listened_seconds, 22);
+    }
+
+    #[test]
+    fn minute_trend_advances_end_to_now_after_reasonable_lag() {
+        let events = vec![ListenEvent {
+            track_path: PathBuf::from("C:/music/A.mp3"),
+            title: "A".to_string(),
+            artist: None,
+            album: None,
+            started_at_epoch_seconds: 0,
+            listened_seconds: 30,
+            counted_play: true,
+        }];
+
+        let trend = build_trend_series(StatsRange::Today, StatsSort::ListenTime, 95, &events);
+
+        assert_eq!(trend.unit, TrendUnit::Minutes);
+        assert_eq!(trend.end_epoch_seconds, 95);
+    }
+
+    #[test]
+    fn minute_trend_keeps_bucket_aligned_end_for_small_lag() {
+        let events = vec![ListenEvent {
+            track_path: PathBuf::from("C:/music/A.mp3"),
+            title: "A".to_string(),
+            artist: None,
+            album: None,
+            started_at_epoch_seconds: 0,
+            listened_seconds: 30,
+            counted_play: true,
+        }];
+
+        let trend = build_trend_series(StatsRange::Today, StatsSort::ListenTime, 70, &events);
+
+        assert_eq!(trend.unit, TrendUnit::Minutes);
+        assert_eq!(trend.end_epoch_seconds, 60);
     }
 }
