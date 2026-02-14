@@ -2,6 +2,11 @@ use crate::audio::{AudioEngine, NullAudioEngine, WasapiAudioEngine};
 use crate::config;
 use crate::core::{HeaderSection, LyricsMode, StatsFilterFocus, TuneCore};
 use crate::model::{PlaybackMode, Theme};
+use crate::online::{Participant, TransportCommand, TransportEnvelope};
+use crate::online_net::{
+    LocalAction as NetworkLocalAction, NetworkEvent, NetworkRole, OnlineNetwork, build_invite_code,
+    decode_invite_code, resolve_advertise_addr,
+};
 use crate::stats::{self, ListenSessionRecord, StatsStore};
 use anyhow::Result;
 use crossterm::event::{
@@ -31,6 +36,22 @@ const VOLUME_STEP_COARSE: f32 = 0.05;
 const VOLUME_STEP_FINE: f32 = 0.01;
 const SCRUB_SECONDS_OPTIONS: [u16; 5] = [5, 10, 15, 30, 60];
 const PARTIAL_LISTEN_FLUSH_SECONDS: u32 = 10;
+const ONLINE_DEFAULT_BIND_ADDR: &str = "0.0.0.0:7878";
+
+#[derive(Default)]
+struct OnlineRuntime {
+    network: Option<OnlineNetwork>,
+    local_nickname: String,
+    last_transport_seq: u64,
+}
+
+impl OnlineRuntime {
+    fn shutdown(&mut self) {
+        if let Some(network) = self.network.take() {
+            network.shutdown();
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 struct ActiveListenSession {
@@ -719,9 +740,15 @@ pub fn run() -> Result<()> {
     let mut last_tick = Instant::now();
     let mut library_rect = ratatui::prelude::Rect::default();
     let mut stats_enabled_last = core.stats_enabled;
+    let mut online_runtime = OnlineRuntime {
+        network: None,
+        local_nickname: inferred_online_nickname(),
+        last_transport_seq: 0,
+    };
 
     let result: Result<()> = loop {
         pump_tray_events(&mut core);
+        drain_online_network_events(&mut core, &mut *audio, &mut online_runtime);
         audio.tick();
         if core.stats_enabled && listen_tracker.tick(&core, &*audio, &mut stats_store) {
             let _ = stats::save_stats(&stats_store);
@@ -817,17 +844,25 @@ pub fn run() -> Result<()> {
         if handle_lyrics_inline_input(&mut core, &*audio, key) {
             continue;
         }
+        if handle_online_inline_input(&mut core, &*audio, key, &mut online_runtime) {
+            continue;
+        }
 
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break Ok(()),
             KeyCode::Down => core.select_next(),
             KeyCode::Up => core.select_prev(),
             KeyCode::Enter => {
-                if let Some(err) = core
-                    .activate_selected()
-                    .and_then(|path| audio.play(&path).err())
-                {
-                    core.status = concise_audio_error(&err);
+                if let Some(path) = core.activate_selected() {
+                    if let Err(err) = audio.play(&path) {
+                        core.status = concise_audio_error(&err);
+                    } else {
+                        publish_transport_command(
+                            &core,
+                            &online_runtime,
+                            TransportCommand::PlayTrack { path },
+                        );
+                    }
                 }
             }
             KeyCode::Left | KeyCode::Backspace => core.navigate_back(),
@@ -835,28 +870,48 @@ pub fn run() -> Result<()> {
                 if audio.is_paused() {
                     audio.resume();
                     core.status = String::from("Resumed");
+                    publish_transport_command(
+                        &core,
+                        &online_runtime,
+                        TransportCommand::SetPaused { paused: false },
+                    );
                 } else {
                     audio.pause();
                     core.status = String::from("Paused");
+                    publish_transport_command(
+                        &core,
+                        &online_runtime,
+                        TransportCommand::SetPaused { paused: true },
+                    );
                 }
                 core.dirty = true;
             }
             KeyCode::Char('n') => {
-                if let Some(err) = core
-                    .next_track_path()
-                    .and_then(|path| audio.play(&path).err())
-                {
-                    core.status = concise_audio_error(&err);
-                    core.dirty = true;
+                if let Some(path) = core.next_track_path() {
+                    if let Err(err) = audio.play(&path) {
+                        core.status = concise_audio_error(&err);
+                        core.dirty = true;
+                    } else {
+                        publish_transport_command(
+                            &core,
+                            &online_runtime,
+                            TransportCommand::PlayTrack { path },
+                        );
+                    }
                 }
             }
             KeyCode::Char('b') => {
-                if let Some(err) = core
-                    .prev_track_path()
-                    .and_then(|path| audio.play(&path).err())
-                {
-                    core.status = concise_audio_error(&err);
-                    core.dirty = true;
+                if let Some(path) = core.prev_track_path() {
+                    if let Err(err) = audio.play(&path) {
+                        core.status = concise_audio_error(&err);
+                        core.dirty = true;
+                    } else {
+                        publish_transport_command(
+                            &core,
+                            &online_runtime,
+                            TransportCommand::PlayTrack { path },
+                        );
+                    }
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
@@ -944,6 +999,7 @@ pub fn run() -> Result<()> {
     if listen_tracker.finalize_active(&mut stats_store) {
         let _ = stats::save_stats(&stats_store);
     }
+    online_runtime.shutdown();
     let save_result = save_state_with_audio(&mut core, &*audio);
     result?;
     save_result?;
@@ -1243,6 +1299,353 @@ fn handle_lyrics_inline_input(core: &mut TuneCore, audio: &dyn AudioEngine, key:
                 }
                 _ => false,
             },
+        }
+    }
+}
+
+fn handle_online_inline_input(
+    core: &mut TuneCore,
+    audio: &dyn AudioEngine,
+    key: KeyEvent,
+    online_runtime: &mut OnlineRuntime,
+) -> bool {
+    if core.header_section != HeaderSection::Online {
+        return false;
+    }
+
+    if key.code == KeyCode::Tab || key.code == KeyCode::Char('/') {
+        return false;
+    }
+
+    match key.code {
+        KeyCode::Char('c') => {
+            online_runtime.shutdown();
+            online_runtime.last_transport_seq = 0;
+            core.online_host_room(&online_runtime.local_nickname);
+            let bind_addr = std::env::var("TUNETUI_ONLINE_BIND_ADDR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| String::from(ONLINE_DEFAULT_BIND_ADDR));
+            let advertise_addr = std::env::var("TUNETUI_ONLINE_ADVERTISE_ADDR")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| resolve_advertise_addr(&bind_addr).ok())
+                .unwrap_or_else(|| String::from("127.0.0.1:7878"));
+            let password = optional_env("TUNETUI_ONLINE_PASSWORD");
+            let include_password = env_bool("TUNETUI_ONLINE_INCLUDE_PASSWORD", true);
+            let invite_code =
+                match build_invite_code(&advertise_addr, password.as_deref(), include_password) {
+                    Ok(code) => code,
+                    Err(err) => {
+                        core.online_leave_room();
+                        core.status = format!("Invite code build failed: {err}");
+                        core.dirty = true;
+                        return true;
+                    }
+                };
+            if let Some(active) = core.online.session.as_mut() {
+                active.room_code = invite_code.clone();
+            }
+            let Some(session) = core.online.session.clone() else {
+                core.status = String::from("Online room initialization failed");
+                core.dirty = true;
+                return true;
+            };
+            match OnlineNetwork::start_host(&bind_addr, session, password.clone()) {
+                Ok(network) => {
+                    online_runtime.network = Some(network);
+                    core.status = format!(
+                        "Hosting {bind_addr} invite {invite_code}{}",
+                        if password.is_some() && !include_password {
+                            " (password required separately)"
+                        } else {
+                            ""
+                        }
+                    );
+                    core.dirty = true;
+                }
+                Err(err) => {
+                    core.online_leave_room();
+                    core.status = format!("Online host failed: {err}");
+                    core.dirty = true;
+                }
+            }
+            true
+        }
+        KeyCode::Char('j') => {
+            online_runtime.shutdown();
+            online_runtime.last_transport_seq = 0;
+            let Some(room_code_input) = optional_env("TUNETUI_ONLINE_ROOM_CODE") else {
+                core.status =
+                    String::from("Set TUNETUI_ONLINE_ROOM_CODE to the host invite code first");
+                core.dirty = true;
+                return true;
+            };
+
+            let decoded = match decode_invite_code(&room_code_input) {
+                Ok(decoded) => decoded,
+                Err(err) => {
+                    core.status = format!("Invalid invite code: {err}");
+                    core.dirty = true;
+                    return true;
+                }
+            };
+            let join_password = decoded
+                .password
+                .clone()
+                .or_else(|| optional_env("TUNETUI_ONLINE_PASSWORD"));
+            core.online_join_room(&decoded.room_code, &online_runtime.local_nickname);
+            match OnlineNetwork::start_client(
+                &decoded.server_addr,
+                &decoded.room_code,
+                &online_runtime.local_nickname,
+                join_password,
+            ) {
+                Ok(network) => {
+                    online_runtime.network = Some(network);
+                    core.status = format!("Connected to {}", decoded.server_addr);
+                    core.dirty = true;
+                }
+                Err(err) => {
+                    core.online_leave_room();
+                    core.status = format!("Online join failed: {err}");
+                    core.dirty = true;
+                }
+            }
+            true
+        }
+        KeyCode::Char('l') => {
+            online_runtime.shutdown();
+            online_runtime.last_transport_seq = 0;
+            core.online_leave_room();
+            true
+        }
+        KeyCode::Char('o') => {
+            core.online_toggle_mode();
+            if let (Some(network), Some(session)) =
+                (&online_runtime.network, core.online.session.as_ref())
+            {
+                network.send_local_action(NetworkLocalAction::SetMode(session.mode));
+            }
+            true
+        }
+        KeyCode::Char('q') => {
+            core.online_cycle_quality();
+            if let (Some(network), Some(session)) =
+                (&online_runtime.network, core.online.session.as_ref())
+            {
+                network.send_local_action(NetworkLocalAction::SetQuality(session.quality));
+            }
+            true
+        }
+        KeyCode::Char('p') => {
+            core.online_add_simulated_peer();
+            true
+        }
+        KeyCode::Char('x') => {
+            core.online_remove_simulated_peer();
+            true
+        }
+        KeyCode::Char('g') => {
+            core.online_recalibrate_ping();
+            true
+        }
+        KeyCode::Char('[') => {
+            core.online_adjust_manual_delay(-10);
+            if let (Some(network), Some(session)) =
+                (&online_runtime.network, core.online.session.as_ref())
+                && let Some(local) = session.local_participant()
+            {
+                network.send_local_action(NetworkLocalAction::DelayUpdate {
+                    manual_extra_delay_ms: local.manual_extra_delay_ms,
+                    auto_ping_delay: local.auto_ping_delay,
+                });
+            }
+            true
+        }
+        KeyCode::Char(']') => {
+            core.online_adjust_manual_delay(10);
+            if let (Some(network), Some(session)) =
+                (&online_runtime.network, core.online.session.as_ref())
+                && let Some(local) = session.local_participant()
+            {
+                network.send_local_action(NetworkLocalAction::DelayUpdate {
+                    manual_extra_delay_ms: local.manual_extra_delay_ms,
+                    auto_ping_delay: local.auto_ping_delay,
+                });
+            }
+            true
+        }
+        KeyCode::Char('a') => {
+            core.online_toggle_auto_delay();
+            if let (Some(network), Some(session)) =
+                (&online_runtime.network, core.online.session.as_ref())
+                && let Some(local) = session.local_participant()
+            {
+                network.send_local_action(NetworkLocalAction::DelayUpdate {
+                    manual_extra_delay_ms: local.manual_extra_delay_ms,
+                    auto_ping_delay: local.auto_ping_delay,
+                });
+            }
+            true
+        }
+        KeyCode::Char('s') => {
+            let queued_path = audio
+                .current_track()
+                .map(Path::to_path_buf)
+                .or_else(|| core.current_path().map(Path::to_path_buf));
+            core.online_queue_current_track(queued_path.as_deref());
+            if let (Some(network), Some(session)) =
+                (&online_runtime.network, core.online.session.as_ref())
+                && let Some(last) = session.shared_queue.last()
+            {
+                network.send_local_action(NetworkLocalAction::QueueAdd(last.clone()));
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn inferred_online_nickname() -> String {
+    std::env::var("TUNETUI_ONLINE_NICKNAME")
+        .ok()
+        .or_else(|| std::env::var("USERNAME").ok())
+        .or_else(|| std::env::var("USER").ok())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| String::from("you"))
+}
+
+fn optional_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_bool(key: &str, default: bool) -> bool {
+    let Some(value) = optional_env(key) else {
+        return default;
+    };
+    match value.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => default,
+    }
+}
+
+fn publish_transport_command(
+    core: &TuneCore,
+    online_runtime: &OnlineRuntime,
+    command: TransportCommand,
+) {
+    let Some(network) = online_runtime.network.as_ref() else {
+        return;
+    };
+    if core.online.session.is_none() {
+        return;
+    }
+    network.send_local_action(NetworkLocalAction::Transport(TransportEnvelope {
+        seq: 0,
+        origin_nickname: online_runtime.local_nickname.clone(),
+        command,
+    }));
+}
+
+fn drain_online_network_events(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
+) {
+    let Some(network) = online_runtime.network.as_ref() else {
+        return;
+    };
+
+    while let Some(event) = network.try_recv_event() {
+        match event {
+            NetworkEvent::Status(message) => {
+                core.status = message;
+                core.dirty = true;
+            }
+            NetworkEvent::SessionSync(mut session) => {
+                normalize_local_online_participant(
+                    &mut session,
+                    &online_runtime.local_nickname,
+                    network.role(),
+                );
+                if let Some(last_transport) = session.last_transport.as_ref()
+                    && last_transport.seq > online_runtime.last_transport_seq
+                {
+                    online_runtime.last_transport_seq = last_transport.seq;
+                    if !last_transport
+                        .origin_nickname
+                        .eq_ignore_ascii_case(&online_runtime.local_nickname)
+                    {
+                        apply_remote_transport(core, audio, &last_transport.command);
+                    }
+                }
+                core.online.session = Some(session);
+                core.dirty = true;
+            }
+        }
+    }
+}
+
+fn normalize_local_online_participant(
+    session: &mut crate::online::OnlineSession,
+    local_nickname: &str,
+    role: &NetworkRole,
+) {
+    for participant in &mut session.participants {
+        participant.is_local = false;
+    }
+
+    if let Some(participant) = session
+        .participants
+        .iter_mut()
+        .find(|participant| participant.nickname.eq_ignore_ascii_case(local_nickname))
+    {
+        participant.is_local = true;
+        if matches!(role, NetworkRole::Host) {
+            participant.is_host = true;
+        }
+        return;
+    }
+
+    session.participants.push(Participant {
+        nickname: local_nickname.to_string(),
+        is_local: true,
+        is_host: matches!(role, NetworkRole::Host),
+        ping_ms: 30,
+        manual_extra_delay_ms: 0,
+        auto_ping_delay: true,
+    });
+}
+
+fn apply_remote_transport(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    command: &TransportCommand,
+) {
+    match command {
+        TransportCommand::SetPaused { paused } => {
+            if *paused {
+                audio.pause();
+                core.status = String::from("Remote paused playback");
+            } else {
+                audio.resume();
+                core.status = String::from("Remote resumed playback");
+            }
+            core.dirty = true;
+        }
+        TransportCommand::PlayTrack { path } => {
+            if let Err(err) = audio.play(path) {
+                core.status = concise_audio_error(&err);
+            } else {
+                core.current_queue_index = core.queue_position_for_path(path);
+                core.status = String::from("Remote switched track");
+            }
+            core.dirty = true;
         }
     }
 }

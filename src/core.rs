@@ -2,6 +2,7 @@ use crate::config;
 use crate::library;
 use crate::lyrics::{self, LyricLine, LyricsDocument, LyricsSource};
 use crate::model::{PersistedState, PlaybackMode, Playlist, Theme, Track};
+use crate::online::OnlineState;
 use crate::stats::{StatsRange, StatsSort};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -121,6 +122,7 @@ pub struct TuneCore {
     pub lyrics_selected_line: usize,
     pub lyrics_missing_prompt: bool,
     pub lyrics_creation_declined: bool,
+    pub online: OnlineState,
     duration_lookup: RefCell<HashMap<String, Option<u32>>>,
     shuffle_order: Vec<usize>,
     shuffle_cursor: usize,
@@ -167,6 +169,7 @@ impl TuneCore {
             lyrics_selected_line: 0,
             lyrics_missing_prompt: false,
             lyrics_creation_declined: false,
+            online: OnlineState::default(),
             duration_lookup: RefCell::new(HashMap::new()),
             shuffle_order: Vec::new(),
             shuffle_cursor: 0,
@@ -581,6 +584,147 @@ impl TuneCore {
         self.stats_album_filter.clear();
         self.stats_search.clear();
         self.set_status("Stats filters cleared");
+    }
+
+    pub fn online_host_room(&mut self, nickname: &str) {
+        self.online.host_room(nickname);
+        if let Some(session) = self.online.session.as_ref() {
+            self.set_status(&format!("Hosting room {}", session.room_code));
+        }
+    }
+
+    pub fn online_join_room(&mut self, room_code: &str, nickname: &str) {
+        self.online.join_room(room_code, nickname);
+        if let Some(session) = self.online.session.as_ref() {
+            self.set_status(&format!("Joined room {}", session.room_code));
+        }
+    }
+
+    pub fn online_leave_room(&mut self) {
+        if self.online.session.is_some() {
+            self.online.leave_room();
+            self.set_status("Left online room");
+        } else {
+            self.set_status("Not connected to an online room");
+        }
+    }
+
+    pub fn online_toggle_mode(&mut self) {
+        if let Some(session) = self.online.session.as_mut() {
+            session.toggle_mode();
+            let label = session.mode.label();
+            self.set_status(&format!("Room mode: {label}"));
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_cycle_quality(&mut self) {
+        if let Some(session) = self.online.session.as_mut() {
+            session.cycle_quality();
+            let label = session.quality.label();
+            self.set_status(&format!("Stream quality: {label}"));
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_toggle_auto_delay(&mut self) {
+        if let Some(session) = self.online.session.as_mut() {
+            session.toggle_local_auto_delay();
+            let status = session
+                .local_participant()
+                .is_some_and(|local| local.auto_ping_delay);
+            self.set_status(if status {
+                "Delay mode: auto ping + manual"
+            } else {
+                "Delay mode: manual only"
+            });
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_adjust_manual_delay(&mut self, delta_ms: i16) {
+        if let Some(session) = self.online.session.as_mut() {
+            session.adjust_local_manual_delay(delta_ms);
+            let message = session.local_participant().map(|local| {
+                format!(
+                    "Manual delay {}ms (effective {}ms)",
+                    local.manual_extra_delay_ms,
+                    local.effective_delay_ms()
+                )
+            });
+            if let Some(message) = message {
+                self.set_status(&message);
+            }
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_recalibrate_ping(&mut self) {
+        if let Some(session) = self.online.session.as_mut() {
+            session.recalibrate_local_ping();
+            let drift = session.last_sync_drift_ms;
+            let message = session
+                .local_participant()
+                .map(|local| format!("Ping {}ms, sync drift {}ms", local.ping_ms, drift));
+            if let Some(message) = message {
+                self.set_status(&message);
+            }
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_add_simulated_peer(&mut self) {
+        if let Some(session) = self.online.session.as_mut() {
+            let nickname = session.add_simulated_listener();
+            self.set_status(&format!("{nickname} joined room"));
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_remove_simulated_peer(&mut self) {
+        if let Some(session) = self.online.session.as_mut() {
+            if let Some(nickname) = session.remove_latest_listener() {
+                self.set_status(&format!("{nickname} left room"));
+            } else {
+                self.set_status("No remote peers to remove");
+            }
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_queue_current_track(&mut self, path: Option<&Path>) {
+        let Some(path) = path else {
+            self.set_status("No active track to add to shared queue");
+            return;
+        };
+
+        let title = self
+            .title_for_path(path)
+            .or_else(|| {
+                path.file_stem()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| String::from("unknown"));
+
+        let Some(session) = self.online.session.as_mut() else {
+            self.set_status("Join or host a room first");
+            return;
+        };
+
+        if !session.can_local_control_playback() {
+            self.set_status("Room is host-only. Listener cannot edit queue");
+            return;
+        }
+
+        session.push_shared_track(path, title.clone());
+        self.set_status(&format!("Shared queue + {title}"));
     }
 
     pub fn sync_lyrics_for_track(&mut self, track: Option<&Path>) {

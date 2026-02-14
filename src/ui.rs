@@ -5,6 +5,7 @@ use crate::core::LyricsMode;
 use crate::core::StatsFilterFocus;
 use crate::core::TuneCore;
 use crate::model::Theme;
+use crate::online::OnlineSession;
 use crate::stats::{ListenEvent, StatsRange, StatsSnapshot, StatsSort, TrendSeries};
 use ratatui::prelude::*;
 use ratatui::widgets::{
@@ -398,13 +399,7 @@ pub fn draw(
                 draw_lyrics_section(frame, &body, colors, core, audio);
             }
             HeaderSection::Online => {
-                draw_placeholder_section(
-                    frame,
-                    &body,
-                    colors,
-                    "Online",
-                    "Online features are coming soon. Press Tab for Stats.",
-                );
+                draw_online_section(frame, &body, colors, core);
             }
         }
     }
@@ -427,6 +422,8 @@ pub fn draw(
         "Keys: Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top, Tab tabs"
     } else if core.header_section == HeaderSection::Lyrics {
         "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
+    } else if core.header_section == HeaderSection::Online {
+        "Keys: c host, j join, l leave, o mode, q quality, p/x peers, [/ ] delay, g ping, s queue"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -518,6 +515,165 @@ fn draw_placeholder_section(
         )),
         body[1],
     );
+}
+
+fn draw_online_section(frame: &mut Frame, body: &[Rect], colors: ThemePalette, core: &TuneCore) {
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(Rect {
+            x: body[0].x,
+            y: body[0].y,
+            width: body[0].width.saturating_add(body[1].width),
+            height: body[0].height.max(body[1].height),
+        });
+
+    let Some(session) = core.online.session.as_ref() else {
+        draw_placeholder_section(
+            frame,
+            body,
+            colors,
+            "Online",
+            "No room connected. Press c to host or j to join.",
+        );
+        return;
+    };
+
+    let mut left_lines = vec![Line::from(vec![
+        Span::styled("Room ", Style::default().fg(colors.muted)),
+        Span::styled(
+            session.room_code.as_str(),
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  |  Mode ", Style::default().fg(colors.muted)),
+        Span::styled(session.mode.label(), Style::default().fg(colors.text)),
+        Span::styled("  |  Stream ", Style::default().fg(colors.muted)),
+        Span::styled(session.quality.label(), Style::default().fg(colors.alert)),
+    ])];
+
+    left_lines.push(Line::from(Span::styled(
+        format!(
+            "Peers {}  Shared queue {}  Drift {}ms",
+            session.participants.len(),
+            session.shared_queue.len(),
+            session.last_sync_drift_ms
+        ),
+        Style::default().fg(colors.muted),
+    )));
+
+    if let Some(local) = session.local_participant() {
+        left_lines.push(Line::from(Span::styled(
+            format!(
+                "You {}  ping {}ms  manual {}ms  effective {}ms  auto {}",
+                local.nickname,
+                local.ping_ms,
+                local.manual_extra_delay_ms,
+                local.effective_delay_ms(),
+                if local.auto_ping_delay { "on" } else { "off" }
+            ),
+            Style::default().fg(colors.text),
+        )));
+    }
+
+    left_lines.push(Line::from(""));
+    left_lines.push(Line::from(Span::styled(
+        "Participants",
+        Style::default()
+            .fg(colors.text)
+            .add_modifier(Modifier::BOLD),
+    )));
+    for participant in &session.participants {
+        left_lines.push(Line::from(Span::styled(
+            participant_line(participant, session),
+            Style::default().fg(colors.text),
+        )));
+    }
+
+    let left = Paragraph::new(left_lines)
+        .block(panel_block(
+            "Online Session",
+            colors.panel_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(left, horizontal[0]);
+
+    let mut right_lines = vec![Line::from(Span::styled(
+        "Shared Queue",
+        Style::default()
+            .fg(colors.text)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    for (index, item) in session.shared_queue.iter().rev().take(10).enumerate() {
+        right_lines.push(Line::from(Span::styled(
+            format!(
+                "{:>2}. {} [{}]",
+                index + 1,
+                truncate_for_line(&item.title, 28),
+                item.delivery.label()
+            ),
+            Style::default().fg(colors.muted),
+        )));
+    }
+    if session.shared_queue.is_empty() {
+        right_lines.push(Line::from(Span::styled(
+            "Queue empty. Press s to add current track.",
+            Style::default().fg(colors.muted),
+        )));
+    }
+    right_lines.push(Line::from(""));
+    right_lines.push(Line::from(Span::styled(
+        "Networking",
+        Style::default()
+            .fg(colors.text)
+            .add_modifier(Modifier::BOLD),
+    )));
+    right_lines.push(Line::from(Span::styled(
+        "Direct TCP peer session active (host/client with room code handshake).",
+        Style::default().fg(colors.muted),
+    )));
+    right_lines.push(Line::from(Span::styled(
+        "Discovery/signaling can be layered later without replacing room state model.",
+        Style::default().fg(colors.muted),
+    )));
+
+    let right = Paragraph::new(right_lines)
+        .block(panel_block(
+            "Room Data",
+            colors.panel_alt_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(right, horizontal[1]);
+}
+
+fn participant_line(participant: &crate::online::Participant, session: &OnlineSession) -> String {
+    let mut parts = Vec::with_capacity(5);
+    if participant.is_local {
+        parts.push(String::from("you"));
+    }
+    if participant.is_host {
+        parts.push(String::from("host"));
+    }
+    if session.mode == crate::online::OnlineRoomMode::HostOnly && !participant.is_host {
+        parts.push(String::from("listen-only"));
+    }
+    let tags = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    };
+    format!(
+        "- {}{}  ping {}ms  delay {}ms",
+        participant.nickname,
+        tags,
+        participant.ping_ms,
+        participant.effective_delay_ms()
+    )
 }
 
 fn draw_lyrics_section(

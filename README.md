@@ -15,7 +15,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\state.json` on Windows)
 - Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with listen events and aggregates
 - Keyboard-driven TUI with actions panel search, recent actions (session-local, last 3), and overflow scrollbar
-- Right-aligned status tabs with `E` cycling (Library, Lyrics, Stats, Online)
+- Right-aligned status tabs with `Tab` cycling (Library, Lyrics, Stats, Online)
 - Stats tab with totals, ASCII charts, top songs, and recent listen log
 - Lyrics tab with live line sync from `.lrc` sidecars or embedded lyric metadata
 - Lyrics sidecars are stored in the config dir lyrics folder (`$XDG_CONFIG_HOME/tunetui/lyrics/` on Linux, `%USERPROFILE%\.config\tunetui\lyrics\` on Windows)
@@ -29,6 +29,8 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
 - Add directory from actions panel via typed path or external folder picker (PowerShell on Windows, zenity/kdialog on Linux)
 - Remove directory from actions panel
+- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates, and play/pause/track transport sync with per-user delay calibration controls
+- Invite code is reversible and carries host IPv4 + port (obfuscated, not cryptographically secure); optional room password can be embedded into the same code for one-step join
 - Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
 
 ## Run
@@ -65,7 +67,21 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - `Up/Down` (Lyrics tab): move selected lyric line
 - `Enter` (Lyrics edit mode): insert line after selection
 - `Ctrl+t` (Lyrics edit mode): stamp selected line with current playback time
+- `c` / `j` / `l` (Online tab): host room / join demo room / leave room
+- `o` / `q` (Online tab): toggle room mode / cycle stream quality profile
+- `p` / `x` (Online tab): add/remove simulated listeners (local demo without network peers)
+- `[` / `]` / `a` / `g` (Online tab): decrease/increase manual delay, toggle auto-ping delay, recalibrate ping
+- `s` (Online tab): add current track to shared queue
 - `Ctrl+C`: quit
+
+### Online Networking Defaults
+
+- Host bind: `TUNETUI_ONLINE_BIND_ADDR` (default `0.0.0.0:7878`)
+- Host advertise address for invite generation: `TUNETUI_ONLINE_ADVERTISE_ADDR` (optional override; auto-detected from bind when omitted)
+- Room code for join: `TUNETUI_ONLINE_ROOM_CODE` (required; use host invite code)
+- Password for host/join: `TUNETUI_ONLINE_PASSWORD` (optional)
+- Include password in invite code: `TUNETUI_ONLINE_INCLUDE_PASSWORD` (`true`/`false`, default `true`)
+- Nickname: `TUNETUI_ONLINE_NICKNAME` (fallback `USERNAME`/`USER`/`you`)
 
 ## Fuzzing
 

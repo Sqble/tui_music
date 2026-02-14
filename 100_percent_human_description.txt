@@ -10,9 +10,4 @@ lyrics tab for line by line lyrics as the song plays, aswell as support for live
 
 Online tab for listening to songs with your friends where you establish a p2p connection and can add to a shared queue and control playback together or have one user control and just playing their music while another listens along. 
 
-todo:
-
-live graph updates
-song listening data is lost if program is executed - we need to save it periodically as you listen,
-that way the live graph updates is fixed too
 
