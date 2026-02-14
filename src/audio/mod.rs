@@ -496,7 +496,7 @@ fn with_silenced_stderr<T>(operation: impl FnOnce() -> T) -> T {
 
     let devnull = CString::new("/dev/null")
         .ok()
-        .and_then(|path| unsafe { Some(libc::open(path.as_ptr(), libc::O_WRONLY)) })
+        .map(|path| unsafe { libc::open(path.as_ptr(), libc::O_WRONLY) })
         .unwrap_or(-1);
 
     if devnull >= 0 {
