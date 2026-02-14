@@ -29,7 +29,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
 - Add directory from actions panel via typed path or external folder picker (PowerShell on Windows, zenity/kdialog on Linux)
 - Remove directory from actions panel
-- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates, play/pause/track transport sync, and lossless host file streaming fallback when listener lacks the local file
+- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates, sub-second periodic playback-state sync (track/position/pause), and lossless host file streaming fallback when listener lacks the local file
 - Invite code is reversible and carries host IPv4 + port (obfuscated, not cryptographically secure); optional room password can be embedded into the same code for one-step join
 - Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
 

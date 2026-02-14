@@ -93,8 +93,17 @@ impl Participant {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransportCommand {
-    SetPaused { paused: bool },
-    PlayTrack { path: PathBuf },
+    SetPaused {
+        paused: bool,
+    },
+    PlayTrack {
+        path: PathBuf,
+    },
+    SetPlaybackState {
+        path: PathBuf,
+        position_ms: u64,
+        paused: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

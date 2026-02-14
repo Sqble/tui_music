@@ -39,7 +39,6 @@ const SCRUB_SECONDS_OPTIONS: [u16; 5] = [5, 10, 15, 30, 60];
 const PARTIAL_LISTEN_FLUSH_SECONDS: u32 = 10;
 const ONLINE_DEFAULT_BIND_ADDR: &str = "0.0.0.0:7878";
 
-#[derive(Default)]
 struct OnlineRuntime {
     network: Option<OnlineNetwork>,
     local_nickname: String,
@@ -48,6 +47,8 @@ struct OnlineRuntime {
     join_code_input: String,
     streamed_track_cache: HashMap<PathBuf, PathBuf>,
     pending_stream_path: Option<PathBuf>,
+    remote_logical_track: Option<PathBuf>,
+    last_periodic_sync_at: Instant,
 }
 
 impl OnlineRuntime {
@@ -56,6 +57,7 @@ impl OnlineRuntime {
             network.shutdown();
         }
         self.pending_stream_path = None;
+        self.remote_logical_track = None;
     }
 }
 
@@ -754,12 +756,15 @@ pub fn run() -> Result<()> {
         join_code_input: String::new(),
         streamed_track_cache: HashMap::new(),
         pending_stream_path: None,
+        remote_logical_track: None,
+        last_periodic_sync_at: Instant::now(),
     };
 
     let result: Result<()> = loop {
         pump_tray_events(&mut core);
         drain_online_network_events(&mut core, &mut *audio, &mut online_runtime);
         audio.tick();
+        maybe_publish_online_playback_sync(&core, &*audio, &mut online_runtime);
         if core.stats_enabled && listen_tracker.tick(&core, &*audio, &mut stats_store) {
             let _ = stats::save_stats(&stats_store);
         }
@@ -867,11 +872,7 @@ pub fn run() -> Result<()> {
                     if let Err(err) = audio.play(&path) {
                         core.status = concise_audio_error(&err);
                     } else {
-                        publish_transport_command(
-                            &core,
-                            &online_runtime,
-                            TransportCommand::PlayTrack { path },
-                        );
+                        publish_current_playback_state(&core, &*audio, &online_runtime);
                     }
                 }
             }
@@ -880,20 +881,11 @@ pub fn run() -> Result<()> {
                 if audio.is_paused() {
                     audio.resume();
                     core.status = String::from("Resumed");
-                    publish_transport_command(
-                        &core,
-                        &online_runtime,
-                        TransportCommand::SetPaused { paused: false },
-                    );
                 } else {
                     audio.pause();
                     core.status = String::from("Paused");
-                    publish_transport_command(
-                        &core,
-                        &online_runtime,
-                        TransportCommand::SetPaused { paused: true },
-                    );
                 }
+                publish_current_playback_state(&core, &*audio, &online_runtime);
                 core.dirty = true;
             }
             KeyCode::Char('n') => {
@@ -902,11 +894,7 @@ pub fn run() -> Result<()> {
                         core.status = concise_audio_error(&err);
                         core.dirty = true;
                     } else {
-                        publish_transport_command(
-                            &core,
-                            &online_runtime,
-                            TransportCommand::PlayTrack { path },
-                        );
+                        publish_current_playback_state(&core, &*audio, &online_runtime);
                     }
                 }
             }
@@ -916,11 +904,7 @@ pub fn run() -> Result<()> {
                         core.status = concise_audio_error(&err);
                         core.dirty = true;
                     } else {
-                        publish_transport_command(
-                            &core,
-                            &online_runtime,
-                            TransportCommand::PlayTrack { path },
-                        );
+                        publish_current_playback_state(&core, &*audio, &online_runtime);
                     }
                 }
             }
@@ -929,6 +913,7 @@ pub fn run() -> Result<()> {
                     core.status = format!("Scrub failed: {err}");
                 } else {
                     core.status = format!("Scrubbed back {}", scrub_label(core.scrub_seconds));
+                    publish_current_playback_state(&core, &*audio, &online_runtime);
                 }
                 core.dirty = true;
             }
@@ -937,6 +922,7 @@ pub fn run() -> Result<()> {
                     core.status = format!("Scrub failed: {err}");
                 } else {
                     core.status = format!("Scrubbed forward {}", scrub_label(core.scrub_seconds));
+                    publish_current_playback_state(&core, &*audio, &online_runtime);
                 }
                 core.dirty = true;
             }
@@ -1611,6 +1597,52 @@ fn publish_transport_command(
     }));
 }
 
+fn publish_current_playback_state(
+    core: &TuneCore,
+    audio: &dyn AudioEngine,
+    online_runtime: &OnlineRuntime,
+) {
+    let Some(path) = audio
+        .current_track()
+        .map(Path::to_path_buf)
+        .or_else(|| core.current_path().map(Path::to_path_buf))
+    else {
+        return;
+    };
+    let position_ms = audio
+        .position()
+        .map(|position| position.as_millis() as u64)
+        .unwrap_or(0);
+    publish_transport_command(
+        core,
+        online_runtime,
+        TransportCommand::SetPlaybackState {
+            path,
+            position_ms,
+            paused: audio.is_paused(),
+        },
+    );
+}
+
+fn maybe_publish_online_playback_sync(
+    core: &TuneCore,
+    audio: &dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
+) {
+    let Some(network) = online_runtime.network.as_ref() else {
+        return;
+    };
+    if !matches!(network.role(), NetworkRole::Host) {
+        return;
+    }
+    if online_runtime.last_periodic_sync_at.elapsed() < Duration::from_millis(950) {
+        return;
+    }
+
+    online_runtime.last_periodic_sync_at = Instant::now();
+    publish_current_playback_state(core, audio, online_runtime);
+}
+
 fn drain_online_network_events(
     core: &mut TuneCore,
     audio: &mut dyn AudioEngine,
@@ -1642,6 +1674,7 @@ fn drain_online_network_events(
                 if online_runtime.pending_stream_path.as_ref() == Some(&requested_path) {
                     match audio.play(&local_temp_path) {
                         Ok(()) => {
+                            online_runtime.remote_logical_track = Some(requested_path.clone());
                             core.status = format!(
                                 "Streaming from host: {}",
                                 requested_path
@@ -1744,38 +1777,85 @@ fn apply_remote_transport(
             core.dirty = true;
         }
         TransportCommand::PlayTrack { path } => {
-            if let Some(cached) = online_runtime.streamed_track_cache.get(path)
-                && cached.exists()
-            {
-                if let Err(err) = audio.play(cached) {
-                    core.status = format!(
-                        "Cached stream playback failed: {}",
-                        concise_audio_error(&err)
-                    );
-                } else {
-                    core.current_queue_index = core.queue_position_for_path(path);
-                    core.status = String::from("Remote switched track (cached stream)");
-                }
-            } else {
-                match audio.play(path) {
-                    Ok(()) => {
-                        core.current_queue_index = core.queue_position_for_path(path);
-                        core.status = String::from("Remote switched track");
-                    }
-                    Err(err) => {
-                        let Some(network) = online_runtime.network.as_ref() else {
-                            core.status = concise_audio_error(&err);
-                            core.dirty = true;
-                            return;
-                        };
-                        network.request_track_stream(path.to_path_buf());
-                        online_runtime.pending_stream_path = Some(path.to_path_buf());
-                        core.status =
-                            String::from("Remote track missing locally, requesting host stream...");
-                    }
-                }
+            if ensure_remote_track(core, audio, online_runtime, path) {
+                core.current_queue_index = core.queue_position_for_path(path);
+                core.status = String::from("Remote switched track");
             }
             core.dirty = true;
+        }
+        TransportCommand::SetPlaybackState {
+            path,
+            position_ms,
+            paused,
+        } => {
+            if !ensure_remote_track(core, audio, online_runtime, path) {
+                core.dirty = true;
+                return;
+            }
+
+            let local_ms = audio
+                .position()
+                .map(|position| position.as_millis() as i64)
+                .unwrap_or(0);
+            let target_ms = *position_ms as i64;
+            let drift_ms = (target_ms - local_ms).abs();
+            let seek_threshold = if *paused { 80_i64 } else { 220_i64 };
+            if drift_ms >= seek_threshold {
+                let _ = audio.seek_to(Duration::from_millis(*position_ms));
+            }
+
+            if *paused {
+                audio.pause();
+            } else {
+                audio.resume();
+            }
+
+            online_runtime.remote_logical_track = Some(path.clone());
+            core.current_queue_index = core.queue_position_for_path(path);
+            core.status = format!("Remote sync drift {}ms", drift_ms);
+            core.dirty = true;
+        }
+    }
+}
+
+fn ensure_remote_track(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
+    path: &Path,
+) -> bool {
+    if online_runtime.remote_logical_track.as_ref() == Some(&path.to_path_buf())
+        && audio.current_track().is_some()
+    {
+        return true;
+    }
+
+    if let Some(cached) = online_runtime.streamed_track_cache.get(path)
+        && cached.exists()
+        && audio.play(cached).is_ok()
+    {
+        online_runtime.remote_logical_track = Some(path.to_path_buf());
+        return true;
+    }
+
+    match audio.play(path) {
+        Ok(()) => {
+            online_runtime.remote_logical_track = Some(path.to_path_buf());
+            true
+        }
+        Err(err) => {
+            if online_runtime.pending_stream_path.as_ref() != Some(&path.to_path_buf()) {
+                if let Some(network) = online_runtime.network.as_ref() {
+                    network.request_track_stream(path.to_path_buf());
+                    online_runtime.pending_stream_path = Some(path.to_path_buf());
+                    online_runtime.remote_logical_track = Some(path.to_path_buf());
+                    core.status =
+                        String::from("Remote track missing locally, requesting host stream...");
+                } else {
+                    core.status = concise_audio_error(&err);
+                }
+            }
+            false
         }
     }
 }
