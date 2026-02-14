@@ -710,6 +710,10 @@ fn focus_existing_instance() {
         FindWindowW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
     };
 
+    if request_tray_restore() {
+        return;
+    }
+
     let class_name = to_wide("ConsoleWindowClass");
     let title = to_wide(APP_CONSOLE_TITLE);
     let hwnd = unsafe { FindWindowW(class_name.as_ptr(), title.as_ptr()) };
@@ -720,6 +724,19 @@ fn focus_existing_instance() {
             SetForegroundWindow(hwnd);
         }
     }
+}
+
+#[cfg(windows)]
+fn request_tray_restore() -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW};
+
+    let class_name = to_wide("TuneTuiTrayWindow");
+    let hwnd = unsafe { FindWindowW(class_name.as_ptr(), std::ptr::null()) };
+    if hwnd.is_null() {
+        return false;
+    }
+
+    unsafe { PostMessageW(hwnd, TRAY_RESTORE_MSG, 0, 0) != 0 }
 }
 
 fn maybe_auto_advance_track(core: &mut TuneCore, audio: &mut dyn AudioEngine) {
@@ -1741,6 +1758,8 @@ fn choose_folder_externally() -> Result<Option<PathBuf>> {
 #[cfg(windows)]
 const TRAY_CALLBACK_MSG: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
 #[cfg(windows)]
+const TRAY_RESTORE_MSG: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 2;
+#[cfg(windows)]
 const TRAY_ICON_ID: u32 = 1;
 
 #[cfg(windows)]
@@ -1789,18 +1808,8 @@ fn cleanup_tray() {}
 
 #[cfg(windows)]
 fn restore_from_tray() {
-    use windows_sys::Win32::System::Console::GetConsoleWindow;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
-    };
-
-    unsafe {
-        let hwnd = GetConsoleWindow();
-        if !hwnd.is_null() {
-            ShowWindow(hwnd, SW_SHOW);
-            ShowWindow(hwnd, SW_RESTORE);
-            SetForegroundWindow(hwnd);
-        }
+    if let Some(mut controller) = tray_controller() {
+        controller.restore();
     }
 }
 
@@ -1813,6 +1822,7 @@ fn tray_controller() -> Option<std::sync::MutexGuard<'static, TrayController>> {
 #[cfg(windows)]
 struct TrayController {
     window: isize,
+    hidden_window: isize,
     icon_visible: bool,
 }
 
@@ -1821,13 +1831,13 @@ impl TrayController {
     fn new() -> Self {
         Self {
             window: 0,
+            hidden_window: 0,
             icon_visible: false,
         }
     }
 
     fn minimize(&mut self) {
         use windows_sys::Win32::System::Console::GetConsoleWindow;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
 
         unsafe {
             if self.ensure_window().is_none() {
@@ -1836,11 +1846,40 @@ impl TrayController {
             if !self.icon_visible && !self.show_icon() {
                 return;
             }
-            let hwnd = GetConsoleWindow();
-            if !hwnd.is_null() {
-                ShowWindow(hwnd, SW_HIDE);
+            let mut hidden = std::ptr::null_mut();
+            let primary = tray_host_window();
+            if hide_window(primary) {
+                hidden = primary;
+            } else {
+                let console = GetConsoleWindow();
+                if hide_window(console) {
+                    hidden = console;
+                }
+            }
+
+            if !hidden.is_null() {
+                self.hidden_window = hidden as isize;
             }
         }
+    }
+
+    fn restore(&mut self) {
+        use windows_sys::Win32::System::Console::GetConsoleWindow;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{SW_RESTORE, SetForegroundWindow};
+
+        unsafe {
+            let hwnd = if self.hidden_window != 0 {
+                self.hidden_window as _
+            } else {
+                GetConsoleWindow()
+            };
+            if !hwnd.is_null() {
+                show_window(hwnd);
+                windows_sys::Win32::UI::WindowsAndMessaging::ShowWindow(hwnd, SW_RESTORE);
+                SetForegroundWindow(hwnd);
+            }
+        }
+        self.hidden_window = 0;
     }
 
     fn pump(&mut self) {
@@ -1956,6 +1995,91 @@ impl TrayController {
 }
 
 #[cfg(windows)]
+fn tray_host_window() -> windows_sys::Win32::Foundation::HWND {
+    use windows_sys::Win32::System::Console::GetConsoleWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GA_ROOT, GetAncestor, GetForegroundWindow, IsWindowVisible,
+    };
+
+    unsafe {
+        let console = GetConsoleWindow();
+        if !console.is_null() {
+            let console_root = GetAncestor(console, GA_ROOT);
+            if !console_root.is_null() && IsWindowVisible(console_root) != 0 {
+                return console_root;
+            }
+            if IsWindowVisible(console) != 0 {
+                return console;
+            }
+        }
+
+        let foreground = GetForegroundWindow();
+        if !foreground.is_null() {
+            let root = GetAncestor(foreground, GA_ROOT);
+            if !root.is_null() {
+                return root;
+            }
+            return foreground;
+        }
+
+        console
+    }
+}
+
+#[cfg(windows)]
+fn hide_window(hwnd: windows_sys::Win32::Foundation::HWND) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        IsWindowVisible, SW_HIDE, SWP_HIDEWINDOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, SetWindowPos, ShowWindow, ShowWindowAsync,
+    };
+
+    if hwnd.is_null() {
+        return false;
+    }
+
+    unsafe {
+        ShowWindow(hwnd, SW_HIDE);
+        ShowWindowAsync(hwnd, SW_HIDE);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        IsWindowVisible(hwnd) == 0
+    }
+}
+
+#[cfg(windows)]
+fn show_window(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SW_SHOW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+        SetWindowPos, ShowWindow, ShowWindowAsync,
+    };
+
+    if hwnd.is_null() {
+        return;
+    }
+
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+            SWP_SHOWWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        ShowWindowAsync(hwnd, SW_SHOW);
+        ShowWindow(hwnd, SW_SHOW);
+    }
+}
+
+#[cfg(windows)]
 unsafe extern "system" fn tray_wnd_proc(
     hwnd: windows_sys::Win32::Foundation::HWND,
     msg: u32,
@@ -1965,6 +2089,11 @@ unsafe extern "system" fn tray_wnd_proc(
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         DefWindowProcW, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
     };
+
+    if msg == TRAY_RESTORE_MSG {
+        TRAY_RESTORE_REQUESTED.store(true, Ordering::SeqCst);
+        return 0;
+    }
 
     if msg == TRAY_CALLBACK_MSG {
         let event = lparam as u32;
