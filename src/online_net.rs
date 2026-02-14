@@ -1,5 +1,6 @@
 use crate::online::{OnlineSession, SharedQueueItem, StreamQuality, TransportEnvelope};
 use anyhow::Context;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -14,6 +15,11 @@ const INVITE_PREFIX_WITH_PASSWORD: &str = "T1P";
 const INVITE_MAX_PASSWORD_BYTES: usize = 32;
 const INVITE_ALPHABET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const INVITE_OBFUSCATION_KEY: &[u8] = b"TuneTuiInviteKeyV1";
+const STUN_MAGIC_COOKIE: u32 = 0x2112_A442;
+const STUN_BINDING_REQUEST: u16 = 0x0001;
+const STUN_BINDING_SUCCESS_RESPONSE: u16 = 0x0101;
+const STUN_ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
+const STUN_ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 
 pub struct DecodedInvite {
     pub server_addr: String,
@@ -167,10 +173,13 @@ impl OnlineNetwork {
 pub fn resolve_advertise_addr(bind_addr: &str) -> anyhow::Result<String> {
     let bind = parse_socket_addr_v4(bind_addr)?;
     let port = bind.port();
-    let ip = if bind.ip().is_unspecified() {
-        detect_local_ipv4().unwrap_or(Ipv4Addr::new(127, 0, 0, 1))
+    let bind_ip = *bind.ip();
+    let ip = if bind_ip.is_unspecified() || !is_public_ipv4(bind_ip) {
+        detect_public_ipv4_stun()
+            .or_else(detect_local_ipv4)
+            .unwrap_or(Ipv4Addr::new(127, 0, 0, 1))
     } else {
-        *bind.ip()
+        bind_ip
     };
     Ok(format!("{ip}:{port}"))
 }
@@ -268,6 +277,120 @@ fn detect_local_ipv4() -> Option<Ipv4Addr> {
         IpAddr::V4(ip) => Some(ip),
         IpAddr::V6(_) => None,
     }
+}
+
+fn detect_public_ipv4_stun() -> Option<Ipv4Addr> {
+    let candidates = [
+        "stun.l.google.com:19302",
+        "stun1.l.google.com:19302",
+        "stun2.l.google.com:19302",
+    ];
+    for candidate in candidates {
+        if let Some(ip) = query_stun_public_ipv4(candidate) {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+fn query_stun_public_ipv4(server: &str) -> Option<Ipv4Addr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket
+        .set_read_timeout(Some(Duration::from_millis(850)))
+        .ok()?;
+    socket
+        .set_write_timeout(Some(Duration::from_millis(850)))
+        .ok()?;
+    socket.connect(server).ok()?;
+
+    let mut txid = [0_u8; 12];
+    rand::rng().fill(&mut txid);
+    let mut request = [0_u8; 20];
+    request[0..2].copy_from_slice(&STUN_BINDING_REQUEST.to_be_bytes());
+    request[2..4].copy_from_slice(&0_u16.to_be_bytes());
+    request[4..8].copy_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+    request[8..20].copy_from_slice(&txid);
+
+    socket.send(&request).ok()?;
+    let mut response = [0_u8; 1024];
+    let len = socket.recv(&mut response).ok()?;
+    parse_stun_mapped_ipv4(&response[..len], &txid)
+}
+
+fn parse_stun_mapped_ipv4(packet: &[u8], txid: &[u8; 12]) -> Option<Ipv4Addr> {
+    if packet.len() < 20 {
+        return None;
+    }
+    let message_type = u16::from_be_bytes([packet[0], packet[1]]);
+    if message_type != STUN_BINDING_SUCCESS_RESPONSE {
+        return None;
+    }
+    let length = usize::from(u16::from_be_bytes([packet[2], packet[3]]));
+    if packet.len() < 20 + length {
+        return None;
+    }
+    let cookie = u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]);
+    if cookie != STUN_MAGIC_COOKIE {
+        return None;
+    }
+    if packet[8..20] != txid[..] {
+        return None;
+    }
+
+    let mut cursor = 20_usize;
+    let end = 20 + length;
+    while cursor + 4 <= end {
+        let attr_type = u16::from_be_bytes([packet[cursor], packet[cursor + 1]]);
+        let attr_len = usize::from(u16::from_be_bytes([packet[cursor + 2], packet[cursor + 3]]));
+        cursor += 4;
+        if cursor + attr_len > end {
+            return None;
+        }
+
+        let value = &packet[cursor..cursor + attr_len];
+        if attr_type == STUN_ATTR_XOR_MAPPED_ADDRESS {
+            if let Some(ip) = parse_xor_mapped_ipv4(value, cookie) {
+                return Some(ip);
+            }
+        } else if attr_type == STUN_ATTR_MAPPED_ADDRESS
+            && let Some(ip) = parse_mapped_ipv4(value)
+        {
+            return Some(ip);
+        }
+
+        let padded = (attr_len + 3) & !3;
+        cursor += padded;
+    }
+    None
+}
+
+fn parse_xor_mapped_ipv4(value: &[u8], cookie: u32) -> Option<Ipv4Addr> {
+    if value.len() < 8 || value[1] != 0x01 {
+        return None;
+    }
+    let cookie_bytes = cookie.to_be_bytes();
+    Some(Ipv4Addr::new(
+        value[4] ^ cookie_bytes[0],
+        value[5] ^ cookie_bytes[1],
+        value[6] ^ cookie_bytes[2],
+        value[7] ^ cookie_bytes[3],
+    ))
+}
+
+fn parse_mapped_ipv4(value: &[u8]) -> Option<Ipv4Addr> {
+    if value.len() < 8 || value[1] != 0x01 {
+        return None;
+    }
+    Some(Ipv4Addr::new(value[4], value[5], value[6], value[7]))
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    !ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_broadcast()
+        && !ip.is_documentation()
+        && !ip.is_unspecified()
 }
 
 fn obfuscate_payload(payload: &mut [u8]) {
@@ -845,5 +968,33 @@ mod tests {
         let decoded = decode_invite_code(&code).expect("decode");
         assert_eq!(decoded.server_addr, "10.0.0.8:9000");
         assert_eq!(decoded.password.as_deref(), Some("party123"));
+    }
+
+    #[test]
+    fn parses_xor_mapped_ipv4_from_stun_response() {
+        let txid = [1_u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let mapped = [74_u8, 199, 151, 6];
+        let cookie = STUN_MAGIC_COOKIE.to_be_bytes();
+        let xored = [
+            mapped[0] ^ cookie[0],
+            mapped[1] ^ cookie[1],
+            mapped[2] ^ cookie[2],
+            mapped[3] ^ cookie[3],
+        ];
+
+        let mut packet = Vec::new();
+        packet.extend_from_slice(&STUN_BINDING_SUCCESS_RESPONSE.to_be_bytes());
+        packet.extend_from_slice(&12_u16.to_be_bytes());
+        packet.extend_from_slice(&STUN_MAGIC_COOKIE.to_be_bytes());
+        packet.extend_from_slice(&txid);
+        packet.extend_from_slice(&STUN_ATTR_XOR_MAPPED_ADDRESS.to_be_bytes());
+        packet.extend_from_slice(&8_u16.to_be_bytes());
+        packet.push(0);
+        packet.push(0x01);
+        packet.extend_from_slice(&0_u16.to_be_bytes());
+        packet.extend_from_slice(&xored);
+
+        let parsed = parse_stun_mapped_ipv4(&packet, &txid).expect("parsed mapped ip");
+        assert_eq!(parsed, Ipv4Addr::new(74, 199, 151, 6));
     }
 }

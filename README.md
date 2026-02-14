@@ -78,6 +78,7 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 
 - Host bind: `TUNETUI_ONLINE_BIND_ADDR` (default `0.0.0.0:7878`)
 - Host advertise address for invite generation: `TUNETUI_ONLINE_ADVERTISE_ADDR` (optional override; auto-detected from bind when omitted)
+- Auto-detect prefers public NAT address via STUN (Google STUN) and falls back to local adapter IP when STUN is unavailable
 - Room code for join: `TUNETUI_ONLINE_ROOM_CODE` (required; use host invite code)
 - Password for host/join: `TUNETUI_ONLINE_PASSWORD` (optional)
 - Include password in invite code: `TUNETUI_ONLINE_INCLUDE_PASSWORD` (`true`/`false`, default `true`)
