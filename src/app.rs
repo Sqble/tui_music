@@ -43,6 +43,8 @@ struct OnlineRuntime {
     network: Option<OnlineNetwork>,
     local_nickname: String,
     last_transport_seq: u64,
+    join_prompt_active: bool,
+    join_code_input: String,
 }
 
 impl OnlineRuntime {
@@ -744,6 +746,8 @@ pub fn run() -> Result<()> {
         network: None,
         local_nickname: inferred_online_nickname(),
         last_transport_seq: 0,
+        join_prompt_active: false,
+        join_code_input: String::new(),
     };
 
     let result: Result<()> = loop {
@@ -1317,6 +1321,45 @@ fn handle_online_inline_input(
         return false;
     }
 
+    if online_runtime.join_prompt_active {
+        match key.code {
+            KeyCode::Esc => {
+                online_runtime.join_prompt_active = false;
+                online_runtime.join_code_input.clear();
+                core.status = String::from("Join cancelled");
+                core.dirty = true;
+                return true;
+            }
+            KeyCode::Backspace => {
+                online_runtime.join_code_input.pop();
+                core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
+                core.dirty = true;
+                return true;
+            }
+            KeyCode::Enter => {
+                if online_runtime.join_code_input.trim().is_empty() {
+                    core.status = String::from("Enter invite code, then press Enter");
+                    core.dirty = true;
+                    return true;
+                }
+                let invite_code = online_runtime.join_code_input.trim().to_string();
+                online_runtime.join_prompt_active = false;
+                online_runtime.join_code_input.clear();
+                join_from_invite_code(core, online_runtime, &invite_code);
+                return true;
+            }
+            KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !ch.is_ascii_whitespace() {
+                    online_runtime.join_code_input.push(ch);
+                    core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
+                    core.dirty = true;
+                }
+                return true;
+            }
+            _ => return true,
+        }
+    }
+
     match key.code {
         KeyCode::Char('c') => {
             online_runtime.shutdown();
@@ -1373,44 +1416,13 @@ fn handle_online_inline_input(
             true
         }
         KeyCode::Char('j') => {
-            online_runtime.shutdown();
-            online_runtime.last_transport_seq = 0;
-            let Some(room_code_input) = optional_env("TUNETUI_ONLINE_ROOM_CODE") else {
-                core.status =
-                    String::from("Set TUNETUI_ONLINE_ROOM_CODE to the host invite code first");
+            if let Some(room_code_input) = optional_env("TUNETUI_ONLINE_ROOM_CODE") {
+                join_from_invite_code(core, online_runtime, &room_code_input);
+            } else {
+                online_runtime.join_prompt_active = true;
+                online_runtime.join_code_input.clear();
+                core.status = String::from("Enter invite code: ");
                 core.dirty = true;
-                return true;
-            };
-
-            let decoded = match decode_invite_code(&room_code_input) {
-                Ok(decoded) => decoded,
-                Err(err) => {
-                    core.status = format!("Invalid invite code: {err}");
-                    core.dirty = true;
-                    return true;
-                }
-            };
-            let join_password = decoded
-                .password
-                .clone()
-                .or_else(|| optional_env("TUNETUI_ONLINE_PASSWORD"));
-            core.online_join_room(&decoded.room_code, &online_runtime.local_nickname);
-            match OnlineNetwork::start_client(
-                &decoded.server_addr,
-                &decoded.room_code,
-                &online_runtime.local_nickname,
-                join_password,
-            ) {
-                Ok(network) => {
-                    online_runtime.network = Some(network);
-                    core.status = format!("Connected to {}", decoded.server_addr);
-                    core.dirty = true;
-                }
-                Err(err) => {
-                    core.online_leave_room();
-                    core.status = format!("Online join failed: {err}");
-                    core.dirty = true;
-                }
             }
             true
         }
@@ -1531,6 +1543,47 @@ fn env_bool(key: &str, default: bool) -> bool {
         "1" | "true" | "yes" | "on" => true,
         "0" | "false" | "no" | "off" => false,
         _ => default,
+    }
+}
+
+fn join_from_invite_code(
+    core: &mut TuneCore,
+    online_runtime: &mut OnlineRuntime,
+    invite_code: &str,
+) {
+    online_runtime.shutdown();
+    online_runtime.last_transport_seq = 0;
+
+    let decoded = match decode_invite_code(invite_code) {
+        Ok(decoded) => decoded,
+        Err(err) => {
+            core.status = format!("Invalid invite code: {err}");
+            core.dirty = true;
+            return;
+        }
+    };
+
+    let join_password = decoded
+        .password
+        .clone()
+        .or_else(|| optional_env("TUNETUI_ONLINE_PASSWORD"));
+    core.online_join_room(&decoded.room_code, &online_runtime.local_nickname);
+    match OnlineNetwork::start_client(
+        &decoded.server_addr,
+        &decoded.room_code,
+        &online_runtime.local_nickname,
+        join_password,
+    ) {
+        Ok(network) => {
+            online_runtime.network = Some(network);
+            core.status = format!("Connected to {}", decoded.server_addr);
+            core.dirty = true;
+        }
+        Err(err) => {
+            core.online_leave_room();
+            core.status = format!("Online join failed: {err}");
+            core.dirty = true;
+        }
     }
 }
 
