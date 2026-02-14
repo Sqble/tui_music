@@ -1,6 +1,6 @@
 # TuneTUI
 
-Performance-oriented terminal music player for Windows-first workflows.
+Performance-oriented terminal music player for desktop terminal workflows.
 
 ## Features
 
@@ -11,14 +11,14 @@ Performance-oriented terminal music player for Windows-first workflows.
 - Main library queue order uses metadata titles (not file names)
 - Queue scope follows where you start playback (folder, playlist, or All Songs)
 - Single-instance behavior on Windows (new launches focus/restore existing app)
-- Automatic track advance when a song ends, including while minimized to tray
-- Persistent state in `%USERPROFILE%\\.config\\tunetui\\state.json`
-- Stats sidecar in `%USERPROFILE%\\.config\\tunetui\\stats.json` with listen events and aggregates
+- Automatic track advance when a song ends, including while minimized to tray (Windows)
+- Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\state.json` on Windows)
+- Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with listen events and aggregates
 - Keyboard-driven TUI with actions panel
 - Right-aligned status tabs with `E` cycling (Library, Lyrics, Stats, Online)
 - Stats tab with totals, ASCII charts, top songs, and recent listen log
 - Lyrics tab with live line sync from `.lrc` sidecars or embedded lyric metadata
-- Lyrics sidecars are stored in `%USERPROFILE%\.config\tunetui\lyrics\` (associated by track path)
+- Lyrics sidecars are stored in the config dir lyrics folder (`$XDG_CONFIG_HOME/tunetui/lyrics/` on Linux, `%USERPROFILE%\.config\tunetui\lyrics\` on Windows)
 - Split-pane lyrics editor in TUI (`Ctrl+e` toggle in Lyrics tab) with per-line timestamp stamping
 - `.txt` to `.lrc` import with fixed-interval timestamp seeding from actions panel
 - If no lyrics exist, Lyrics tab prompts before creating a new sidecar `.lrc`
@@ -27,7 +27,7 @@ Performance-oriented terminal music player for Windows-first workflows.
 - Selected output speaker persists across launches with fallback to default when unavailable
 - Playback settings in actions panel: loudness normalization, crossfade, scrub length cycle (5s/10s/15s/30s/1m), stats tracking toggle, and themes (Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy)
 - Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
-- Add directory from actions panel via typed path or external folder picker
+- Add directory from actions panel via typed path or external folder picker (PowerShell on Windows, zenity/kdialog on Linux)
 - Remove directory from actions panel
 - Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
 
@@ -36,6 +36,9 @@ Performance-oriented terminal music player for Windows-first workflows.
 ```bash
 cargo run --release
 ```
+
+On SSH sessions, TuneTUI auto-sets `TERM=xterm-256color` when `TERM` is missing/`dumb`.
+If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI auto-falls back to `$HOME/.config/tunetui`.
 
 ## Controls
 
@@ -87,4 +90,10 @@ tune
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
+```
+
+- One-command local verification (Linux/macOS):
+
+```bash
+bash scripts/verify.sh
 ```

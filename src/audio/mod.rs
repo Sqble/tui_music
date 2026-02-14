@@ -346,7 +346,7 @@ impl AudioEngine for WasapiAudioEngine {
         Some(
             self.selected_output
                 .clone()
-                .unwrap_or_else(|| "System default output (WASAPI/CPAL)".to_string()),
+                .unwrap_or_else(|| "System default output (CPAL)".to_string()),
         )
     }
 

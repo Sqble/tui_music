@@ -40,8 +40,12 @@ All items below must be true before considering work complete:
 
 ## Preferred Workflow
 
-Use `scripts/verify.ps1` for local verification on Windows:
+Use `scripts/verify.ps1` for local verification on Windows and `scripts/verify.sh` on Linux/macOS:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
+```
+
+```bash
+bash scripts/verify.sh
 ```
