@@ -605,12 +605,19 @@ fn normalize_provider_track_id(value: Option<&str>) -> Option<String> {
 }
 
 fn metadata_track_key(artist: Option<&str>, title: &str) -> Option<String> {
-    let normalized_artist = normalize_artist_for_match(artist?);
     let normalized_title = normalize_text_for_match(title);
-    if normalized_artist.is_empty() || normalized_title.is_empty() {
+    if normalized_title.is_empty() {
         return None;
     }
-    Some(format!("meta:{normalized_artist}|{normalized_title}"))
+
+    if let Some(artist) = artist {
+        let normalized_artist = normalize_artist_for_match(artist);
+        if !normalized_artist.is_empty() {
+            return Some(format!("meta:{normalized_artist}|{normalized_title}"));
+        }
+    }
+
+    Some(format!("meta-title:{normalized_title}"))
 }
 
 fn normalize_artist_for_match(value: &str) -> String {
@@ -1118,6 +1125,41 @@ mod tests {
             provider_track_id: Some("provider:123".to_string()),
             started_at_epoch_seconds: 20,
             listened_seconds: 30,
+            completed: false,
+            duration_seconds: Some(180),
+            counted_play_override: None,
+            allow_short_listen: false,
+        });
+
+        let snapshot = store.query(&StatsQuery::default(), 100);
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.total_plays, 2);
+    }
+
+    #[test]
+    fn title_only_metadata_merges_when_artist_missing() {
+        let mut store = StatsStore::default();
+        store.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("/srv/music/renamed-one.flac"),
+            title: "Same Song".to_string(),
+            artist: None,
+            album: None,
+            provider_track_id: None,
+            started_at_epoch_seconds: 10,
+            listened_seconds: 35,
+            completed: false,
+            duration_seconds: Some(180),
+            counted_play_override: None,
+            allow_short_listen: false,
+        });
+        store.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("/home/user/music/local-copy.flac"),
+            title: "Same Song".to_string(),
+            artist: None,
+            album: None,
+            provider_track_id: None,
+            started_at_epoch_seconds: 20,
+            listened_seconds: 35,
             completed: false,
             duration_seconds: Some(180),
             counted_play_override: None,
