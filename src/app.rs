@@ -64,6 +64,10 @@ struct OnlineRuntime {
     streamed_track_cache: HashMap<PathBuf, PathBuf>,
     pending_stream_path: Option<PathBuf>,
     remote_logical_track: Option<PathBuf>,
+    remote_track_title: Option<String>,
+    remote_track_artist: Option<String>,
+    remote_track_album: Option<String>,
+    remote_provider_track_id: Option<String>,
     last_remote_transport_origin: Option<String>,
     last_periodic_sync_at: Instant,
 }
@@ -75,6 +79,10 @@ impl OnlineRuntime {
         }
         self.pending_stream_path = None;
         self.remote_logical_track = None;
+        self.remote_track_title = None;
+        self.remote_track_artist = None;
+        self.remote_track_album = None;
+        self.remote_provider_track_id = None;
         self.last_remote_transport_origin = None;
         self.password_prompt_active = false;
         self.password_prompt_mode = OnlinePasswordPromptMode::Host;
@@ -167,10 +175,12 @@ impl HostInviteModalButton {
 
 #[derive(Debug, Clone)]
 struct ActiveListenSession {
+    playback_path: PathBuf,
     track_path: PathBuf,
     title: String,
     artist: Option<String>,
     album: Option<String>,
+    provider_track_id: Option<String>,
     started_at_epoch_seconds: i64,
     playing_started_at: Option<Instant>,
     listened: Duration,
@@ -186,12 +196,27 @@ struct ListenTracker {
     active: Option<ActiveListenSession>,
 }
 
+#[derive(Debug, Clone)]
+struct StatsIdentityHint {
+    logical_path: PathBuf,
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    provider_track_id: Option<String>,
+}
+
 impl ListenTracker {
     fn reset(&mut self) {
         self.active = None;
     }
 
-    fn tick(&mut self, core: &TuneCore, audio: &dyn AudioEngine, stats: &mut StatsStore) -> bool {
+    fn tick(
+        &mut self,
+        core: &TuneCore,
+        audio: &dyn AudioEngine,
+        stats: &mut StatsStore,
+        identity_hint: Option<&StatsIdentityHint>,
+    ) -> bool {
         let mut wrote_event = false;
         let current_track = audio.current_track().map(Path::to_path_buf);
         let current_position = audio.position();
@@ -201,7 +226,7 @@ impl ListenTracker {
         let finished = audio.is_finished();
         let mut force_completed = finished;
         let should_finalize = self.active.as_ref().is_some_and(|active| {
-            let track_changed = current_track.as_ref() != Some(&active.track_path);
+            let track_changed = current_track.as_ref() != Some(&active.playback_path);
             let restarted_same_track = !track_changed
                 && !finished
                 && same_track_restarted(active, current_position, paused, crossfade_seconds);
@@ -220,17 +245,36 @@ impl ListenTracker {
 
         if self.active.is_none() {
             let path = current_track.expect("checked some");
+            let (logical_path, provider_track_id, hint_title, hint_artist, hint_album) =
+                if let Some(hint) = identity_hint {
+                    (
+                        hint.logical_path.clone(),
+                        hint.provider_track_id.clone(),
+                        hint.title.clone(),
+                        hint.artist.clone(),
+                        hint.album.clone(),
+                    )
+                } else {
+                    (path.clone(), None, None, None, None)
+                };
             let now = Instant::now();
             self.active = Some(ActiveListenSession {
-                title: core.title_for_path(&path).unwrap_or_else(|| {
-                    path.file_stem()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("-")
-                        .to_string()
-                }),
-                artist: core.artist_for_path(&path).map(ToOwned::to_owned),
-                album: core.album_for_path(&path).map(ToOwned::to_owned),
-                track_path: path,
+                title: hint_title
+                    .or_else(|| core.title_for_path(&logical_path))
+                    .unwrap_or_else(|| {
+                        logical_path
+                            .file_stem()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("-")
+                            .to_string()
+                    }),
+                artist: hint_artist
+                    .or_else(|| core.artist_for_path(&logical_path).map(ToOwned::to_owned)),
+                album: hint_album
+                    .or_else(|| core.album_for_path(&logical_path).map(ToOwned::to_owned)),
+                playback_path: path,
+                track_path: logical_path,
+                provider_track_id,
                 started_at_epoch_seconds: stats::now_epoch_seconds(),
                 playing_started_at: (!paused).then_some(now),
                 listened: Duration::ZERO,
@@ -246,7 +290,7 @@ impl ListenTracker {
         if let Some(active) = self.active.as_mut() {
             let queued_same_track = audio
                 .crossfade_queued_track()
-                .is_some_and(|queued| queued == active.track_path.as_path());
+                .is_some_and(|queued| queued == active.playback_path.as_path());
             active.pending_same_track_restart |= queued_same_track;
             active.last_position = current_position.or(active.last_position);
             active.duration = audio.duration().or(active.duration);
@@ -297,6 +341,7 @@ impl ListenTracker {
             title: active.title,
             artist: active.artist,
             album: active.album,
+            provider_track_id: active.provider_track_id,
             started_at_epoch_seconds: active.started_at_epoch_seconds,
             listened_seconds,
             completed,
@@ -334,6 +379,7 @@ impl ListenTracker {
             title: active.title.clone(),
             artist: active.artist.clone(),
             album: active.album.clone(),
+            provider_track_id: active.provider_track_id.clone(),
             started_at_epoch_seconds: active.started_at_epoch_seconds,
             listened_seconds: delta,
             completed: false,
@@ -928,6 +974,10 @@ pub fn run() -> Result<()> {
         streamed_track_cache: HashMap::new(),
         pending_stream_path: None,
         remote_logical_track: None,
+        remote_track_title: None,
+        remote_track_artist: None,
+        remote_track_album: None,
+        remote_provider_track_id: None,
         last_remote_transport_origin: None,
         last_periodic_sync_at: Instant::now(),
     };
@@ -937,7 +987,15 @@ pub fn run() -> Result<()> {
         drain_online_network_events(&mut core, &mut *audio, &mut online_runtime);
         audio.tick();
         maybe_publish_online_playback_sync(&core, &*audio, &mut online_runtime);
-        if core.stats_enabled && listen_tracker.tick(&core, &*audio, &mut stats_store) {
+        let stats_identity_hint = online_streaming_stats_identity(&online_runtime, &*audio);
+        if core.stats_enabled
+            && listen_tracker.tick(
+                &core,
+                &*audio,
+                &mut stats_store,
+                stats_identity_hint.as_ref(),
+            )
+        {
             let _ = stats::save_stats(&stats_store);
         }
         if stats_enabled_last
@@ -2078,15 +2136,33 @@ fn publish_current_playback_state(
         .position()
         .map(|position| position.as_millis() as u64)
         .unwrap_or(0);
+    let title = core.title_for_path(&path).or_else(|| {
+        path.file_stem()
+            .and_then(|name| name.to_str())
+            .map(str::to_string)
+    });
+    let artist = core.artist_for_path(&path).map(str::to_string);
+    let album = core.album_for_path(&path).map(str::to_string);
+    let provider_track_id = provider_track_id_for_path(&path);
     publish_transport_command(
         core,
         online_runtime,
         TransportCommand::SetPlaybackState {
             path,
+            title,
+            artist,
+            album,
+            provider_track_id: Some(provider_track_id),
             position_ms,
             paused: audio.is_paused(),
         },
     );
+}
+
+fn provider_track_id_for_path(path: &Path) -> String {
+    crate::config::normalize_path(path)
+        .to_string_lossy()
+        .to_ascii_lowercase()
 }
 
 fn publish_online_delay_update(core: &TuneCore, online_runtime: Option<&OnlineRuntime>) {
@@ -2120,6 +2196,29 @@ fn maybe_publish_online_playback_sync(
 
     online_runtime.last_periodic_sync_at = Instant::now();
     publish_current_playback_state(core, audio, online_runtime);
+}
+
+fn online_streaming_stats_identity(
+    online_runtime: &OnlineRuntime,
+    audio: &dyn AudioEngine,
+) -> Option<StatsIdentityHint> {
+    let logical_path = online_runtime.remote_logical_track.clone()?;
+    let current_playback_path = audio.current_track()?;
+    let streamed_path = online_runtime.streamed_track_cache.get(&logical_path)?;
+    if current_playback_path != streamed_path {
+        return None;
+    }
+
+    Some(StatsIdentityHint {
+        logical_path: logical_path.clone(),
+        title: online_runtime.remote_track_title.clone(),
+        artist: online_runtime.remote_track_artist.clone(),
+        album: online_runtime.remote_track_album.clone(),
+        provider_track_id: online_runtime
+            .remote_provider_track_id
+            .clone()
+            .or_else(|| Some(provider_track_id_for_path(&logical_path))),
+    })
 }
 
 fn drain_online_network_events(
@@ -2257,8 +2356,20 @@ fn apply_remote_transport(
             }
             core.dirty = true;
         }
-        TransportCommand::PlayTrack { path } => {
+        TransportCommand::PlayTrack {
+            path,
+            title,
+            artist,
+            album,
+            provider_track_id,
+        } => {
             if ensure_remote_track(core, audio, online_runtime, path) {
+                online_runtime.remote_track_title = title.clone();
+                online_runtime.remote_track_artist = artist.clone();
+                online_runtime.remote_track_album = album.clone();
+                online_runtime.remote_provider_track_id = provider_track_id
+                    .clone()
+                    .or_else(|| Some(provider_track_id_for_path(path)));
                 core.current_queue_index = core.queue_position_for_path(path);
                 core.status = String::from("Remote switched track");
             }
@@ -2266,6 +2377,10 @@ fn apply_remote_transport(
         }
         TransportCommand::SetPlaybackState {
             path,
+            title,
+            artist,
+            album,
+            provider_track_id,
             position_ms,
             paused,
         } => {
@@ -2306,6 +2421,12 @@ fn apply_remote_transport(
             }
 
             online_runtime.remote_logical_track = Some(path.clone());
+            online_runtime.remote_track_title = title.clone();
+            online_runtime.remote_track_artist = artist.clone();
+            online_runtime.remote_track_album = album.clone();
+            online_runtime.remote_provider_track_id = provider_track_id
+                .clone()
+                .or_else(|| Some(provider_track_id_for_path(path)));
             core.current_queue_index = core.queue_position_for_path(path);
             if let Some(session) = core.online.session.as_mut() {
                 session.last_sync_drift_ms = drift_ms.min(i64::from(i32::MAX)) as i32;
@@ -4039,6 +4160,10 @@ mod tests {
             streamed_track_cache: HashMap::new(),
             pending_stream_path: None,
             remote_logical_track: None,
+            remote_track_title: None,
+            remote_track_artist: None,
+            remote_track_album: None,
+            remote_provider_track_id: None,
             last_remote_transport_origin: None,
             last_periodic_sync_at: Instant::now(),
         }
@@ -4651,6 +4776,10 @@ mod tests {
             &mut runtime,
             &TransportCommand::SetPlaybackState {
                 path,
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
                 position_ms: 1_200,
                 paused: false,
             },
@@ -4683,6 +4812,10 @@ mod tests {
             &mut runtime,
             &TransportCommand::SetPlaybackState {
                 path,
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
                 position_ms: 1_250,
                 paused: false,
             },
@@ -4699,6 +4832,26 @@ mod tests {
     }
 
     #[test]
+    fn streaming_stats_identity_uses_remote_metadata_over_temp_path() {
+        let mut runtime = test_online_runtime();
+        let mut audio = TestAudioEngine::new();
+        let logical = PathBuf::from("host/library/song.flac");
+        let temp = PathBuf::from("C:/tmp/tunetui_stream_1.flac");
+        audio.current = Some(temp.clone());
+        runtime.remote_logical_track = Some(logical.clone());
+        runtime.streamed_track_cache.insert(logical.clone(), temp);
+        runtime.remote_track_title = Some(String::from("Song"));
+        runtime.remote_track_artist = Some(String::from("Artist"));
+        runtime.remote_provider_track_id = Some(String::from("provider:host:42"));
+
+        let hint = online_streaming_stats_identity(&runtime, &audio).expect("identity hint");
+        assert_eq!(hint.logical_path, logical);
+        assert_eq!(hint.title.as_deref(), Some("Song"));
+        assert_eq!(hint.artist.as_deref(), Some("Artist"));
+        assert_eq!(hint.provider_track_id.as_deref(), Some("provider:host:42"));
+    }
+
+    #[test]
     fn listen_tracker_flushes_partial_session_while_playing() {
         let core = TuneCore::from_persisted(PersistedState::default());
         let mut stats = StatsStore::default();
@@ -4707,11 +4860,11 @@ mod tests {
         audio.current = Some(PathBuf::from("a.mp3"));
         audio.duration = Some(Duration::from_secs(200));
 
-        assert!(!tracker.tick(&core, &audio, &mut stats));
+        assert!(!tracker.tick(&core, &audio, &mut stats, None));
         let active = tracker.active.as_mut().expect("active session");
         active.playing_started_at = Instant::now().checked_sub(Duration::from_secs(12));
 
-        assert!(tracker.tick(&core, &audio, &mut stats));
+        assert!(tracker.tick(&core, &audio, &mut stats, None));
         let event = stats.events.last().expect("partial event");
         assert!(event.listened_seconds >= 10);
         assert!(!event.counted_play);
@@ -4725,6 +4878,7 @@ mod tests {
             title: String::from("a"),
             artist: None,
             album: None,
+            provider_track_id: None,
             started_at_epoch_seconds: 10,
             listened_seconds: 30,
             completed: false,
@@ -4735,10 +4889,12 @@ mod tests {
 
         let mut tracker = ListenTracker {
             active: Some(ActiveListenSession {
+                playback_path: PathBuf::from("a.mp3"),
                 track_path: PathBuf::from("a.mp3"),
                 title: String::from("a"),
                 artist: None,
                 album: None,
+                provider_track_id: None,
                 started_at_epoch_seconds: 10,
                 playing_started_at: None,
                 listened: Duration::from_secs(35),
@@ -4774,11 +4930,11 @@ mod tests {
         audio.current = Some(PathBuf::from("a.mp3"));
         audio.duration = Some(Duration::from_secs(200));
 
-        assert!(!tracker.tick(&core, &audio, &mut stats));
+        assert!(!tracker.tick(&core, &audio, &mut stats, None));
         let active = tracker.active.as_mut().expect("active session");
         active.playing_started_at = Instant::now().checked_sub(Duration::from_secs(31));
 
-        assert!(tracker.tick(&core, &audio, &mut stats));
+        assert!(tracker.tick(&core, &audio, &mut stats, None));
         let first_counted = stats
             .events
             .iter()
@@ -4788,7 +4944,7 @@ mod tests {
 
         let active = tracker.active.as_mut().expect("active session");
         active.playing_started_at = Instant::now().checked_sub(Duration::from_secs(42));
-        assert!(tracker.tick(&core, &audio, &mut stats));
+        assert!(tracker.tick(&core, &audio, &mut stats, None));
 
         let total_counted = stats
             .events
@@ -4807,17 +4963,17 @@ mod tests {
         audio.current = Some(PathBuf::from("loop.mp3"));
         audio.duration = Some(Duration::from_secs(180));
 
-        assert!(!tracker.tick(&core, &audio, &mut stats));
+        assert!(!tracker.tick(&core, &audio, &mut stats, None));
         let active = tracker.active.as_mut().expect("active session");
         active.playing_started_at = Instant::now().checked_sub(Duration::from_secs(45));
 
         audio.finished = true;
-        assert!(tracker.tick(&core, &audio, &mut stats));
+        assert!(tracker.tick(&core, &audio, &mut stats, None));
         assert!(tracker.active.is_none());
 
         audio.play(Path::new("loop.mp3")).expect("restart loop");
         audio.duration = Some(Duration::from_secs(180));
-        assert!(!tracker.tick(&core, &audio, &mut stats));
+        assert!(!tracker.tick(&core, &audio, &mut stats, None));
         let active = tracker
             .active
             .as_mut()
@@ -4825,7 +4981,7 @@ mod tests {
         active.playing_started_at = Instant::now().checked_sub(Duration::from_secs(37));
 
         audio.finished = true;
-        assert!(tracker.tick(&core, &audio, &mut stats));
+        assert!(tracker.tick(&core, &audio, &mut stats, None));
 
         let snapshot = stats.query(
             &crate::stats::StatsQuery {
@@ -4845,10 +5001,12 @@ mod tests {
         let mut stats = StatsStore::default();
         let mut tracker = ListenTracker {
             active: Some(ActiveListenSession {
+                playback_path: PathBuf::from("short.mp3"),
                 track_path: PathBuf::from("short.mp3"),
                 title: String::from("short"),
                 artist: None,
                 album: None,
+                provider_track_id: None,
                 started_at_epoch_seconds: 100,
                 playing_started_at: None,
                 listened: Duration::from_secs(20),
@@ -4882,10 +5040,12 @@ mod tests {
         let mut stats = StatsStore::default();
         let mut tracker = ListenTracker {
             active: Some(ActiveListenSession {
+                playback_path: PathBuf::from("loop.mp3"),
                 track_path: PathBuf::from("loop.mp3"),
                 title: String::from("loop"),
                 artist: None,
                 album: None,
+                provider_track_id: None,
                 started_at_epoch_seconds: 100,
                 playing_started_at: None,
                 listened: Duration::from_secs(186),
@@ -4902,7 +5062,7 @@ mod tests {
         audio.position = Some(Duration::from_secs(1));
         audio.finished = false;
 
-        assert!(tracker.tick(&core, &audio, &mut stats));
+        assert!(tracker.tick(&core, &audio, &mut stats, None));
         assert!(tracker.active.is_some());
 
         let snapshot = stats.query(
@@ -4924,10 +5084,12 @@ mod tests {
         let mut stats = StatsStore::default();
         let mut tracker = ListenTracker {
             active: Some(ActiveListenSession {
+                playback_path: PathBuf::from("loop.mp3"),
                 track_path: PathBuf::from("loop.mp3"),
                 title: String::from("loop"),
                 artist: None,
                 album: None,
+                provider_track_id: None,
                 started_at_epoch_seconds: 100,
                 playing_started_at: None,
                 listened: Duration::from_secs(42),
@@ -4944,7 +5106,7 @@ mod tests {
         audio.position = Some(Duration::from_secs(2));
         audio.finished = false;
 
-        assert!(!tracker.tick(&core, &audio, &mut stats));
+        assert!(!tracker.tick(&core, &audio, &mut stats, None));
         assert!(stats.events.is_empty());
     }
 
@@ -4956,6 +5118,7 @@ mod tests {
             title: String::from("song"),
             artist: None,
             album: None,
+            provider_track_id: None,
             started_at_epoch_seconds: 100,
             listened_seconds: 140,
             completed: false,
@@ -4966,10 +5129,12 @@ mod tests {
 
         let mut tracker = ListenTracker {
             active: Some(ActiveListenSession {
+                playback_path: PathBuf::from("song.mp3"),
                 track_path: PathBuf::from("song.mp3"),
                 title: String::from("song"),
                 artist: None,
                 album: None,
+                provider_track_id: None,
                 started_at_epoch_seconds: 100,
                 playing_started_at: None,
                 listened: Duration::from_secs(153),
@@ -5004,10 +5169,12 @@ mod tests {
         let mut stats = StatsStore::default();
         let mut tracker = ListenTracker {
             active: Some(ActiveListenSession {
+                playback_path: PathBuf::from("song.mp3"),
                 track_path: PathBuf::from("song.mp3"),
                 title: String::from("song"),
                 artist: None,
                 album: None,
+                provider_track_id: None,
                 started_at_epoch_seconds: 100,
                 playing_started_at: None,
                 listened: Duration::from_secs(40),
@@ -5043,10 +5210,12 @@ mod tests {
         let mut stats = StatsStore::default();
         let mut tracker = ListenTracker {
             active: Some(ActiveListenSession {
+                playback_path: PathBuf::from("song.mp3"),
                 track_path: PathBuf::from("song.mp3"),
                 title: String::from("song"),
                 artist: None,
                 album: None,
+                provider_track_id: None,
                 started_at_epoch_seconds: 100,
                 playing_started_at: None,
                 listened: Duration::from_secs(190),
@@ -5079,10 +5248,12 @@ mod tests {
         let mut stats = StatsStore::default();
         let mut tracker = ListenTracker {
             active: Some(ActiveListenSession {
+                playback_path: PathBuf::from("skip.mp3"),
                 track_path: PathBuf::from("skip.mp3"),
                 title: String::from("skip"),
                 artist: None,
                 album: None,
+                provider_track_id: None,
                 started_at_epoch_seconds: 100,
                 playing_started_at: None,
                 listened: Duration::from_secs(2),
@@ -5272,6 +5443,10 @@ mod tests {
             streamed_track_cache: HashMap::new(),
             pending_stream_path: None,
             remote_logical_track: None,
+            remote_track_title: None,
+            remote_track_artist: None,
+            remote_track_album: None,
+            remote_provider_track_id: None,
             last_remote_transport_origin: None,
             last_periodic_sync_at: Instant::now(),
         };
@@ -5312,6 +5487,10 @@ mod tests {
             streamed_track_cache: HashMap::new(),
             pending_stream_path: None,
             remote_logical_track: None,
+            remote_track_title: None,
+            remote_track_artist: None,
+            remote_track_album: None,
+            remote_provider_track_id: None,
             last_remote_transport_origin: None,
             last_periodic_sync_at: Instant::now(),
         };
@@ -5347,6 +5526,10 @@ mod tests {
             streamed_track_cache: HashMap::new(),
             pending_stream_path: None,
             remote_logical_track: None,
+            remote_track_title: None,
+            remote_track_artist: None,
+            remote_track_album: None,
+            remote_provider_track_id: None,
             last_remote_transport_origin: None,
             last_periodic_sync_at: Instant::now(),
         };
@@ -5388,6 +5571,10 @@ mod tests {
             streamed_track_cache: HashMap::new(),
             pending_stream_path: None,
             remote_logical_track: None,
+            remote_track_title: None,
+            remote_track_artist: None,
+            remote_track_album: None,
+            remote_provider_track_id: None,
             last_remote_transport_origin: None,
             last_periodic_sync_at: Instant::now(),
         };
@@ -5423,6 +5610,10 @@ mod tests {
             streamed_track_cache: HashMap::new(),
             pending_stream_path: None,
             remote_logical_track: None,
+            remote_track_title: None,
+            remote_track_artist: None,
+            remote_track_album: None,
+            remote_provider_track_id: None,
             last_remote_transport_origin: None,
             last_periodic_sync_at: Instant::now(),
         };
@@ -5459,6 +5650,10 @@ mod tests {
             streamed_track_cache: HashMap::new(),
             pending_stream_path: None,
             remote_logical_track: None,
+            remote_track_title: None,
+            remote_track_artist: None,
+            remote_track_album: None,
+            remote_provider_track_id: None,
             last_remote_transport_origin: None,
             last_periodic_sync_at: Instant::now(),
         };
@@ -5506,6 +5701,10 @@ mod tests {
             streamed_track_cache: HashMap::new(),
             pending_stream_path: None,
             remote_logical_track: None,
+            remote_track_title: None,
+            remote_track_artist: None,
+            remote_track_album: None,
+            remote_provider_track_id: None,
             last_remote_transport_origin: None,
             last_periodic_sync_at: Instant::now(),
         };

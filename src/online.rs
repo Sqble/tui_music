@@ -100,9 +100,25 @@ pub enum TransportCommand {
     },
     PlayTrack {
         path: PathBuf,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        artist: Option<String>,
+        #[serde(default)]
+        album: Option<String>,
+        #[serde(default)]
+        provider_track_id: Option<String>,
     },
     SetPlaybackState {
         path: PathBuf,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        artist: Option<String>,
+        #[serde(default)]
+        album: Option<String>,
+        #[serde(default)]
+        provider_track_id: Option<String>,
         position_ms: u64,
         paused: bool,
     },
