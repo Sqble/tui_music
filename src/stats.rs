@@ -262,8 +262,7 @@ impl StatsStore {
             metadata_track_key(record.artist.as_deref(), &record.title),
         ) {
             self.provider_track_key_map
-                .entry(provider.to_string())
-                .or_insert(metadata_key);
+                .insert(provider.to_string(), metadata_key);
         }
 
         let key = self.resolve_track_key(
@@ -655,9 +654,9 @@ fn migrate_store(store: &mut StatsStore) {
     let mut migrated_provider_map = HashMap::with_capacity(store.provider_track_key_map.len());
     for (provider, key) in std::mem::take(&mut store.provider_track_key_map) {
         let normalized_provider = normalize_provider_track_id(Some(&provider));
-        let normalized_key = key.trim();
+        let normalized_key = normalize_existing_track_key(key.trim());
         if let (Some(provider), false) = (normalized_provider, normalized_key.is_empty()) {
-            migrated_provider_map.insert(provider, normalized_key.to_string());
+            migrated_provider_map.insert(provider, normalized_key);
         }
     }
     for event in &store.events {
@@ -1220,5 +1219,55 @@ mod tests {
         assert_eq!(collapsed.map(|entry| entry.play_count), Some(2));
         assert_eq!(collapsed.map(|entry| entry.listen_seconds), Some(51));
         assert_eq!(store.track_totals.len(), 1);
+    }
+
+    #[test]
+    fn provider_mapping_is_rebound_to_latest_title_key() {
+        let mut store = StatsStore::default();
+        store.provider_track_key_map.insert(
+            String::from("provider:linux:/music/a.mp3"),
+            String::from("meta:sahur|tung"),
+        );
+
+        store.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("/tmp/stream-a.mp3"),
+            title: "Tung".to_string(),
+            artist: Some("Sahur".to_string()),
+            album: None,
+            provider_track_id: Some("provider:linux:/music/a.mp3".to_string()),
+            started_at_epoch_seconds: 10,
+            listened_seconds: 40,
+            completed: false,
+            duration_seconds: Some(180),
+            counted_play_override: None,
+            allow_short_listen: false,
+        });
+
+        assert_eq!(
+            store
+                .provider_track_key_map
+                .get("provider:linux:/music/a.mp3")
+                .map(String::as_str),
+            Some("meta-title:tung")
+        );
+    }
+
+    #[test]
+    fn migration_normalizes_provider_mapping_target_keys() {
+        let mut store = StatsStore::default();
+        store.provider_track_key_map.insert(
+            String::from("provider:linux:/music/a.mp3"),
+            String::from("meta:old artist|tung"),
+        );
+
+        migrate_store(&mut store);
+
+        assert_eq!(
+            store
+                .provider_track_key_map
+                .get("provider:linux:/music/a.mp3")
+                .map(String::as_str),
+            Some("meta-title:tung")
+        );
     }
 }
