@@ -605,35 +605,12 @@ fn normalize_provider_track_id(value: Option<&str>) -> Option<String> {
 }
 
 fn metadata_track_key(artist: Option<&str>, title: &str) -> Option<String> {
+    let _ = artist;
     let normalized_title = normalize_text_for_match(title);
     if normalized_title.is_empty() {
         return None;
     }
-
-    if let Some(artist) = artist {
-        let normalized_artist = normalize_artist_for_match(artist);
-        if !normalized_artist.is_empty() {
-            return Some(format!("meta:{normalized_artist}|{normalized_title}"));
-        }
-    }
-
     Some(format!("meta-title:{normalized_title}"))
-}
-
-fn normalize_artist_for_match(value: &str) -> String {
-    let without_featured = strip_featured_artists(value);
-    normalize_text_for_match(without_featured.trim())
-}
-
-fn strip_featured_artists(value: &str) -> &str {
-    let lower = value.to_ascii_lowercase();
-    let mut cut = value.len();
-    for marker in [" feat.", " feat ", " ft.", " ft ", " featuring "] {
-        if let Some(index) = lower.find(marker) {
-            cut = cut.min(index);
-        }
-    }
-    &value[..cut]
 }
 
 fn normalize_text_for_match(value: &str) -> String {
@@ -662,7 +639,7 @@ fn migrate_store(store: &mut StatsStore) {
         let target_key = event_path_metadata
             .get(&legacy_key)
             .and_then(|(artist, title)| metadata_track_key(artist.as_deref(), title))
-            .unwrap_or(legacy_key);
+            .unwrap_or_else(|| normalize_existing_track_key(&legacy_key));
         let bucket = migrated_totals
             .entry(target_key)
             .or_insert_with(TrackTotals::default);
@@ -728,6 +705,19 @@ fn event_metadata_by_path(events: &[ListenEvent]) -> HashMap<String, (Option<Str
         .into_iter()
         .map(|(path, (_, artist, title))| (path, (artist, title)))
         .collect()
+}
+
+fn normalize_existing_track_key(key: &str) -> String {
+    if key.starts_with("meta-title:") {
+        return key.to_string();
+    }
+    if let Some(rest) = key.strip_prefix("meta:")
+        && let Some((_, title)) = rest.split_once('|')
+        && !title.trim().is_empty()
+    {
+        return format!("meta-title:{}", title.trim());
+    }
+    key.to_string()
 }
 
 fn fuzzy_match(haystack: &str, needle: &str) -> bool {
@@ -1169,5 +1159,66 @@ mod tests {
         let snapshot = store.query(&StatsQuery::default(), 100);
         assert_eq!(snapshot.rows.len(), 1);
         assert_eq!(snapshot.total_plays, 2);
+    }
+
+    #[test]
+    fn same_title_merges_even_with_different_artists() {
+        let mut store = StatsStore::default();
+        store.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("/srv/music/server-copy.flac"),
+            title: "Moon (Pokemon)".to_string(),
+            artist: Some("Game OST".to_string()),
+            album: None,
+            provider_track_id: None,
+            started_at_epoch_seconds: 10,
+            listened_seconds: 35,
+            completed: false,
+            duration_seconds: Some(180),
+            counted_play_override: None,
+            allow_short_listen: false,
+        });
+        store.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("C:/music/local-copy.flac"),
+            title: "Moon (Pokemon)".to_string(),
+            artist: Some("Pokemon".to_string()),
+            album: None,
+            provider_track_id: None,
+            started_at_epoch_seconds: 20,
+            listened_seconds: 35,
+            completed: false,
+            duration_seconds: Some(180),
+            counted_play_override: None,
+            allow_short_listen: false,
+        });
+
+        let snapshot = store.query(&StatsQuery::default(), 100);
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.total_plays, 2);
+    }
+
+    #[test]
+    fn migration_collapses_old_artist_title_keys_to_title_key() {
+        let mut store = StatsStore::default();
+        store.track_totals.insert(
+            String::from("meta:game ost|moon pokemon"),
+            TrackTotals {
+                play_count: 1,
+                listen_seconds: 40,
+            },
+        );
+        store.track_totals.insert(
+            String::from("meta:pokemon|moon pokemon"),
+            TrackTotals {
+                play_count: 1,
+                listen_seconds: 11,
+            },
+        );
+
+        migrate_store(&mut store);
+
+        let collapsed = store.track_totals.get("meta-title:moon pokemon");
+        assert_eq!(collapsed.map(|entry| entry.play_count), Some(2));
+        assert_eq!(collapsed.map(|entry| entry.listen_seconds), Some(51));
+        assert_eq!(store.track_totals.len(), 1);
     }
 }

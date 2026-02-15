@@ -13,7 +13,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Single-instance behavior on Windows (new launches focus/restore existing app)
 - Automatic track advance when a song ends, including while minimized to tray (Windows)
 - Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\state.json` on Windows)
-- Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with metadata-keyed listen events/aggregates (canonical `Artist+Title`), automatic migration from legacy path-keyed totals, and provider-ID pinning for stable online mapping
+- Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with metadata-keyed listen events/aggregates (normalized title-first merge across local/online sources), automatic migration from legacy path-keyed totals, and provider-ID pinning for stable online mapping
 - Keyboard-driven TUI with actions panel search, recent actions (session-local, last 3), and overflow scrollbar
 - Right-aligned status tabs with `Tab` cycling (Library, Lyrics, Stats, Online)
 - Stats tab with totals, ASCII charts, top songs, and recent listen log (looped track replays count as separate plays)

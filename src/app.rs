@@ -45,6 +45,7 @@ const LOOP_RESTART_START_WINDOW_SECONDS: u64 = 5;
 const LOOP_RESTART_FALLBACK_MIN_PREVIOUS_SECONDS: u64 = 20;
 const ONLINE_SYNC_SEEK_THRESHOLD_PLAYING_MS: i64 = 300;
 const ONLINE_SYNC_SEEK_THRESHOLD_PAUSED_MS: i64 = 100;
+const MAX_ONLINE_EVENTS_PER_TICK: usize = 128;
 
 struct OnlineRuntime {
     network: Option<OnlineNetwork>,
@@ -2226,7 +2227,12 @@ fn drain_online_network_events(
     audio: &mut dyn AudioEngine,
     online_runtime: &mut OnlineRuntime,
 ) {
+    let mut processed = 0_usize;
     loop {
+        if processed >= MAX_ONLINE_EVENTS_PER_TICK {
+            core.dirty = true;
+            break;
+        }
         let event = {
             let Some(network) = online_runtime.network.as_ref() else {
                 return;
@@ -2236,10 +2242,17 @@ fn drain_online_network_events(
         let Some(event) = event else {
             break;
         };
+        processed = processed.saturating_add(1);
 
         match event {
             NetworkEvent::Status(message) => {
+                let disconnected = is_online_disconnect_status(&message);
                 core.status = message;
+                if disconnected {
+                    online_runtime.shutdown();
+                    online_runtime.last_transport_seq = 0;
+                    core.online_leave_room();
+                }
                 core.dirty = true;
             }
             NetworkEvent::StreamTrackReady {
@@ -2306,6 +2319,12 @@ fn drain_online_network_events(
             }
         }
     }
+}
+
+fn is_online_disconnect_status(message: &str) -> bool {
+    message == "Disconnected from online host"
+        || message.contains("Online socket read error")
+        || message.contains("Host ended session")
 }
 
 fn normalize_local_online_participant(
@@ -4849,6 +4868,16 @@ mod tests {
         assert_eq!(hint.title.as_deref(), Some("Song"));
         assert_eq!(hint.artist.as_deref(), Some("Artist"));
         assert_eq!(hint.provider_track_id.as_deref(), Some("provider:host:42"));
+    }
+
+    #[test]
+    fn online_disconnect_status_detector_matches_disconnect_messages() {
+        assert!(is_online_disconnect_status("Disconnected from online host"));
+        assert!(is_online_disconnect_status("Host ended session"));
+        assert!(is_online_disconnect_status(
+            "Online socket read error: connection reset"
+        ));
+        assert!(!is_online_disconnect_status("Remote sync drift 120ms"));
     }
 
     #[test]
