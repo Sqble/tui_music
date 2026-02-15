@@ -16,7 +16,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with listen events and aggregates
 - Keyboard-driven TUI with actions panel search, recent actions (session-local, last 3), and overflow scrollbar
 - Right-aligned status tabs with `Tab` cycling (Library, Lyrics, Stats, Online)
-- Stats tab with totals, ASCII charts, top songs, and recent listen log
+- Stats tab with totals, ASCII charts, top songs, and recent listen log (looped track replays count as separate plays)
 - Lyrics tab with live line sync from `.lrc` sidecars or embedded lyric metadata
 - Lyrics sidecars are stored in the config dir lyrics folder (`$XDG_CONFIG_HOME/tunetui/lyrics/` on Linux, `%USERPROFILE%\.config\tunetui\lyrics\` on Windows)
 - Split-pane lyrics editor in TUI (`Ctrl+e` toggle in Lyrics tab) with per-line timestamp stamping
@@ -29,7 +29,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
 - Add directory from actions panel via typed path or external folder picker (PowerShell on Windows, zenity/kdialog on Linux)
 - Remove directory from actions panel
-- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates, sub-second periodic playback-state sync (track/position/pause, including null-audio host fallback), periodic measured ping RTT updates, ping-timeout peer cleanup for abrupt disconnects, and lossless bidirectional file streaming fallback (host->listener and host<-listener over the same session socket)
+- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates, sub-second periodic playback-state sync (track/position/pause, including ping-compensated target position and a small drift deadzone to avoid micro-seeks, plus null-audio host fallback), periodic measured ping RTT updates, ping-timeout peer cleanup for abrupt disconnects, and lossless bidirectional file streaming fallback (host->listener and host<-listener over the same session socket)
 - Invite code is password-encrypted with checksum validation (secure `T2` format); host sets password first, joiner enters invite then password
 - Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
 

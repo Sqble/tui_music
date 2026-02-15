@@ -1525,7 +1525,7 @@ fn trend_label_at(trend: &TrendSeries, epoch_seconds: i64) -> String {
             .end_epoch_seconds
             .saturating_sub(trend.start_epoch_seconds)
             .max(1);
-        format_clock_label_local(epoch_seconds, span)
+        format_clock_label_local(epoch_seconds, span, trend.unit)
     } else {
         format_offset_label(
             epoch_seconds.saturating_sub(trend.start_epoch_seconds),
@@ -1534,7 +1534,11 @@ fn trend_label_at(trend: &TrendSeries, epoch_seconds: i64) -> String {
     }
 }
 
-fn format_clock_label_local(epoch_seconds: i64, span_seconds: i64) -> String {
+fn format_clock_label_local(
+    epoch_seconds: i64,
+    span_seconds: i64,
+    unit: crate::stats::TrendUnit,
+) -> String {
     let offset = local_utc_offset();
     let dt = OffsetDateTime::from_unix_timestamp(epoch_seconds)
         .unwrap_or(OffsetDateTime::UNIX_EPOCH)
@@ -1548,7 +1552,8 @@ fn format_clock_label_local(epoch_seconds: i64, span_seconds: i64) -> String {
         value => value,
     };
 
-    if span_seconds > 86_400 {
+    let include_date = span_seconds > 86_400 && !matches!(unit, crate::stats::TrendUnit::Hours);
+    if include_date {
         format!(
             "{}/{} {}:{:02}{}",
             dt.month() as u8,
@@ -1892,5 +1897,18 @@ mod tests {
     fn action_panel_scrollbar_only_when_overflow_exists() {
         assert!(list_overflows(8, 5));
         assert!(!list_overflows(5, 5));
+    }
+
+    #[test]
+    fn hour_clock_labels_omit_date_even_when_span_crosses_days() {
+        let label =
+            format_clock_label_local(1_700_000_000, 200_000, crate::stats::TrendUnit::Hours);
+        assert!(!label.contains('/'));
+    }
+
+    #[test]
+    fn day_clock_labels_include_date_for_multi_day_span() {
+        let label = format_clock_label_local(1_700_000_000, 200_000, crate::stats::TrendUnit::Days);
+        assert!(label.contains('/'));
     }
 }

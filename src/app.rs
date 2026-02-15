@@ -40,6 +40,11 @@ const VOLUME_STEP_FINE: f32 = 0.01;
 const SCRUB_SECONDS_OPTIONS: [u16; 5] = [5, 10, 15, 30, 60];
 const PARTIAL_LISTEN_FLUSH_SECONDS: u32 = 10;
 const ONLINE_DEFAULT_BIND_ADDR: &str = "0.0.0.0:7878";
+const LOOP_RESTART_END_WINDOW_SECONDS: u64 = 2;
+const LOOP_RESTART_START_WINDOW_SECONDS: u64 = 5;
+const LOOP_RESTART_FALLBACK_MIN_PREVIOUS_SECONDS: u64 = 20;
+const ONLINE_SYNC_SEEK_THRESHOLD_PLAYING_MS: i64 = 300;
+const ONLINE_SYNC_SEEK_THRESHOLD_PAUSED_MS: i64 = 100;
 
 struct OnlineRuntime {
     network: Option<OnlineNetwork>,
@@ -171,6 +176,7 @@ struct ActiveListenSession {
     listened: Duration,
     persisted_listened_seconds: u32,
     play_count_recorded: bool,
+    pending_same_track_restart: bool,
     last_position: Option<Duration>,
     duration: Option<Duration>,
 }
@@ -188,17 +194,27 @@ impl ListenTracker {
     fn tick(&mut self, core: &TuneCore, audio: &dyn AudioEngine, stats: &mut StatsStore) -> bool {
         let mut wrote_event = false;
         let current_track = audio.current_track().map(Path::to_path_buf);
+        let current_position = audio.position();
+        let crossfade_seconds = audio.crossfade_seconds();
         let paused = audio.is_paused();
 
-        let should_finalize = self
-            .active
-            .as_ref()
-            .is_some_and(|active| current_track.as_ref() != Some(&active.track_path));
+        let finished = audio.is_finished();
+        let mut force_completed = finished;
+        let should_finalize = self.active.as_ref().is_some_and(|active| {
+            let track_changed = current_track.as_ref() != Some(&active.track_path);
+            let restarted_same_track = !track_changed
+                && !finished
+                && same_track_restarted(active, current_position, paused, crossfade_seconds);
+            if restarted_same_track {
+                force_completed = true;
+            }
+            track_changed || finished || restarted_same_track
+        });
         if should_finalize {
-            wrote_event = self.finalize_active(stats) || wrote_event;
+            wrote_event = self.finalize_active(stats, force_completed) || wrote_event;
         }
 
-        if current_track.is_none() {
+        if current_track.is_none() || finished {
             return wrote_event;
         }
 
@@ -220,14 +236,19 @@ impl ListenTracker {
                 listened: Duration::ZERO,
                 persisted_listened_seconds: 0,
                 play_count_recorded: false,
-                last_position: audio.position(),
+                pending_same_track_restart: false,
+                last_position: current_position,
                 duration: audio.duration(),
             });
             return wrote_event;
         }
 
         if let Some(active) = self.active.as_mut() {
-            active.last_position = audio.position().or(active.last_position);
+            let queued_same_track = audio
+                .crossfade_queued_track()
+                .is_some_and(|queued| queued == active.track_path.as_path());
+            active.pending_same_track_restart |= queued_same_track;
+            active.last_position = current_position.or(active.last_position);
             active.duration = audio.duration().or(active.duration);
             if paused {
                 if let Some(started) = active.playing_started_at.take() {
@@ -243,7 +264,7 @@ impl ListenTracker {
         wrote_event
     }
 
-    fn finalize_active(&mut self, stats: &mut StatsStore) -> bool {
+    fn finalize_active(&mut self, stats: &mut StatsStore, force_completed: bool) -> bool {
         let mut active = match self.active.take() {
             Some(active) => active,
             None => return false,
@@ -256,8 +277,8 @@ impl ListenTracker {
         let total_listened_seconds = duration_to_recorded_seconds(active.listened);
         let listened_seconds =
             total_listened_seconds.saturating_sub(active.persisted_listened_seconds);
-        let completed =
-            active
+        let completed = force_completed
+            || active
                 .duration
                 .zip(active.last_position)
                 .is_some_and(|(duration, position)| {
@@ -326,6 +347,38 @@ impl ListenTracker {
         }
         true
     }
+}
+
+fn same_track_restarted(
+    active: &ActiveListenSession,
+    current_position: Option<Duration>,
+    paused: bool,
+    crossfade_seconds: u16,
+) -> bool {
+    if paused || !active.pending_same_track_restart {
+        return false;
+    }
+
+    let Some(current) = current_position else {
+        return false;
+    };
+    let Some(previous) = active.last_position else {
+        return false;
+    };
+    if current >= previous {
+        return false;
+    }
+
+    let start_window = Duration::from_secs(
+        LOOP_RESTART_START_WINDOW_SECONDS.max(u64::from(crossfade_seconds).saturating_add(2)),
+    );
+    let was_near_end = active.duration.is_some_and(|duration| {
+        let end_window = Duration::from_secs(LOOP_RESTART_END_WINDOW_SECONDS);
+        previous >= duration.saturating_sub(end_window)
+    }) || previous
+        >= Duration::from_secs(LOOP_RESTART_FALLBACK_MIN_PREVIOUS_SECONDS);
+    let now_near_start = current <= start_window;
+    was_near_end && now_near_start
 }
 
 fn inferred_tunetui_config_dir(
@@ -889,7 +942,7 @@ pub fn run() -> Result<()> {
         }
         if stats_enabled_last
             && !core.stats_enabled
-            && listen_tracker.finalize_active(&mut stats_store)
+            && listen_tracker.finalize_active(&mut stats_store, false)
         {
             let _ = stats::save_stats(&stats_store);
         }
@@ -1156,7 +1209,7 @@ pub fn run() -> Result<()> {
     )?;
     cleanup_tray();
     terminal.show_cursor()?;
-    if listen_tracker.finalize_active(&mut stats_store) {
+    if listen_tracker.finalize_active(&mut stats_store, false) {
         let _ = stats::save_stats(&stats_store);
     }
     online_runtime.shutdown();
@@ -2225,11 +2278,25 @@ fn apply_remote_transport(
                 .position()
                 .map(|position| position.as_millis() as i64)
                 .unwrap_or(0);
-            let target_ms = *position_ms as i64;
+            let remote_delay_ms = if *paused {
+                0_i64
+            } else {
+                core.online
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.local_participant())
+                    .map(|participant| i64::from(participant.effective_delay_ms()))
+                    .unwrap_or(0)
+            };
+            let target_ms = (*position_ms as i64).saturating_add(remote_delay_ms);
             let drift_ms = (target_ms - local_ms).abs();
-            let seek_threshold = if *paused { 80_i64 } else { 220_i64 };
+            let seek_threshold = if *paused {
+                ONLINE_SYNC_SEEK_THRESHOLD_PAUSED_MS
+            } else {
+                ONLINE_SYNC_SEEK_THRESHOLD_PLAYING_MS
+            };
             if drift_ms >= seek_threshold {
-                let _ = audio.seek_to(Duration::from_millis(*position_ms));
+                let _ = audio.seek_to(Duration::from_millis(target_ms as u64));
             }
 
             if *paused {
@@ -2240,6 +2307,9 @@ fn apply_remote_transport(
 
             online_runtime.remote_logical_track = Some(path.clone());
             core.current_queue_index = core.queue_position_for_path(path);
+            if let Some(session) = core.online.session.as_mut() {
+                session.last_sync_drift_ms = drift_ms.min(i64::from(i32::MAX)) as i32;
+            }
             core.status = format!("Remote sync drift {}ms", drift_ms);
             core.dirty = true;
         }
@@ -3950,6 +4020,30 @@ mod tests {
         }
     }
 
+    fn test_online_runtime() -> OnlineRuntime {
+        OnlineRuntime {
+            network: None,
+            local_nickname: String::from("listener"),
+            last_transport_seq: 0,
+            join_prompt_active: false,
+            join_code_input: String::new(),
+            join_prompt_button: JoinPromptButton::Join,
+            password_prompt_active: false,
+            password_prompt_mode: OnlinePasswordPromptMode::Host,
+            password_input: String::new(),
+            pending_join_invite_code: String::new(),
+            room_code_revealed: false,
+            host_invite_modal_active: false,
+            host_invite_code: String::new(),
+            host_invite_button: HostInviteModalButton::Copy,
+            streamed_track_cache: HashMap::new(),
+            pending_stream_path: None,
+            remote_logical_track: None,
+            last_remote_transport_origin: None,
+            last_periodic_sync_at: Instant::now(),
+        }
+    }
+
     impl AudioEngine for TestAudioEngine {
         fn play(&mut self, path: &Path) -> Result<()> {
             self.current = Some(path.to_path_buf());
@@ -4531,6 +4625,80 @@ mod tests {
     }
 
     #[test]
+    fn remote_sync_applies_effective_delay_to_seek_target() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(crate::online::OnlineSession::join("ROOM22", "listener"));
+        let local = core
+            .online
+            .session
+            .as_mut()
+            .and_then(|session| session.local_participant_mut())
+            .expect("local participant");
+        local.ping_ms = 80;
+        local.manual_extra_delay_ms = 40;
+        local.auto_ping_delay = true;
+
+        let mut runtime = test_online_runtime();
+        let mut audio = TestAudioEngine::new();
+        let path = PathBuf::from("song.mp3");
+        audio.current = Some(path.clone());
+        audio.position = Some(Duration::from_millis(1_000));
+        runtime.remote_logical_track = Some(path.clone());
+
+        apply_remote_transport(
+            &mut core,
+            &mut audio,
+            &mut runtime,
+            &TransportCommand::SetPlaybackState {
+                path,
+                position_ms: 1_200,
+                paused: false,
+            },
+        );
+
+        assert_eq!(audio.position, Some(Duration::from_millis(1_320)));
+        assert_eq!(
+            core.online
+                .session
+                .as_ref()
+                .map(|session| session.last_sync_drift_ms),
+            Some(320)
+        );
+    }
+
+    #[test]
+    fn remote_sync_ignores_small_playing_drift_to_reduce_micro_skips() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(crate::online::OnlineSession::join("ROOM22", "listener"));
+        let mut runtime = test_online_runtime();
+        let mut audio = TestAudioEngine::new();
+        let path = PathBuf::from("song.mp3");
+        audio.current = Some(path.clone());
+        audio.position = Some(Duration::from_millis(1_000));
+        runtime.remote_logical_track = Some(path.clone());
+
+        apply_remote_transport(
+            &mut core,
+            &mut audio,
+            &mut runtime,
+            &TransportCommand::SetPlaybackState {
+                path,
+                position_ms: 1_250,
+                paused: false,
+            },
+        );
+
+        assert_eq!(audio.position, Some(Duration::from_millis(1_000)));
+        assert_eq!(
+            core.online
+                .session
+                .as_ref()
+                .map(|session| session.last_sync_drift_ms),
+            Some(250)
+        );
+    }
+
+    #[test]
     fn listen_tracker_flushes_partial_session_while_playing() {
         let core = TuneCore::from_persisted(PersistedState::default());
         let mut stats = StatsStore::default();
@@ -4576,12 +4744,13 @@ mod tests {
                 listened: Duration::from_secs(35),
                 persisted_listened_seconds: 30,
                 play_count_recorded: false,
+                pending_same_track_restart: false,
                 last_position: Some(Duration::from_secs(200)),
                 duration: Some(Duration::from_secs(200)),
             }),
         };
 
-        assert!(tracker.finalize_active(&mut stats));
+        assert!(tracker.finalize_active(&mut stats, false));
         let snapshot = stats.query(
             &crate::stats::StatsQuery {
                 range: crate::stats::StatsRange::Lifetime,
@@ -4630,6 +4799,156 @@ mod tests {
     }
 
     #[test]
+    fn looped_same_track_counts_new_play_per_natural_restart() {
+        let core = TuneCore::from_persisted(PersistedState::default());
+        let mut stats = StatsStore::default();
+        let mut tracker = ListenTracker::default();
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("loop.mp3"));
+        audio.duration = Some(Duration::from_secs(180));
+
+        assert!(!tracker.tick(&core, &audio, &mut stats));
+        let active = tracker.active.as_mut().expect("active session");
+        active.playing_started_at = Instant::now().checked_sub(Duration::from_secs(45));
+
+        audio.finished = true;
+        assert!(tracker.tick(&core, &audio, &mut stats));
+        assert!(tracker.active.is_none());
+
+        audio.play(Path::new("loop.mp3")).expect("restart loop");
+        audio.duration = Some(Duration::from_secs(180));
+        assert!(!tracker.tick(&core, &audio, &mut stats));
+        let active = tracker
+            .active
+            .as_mut()
+            .expect("active session after restart");
+        active.playing_started_at = Instant::now().checked_sub(Duration::from_secs(37));
+
+        audio.finished = true;
+        assert!(tracker.tick(&core, &audio, &mut stats));
+
+        let snapshot = stats.query(
+            &crate::stats::StatsQuery {
+                range: crate::stats::StatsRange::Lifetime,
+                sort: crate::stats::StatsSort::ListenTime,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            1_000,
+        );
+        assert_eq!(snapshot.total_plays, 2);
+    }
+
+    #[test]
+    fn natural_finish_marks_short_track_complete_without_position_sample() {
+        let mut stats = StatsStore::default();
+        let mut tracker = ListenTracker {
+            active: Some(ActiveListenSession {
+                track_path: PathBuf::from("short.mp3"),
+                title: String::from("short"),
+                artist: None,
+                album: None,
+                started_at_epoch_seconds: 100,
+                playing_started_at: None,
+                listened: Duration::from_secs(20),
+                persisted_listened_seconds: 0,
+                play_count_recorded: false,
+                pending_same_track_restart: false,
+                last_position: None,
+                duration: Some(Duration::from_secs(20)),
+            }),
+        };
+
+        assert!(tracker.finalize_active(&mut stats, true));
+        let snapshot = stats.query(
+            &crate::stats::StatsQuery {
+                range: crate::stats::StatsRange::Lifetime,
+                sort: crate::stats::StatsSort::ListenTime,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            1_000,
+        );
+
+        assert_eq!(snapshot.total_plays, 1);
+        assert_eq!(snapshot.total_listen_seconds, 20);
+    }
+
+    #[test]
+    fn same_track_restart_near_boundary_counts_new_play_without_finished_flag() {
+        let core = TuneCore::from_persisted(PersistedState::default());
+        let mut stats = StatsStore::default();
+        let mut tracker = ListenTracker {
+            active: Some(ActiveListenSession {
+                track_path: PathBuf::from("loop.mp3"),
+                title: String::from("loop"),
+                artist: None,
+                album: None,
+                started_at_epoch_seconds: 100,
+                playing_started_at: None,
+                listened: Duration::from_secs(186),
+                persisted_listened_seconds: 186,
+                play_count_recorded: false,
+                pending_same_track_restart: true,
+                last_position: Some(Duration::from_secs(179)),
+                duration: Some(Duration::from_secs(180)),
+            }),
+        };
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("loop.mp3"));
+        audio.duration = Some(Duration::from_secs(180));
+        audio.position = Some(Duration::from_secs(1));
+        audio.finished = false;
+
+        assert!(tracker.tick(&core, &audio, &mut stats));
+        assert!(tracker.active.is_some());
+
+        let snapshot = stats.query(
+            &crate::stats::StatsQuery {
+                range: crate::stats::StatsRange::Lifetime,
+                sort: crate::stats::StatsSort::ListenTime,
+                artist_filter: String::new(),
+                album_filter: String::new(),
+                search: String::new(),
+            },
+            1_000,
+        );
+        assert_eq!(snapshot.total_plays, 1);
+    }
+
+    #[test]
+    fn same_track_seek_to_start_without_near_end_does_not_split_session() {
+        let core = TuneCore::from_persisted(PersistedState::default());
+        let mut stats = StatsStore::default();
+        let mut tracker = ListenTracker {
+            active: Some(ActiveListenSession {
+                track_path: PathBuf::from("loop.mp3"),
+                title: String::from("loop"),
+                artist: None,
+                album: None,
+                started_at_epoch_seconds: 100,
+                playing_started_at: None,
+                listened: Duration::from_secs(42),
+                persisted_listened_seconds: 42,
+                play_count_recorded: true,
+                pending_same_track_restart: false,
+                last_position: Some(Duration::from_secs(40)),
+                duration: Some(Duration::from_secs(180)),
+            }),
+        };
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("loop.mp3"));
+        audio.duration = Some(Duration::from_secs(180));
+        audio.position = Some(Duration::from_secs(2));
+        audio.finished = false;
+
+        assert!(!tracker.tick(&core, &audio, &mut stats));
+        assert!(stats.events.is_empty());
+    }
+
+    #[test]
     fn finalize_keeps_short_tail_after_partial_flush() {
         let mut stats = StatsStore::default();
         stats.record_listen(ListenSessionRecord {
@@ -4656,12 +4975,13 @@ mod tests {
                 listened: Duration::from_secs(153),
                 persisted_listened_seconds: 140,
                 play_count_recorded: true,
+                pending_same_track_restart: false,
                 last_position: Some(Duration::from_secs(153)),
                 duration: Some(Duration::from_secs(153)),
             }),
         };
 
-        assert!(tracker.finalize_active(&mut stats));
+        assert!(tracker.finalize_active(&mut stats, false));
         let snapshot = stats.query(
             &crate::stats::StatsQuery {
                 range: crate::stats::StatsRange::Lifetime,
@@ -4693,12 +5013,13 @@ mod tests {
                 listened: Duration::from_secs(40),
                 persisted_listened_seconds: 0,
                 play_count_recorded: false,
+                pending_same_track_restart: false,
                 last_position: Some(Duration::from_secs(40)),
                 duration: Some(Duration::from_secs(153)),
             }),
         };
 
-        assert!(tracker.finalize_active(&mut stats));
+        assert!(tracker.finalize_active(&mut stats, false));
         let snapshot = stats.query(
             &crate::stats::StatsQuery {
                 range: crate::stats::StatsRange::Lifetime,
@@ -4731,12 +5052,13 @@ mod tests {
                 listened: Duration::from_secs(190),
                 persisted_listened_seconds: 0,
                 play_count_recorded: false,
+                pending_same_track_restart: false,
                 last_position: Some(Duration::from_secs(153)),
                 duration: Some(Duration::from_secs(153)),
             }),
         };
 
-        assert!(tracker.finalize_active(&mut stats));
+        assert!(tracker.finalize_active(&mut stats, false));
         let snapshot = stats.query(
             &crate::stats::StatsQuery {
                 range: crate::stats::StatsRange::Lifetime,
@@ -4766,12 +5088,13 @@ mod tests {
                 listened: Duration::from_secs(2),
                 persisted_listened_seconds: 0,
                 play_count_recorded: false,
+                pending_same_track_restart: false,
                 last_position: Some(Duration::from_secs(2)),
                 duration: Some(Duration::from_secs(153)),
             }),
         };
 
-        assert!(!tracker.finalize_active(&mut stats));
+        assert!(!tracker.finalize_active(&mut stats, false));
         let snapshot = stats.query(
             &crate::stats::StatsQuery {
                 range: crate::stats::StatsRange::Lifetime,
