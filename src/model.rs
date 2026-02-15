@@ -65,6 +65,8 @@ pub struct PersistedState {
     pub selected_output_device: Option<String>,
     #[serde(default = "default_stats_enabled")]
     pub stats_enabled: bool,
+    #[serde(default = "default_online_sync_correction_threshold_ms")]
+    pub online_sync_correction_threshold_ms: u16,
 }
 
 fn default_stats_enabled() -> bool {
@@ -73,6 +75,10 @@ fn default_stats_enabled() -> bool {
 
 fn default_scrub_seconds() -> u16 {
     5
+}
+
+fn default_online_sync_correction_threshold_ms() -> u16 {
+    300
 }
 
 impl Default for PersistedState {
@@ -87,6 +93,7 @@ impl Default for PersistedState {
             theme: Theme::default(),
             selected_output_device: None,
             stats_enabled: default_stats_enabled(),
+            online_sync_correction_threshold_ms: default_online_sync_correction_threshold_ms(),
         }
     }
 }

@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use time::{OffsetDateTime, UtcOffset};
 
-const APP_TITLE_WITH_VERSION: &str = "TuneTUI v1.0.0-alpha-2  ";
+const APP_TITLE_WITH_VERSION: &str = "TuneTUI v1.0.0-alpha-3  ";
 
 pub struct ActionPanelView {
     pub title: String,
@@ -460,7 +460,7 @@ pub fn draw(
     } else if core.header_section == HeaderSection::Lyrics {
         "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: h host, j join, l leave, o mode, q quality, t hide/show code, 2 copy code, s queue, / actions"
+        "Keys: h host, j join, l leave, o mode, q quality, t hide/show code, 2 copy code, Ctrl+s queue (Library), / actions"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -852,7 +852,7 @@ fn draw_online_section(
     }
     if session.shared_queue.is_empty() {
         right_lines.push(Line::from(Span::styled(
-            "Queue empty. Press s to add current track.",
+            "Queue empty. Press Ctrl+s in Library to add selected.",
             Style::default().fg(colors.muted),
         )));
     }

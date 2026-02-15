@@ -108,6 +108,7 @@ pub struct TuneCore {
     pub dirty: bool,
     pub status: String,
     pub stats_enabled: bool,
+    pub online_sync_correction_threshold_ms: u16,
     pub stats_range: StatsRange,
     pub stats_sort: StatsSort,
     pub stats_artist_filter: String,
@@ -155,6 +156,9 @@ impl TuneCore {
             dirty: true,
             status: String::from("Ready"),
             stats_enabled: state.stats_enabled,
+            online_sync_correction_threshold_ms: normalize_online_sync_correction_threshold_ms(
+                state.online_sync_correction_threshold_ms,
+            ),
             stats_range: StatsRange::Lifetime,
             stats_sort: StatsSort::ListenTime,
             stats_artist_filter: String::new(),
@@ -191,6 +195,7 @@ impl TuneCore {
             theme: self.theme,
             selected_output_device: None,
             stats_enabled: self.stats_enabled,
+            online_sync_correction_threshold_ms: self.online_sync_correction_threshold_ms,
         }
     }
 
@@ -707,6 +712,59 @@ impl TuneCore {
             .map(|entry| entry.nickname.clone());
         session.push_shared_track(path, title.clone(), owner_nickname);
         self.set_status(&format!("Shared queue + {title}"));
+    }
+
+    pub fn selected_paths_for_online_queue_action(&self) -> Vec<PathBuf> {
+        self.selected_paths_for_playlist_action()
+    }
+
+    pub fn online_queue_paths(&mut self, paths: &[PathBuf]) -> Vec<crate::online::SharedQueueItem> {
+        if paths.is_empty() {
+            self.set_status("No selection to add to shared queue");
+            return Vec::new();
+        }
+
+        let queue_items: Vec<(PathBuf, String)> = paths
+            .iter()
+            .map(|path| {
+                let title = self
+                    .title_for_path(path)
+                    .or_else(|| {
+                        path.file_stem()
+                            .map(|name| name.to_string_lossy().to_string())
+                    })
+                    .unwrap_or_else(|| String::from("unknown"));
+                (path.clone(), title)
+            })
+            .collect();
+
+        let Some(session) = self.online.session.as_mut() else {
+            self.set_status("Join or host a room first");
+            return Vec::new();
+        };
+
+        if !session.can_local_control_playback() {
+            self.set_status("Room is host-only. Listener cannot edit queue");
+            return Vec::new();
+        }
+
+        let owner_nickname = session
+            .local_participant()
+            .map(|entry| entry.nickname.clone());
+        let mut added = Vec::with_capacity(queue_items.len());
+
+        for (path, title) in queue_items {
+            session.push_shared_track(&path, title, owner_nickname.clone());
+            if let Some(item) = session.shared_queue.last().cloned() {
+                added.push(item);
+            }
+        }
+
+        if !added.is_empty() {
+            self.set_status("added to queue");
+        }
+
+        added
     }
 
     pub fn sync_lyrics_for_track(&mut self, track: Option<&Path>) {
@@ -1455,6 +1513,10 @@ fn normalize_scrub_seconds(seconds: u16) -> u16 {
     }
 }
 
+fn normalize_online_sync_correction_threshold_ms(ms: u16) -> u16 {
+    ms.clamp(50, 1_000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1982,6 +2044,45 @@ mod tests {
             playlist.tracks,
             vec![PathBuf::from("a.mp3"), PathBuf::from("z.mp3")]
         );
+    }
+
+    #[test]
+    fn online_queue_paths_adds_playlist_selection_in_order() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online_host_room("host");
+        core.playlists.insert(
+            String::from("source"),
+            Playlist {
+                tracks: vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")],
+            },
+        );
+        core.browser_entries = vec![BrowserEntry {
+            kind: BrowserEntryKind::Playlist,
+            path: PathBuf::from("source"),
+            label: String::from("[PL] source"),
+        }];
+        core.selected_browser = 0;
+
+        let selected = core.selected_paths_for_online_queue_action();
+        assert_eq!(
+            selected,
+            vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")]
+        );
+
+        let added = core.online_queue_paths(&selected);
+
+        assert_eq!(added.len(), 2);
+        let session = core.online.session.as_ref().expect("online session");
+        let queued_paths: Vec<PathBuf> = session
+            .shared_queue
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        assert_eq!(
+            queued_paths,
+            vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")]
+        );
+        assert_eq!(core.status, "added to queue");
     }
 
     #[test]

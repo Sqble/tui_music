@@ -59,6 +59,9 @@ pub enum LocalAction {
     SetMode(crate::online::OnlineRoomMode),
     SetQuality(StreamQuality),
     QueueAdd(SharedQueueItem),
+    QueueConsume {
+        expected_path: Option<PathBuf>,
+    },
     DelayUpdate {
         manual_extra_delay_ms: u16,
         auto_ping_delay: bool,
@@ -1262,6 +1265,10 @@ fn apply_action_to_session(
     action: LocalAction,
     origin_nickname: &str,
 ) {
+    if !action_allowed_for_origin(session, &action, origin_nickname) {
+        return;
+    }
+
     match action {
         LocalAction::SetMode(mode) => session.mode = mode,
         LocalAction::SetQuality(quality) => session.quality = quality,
@@ -1270,6 +1277,16 @@ fn apply_action_to_session(
             if session.shared_queue.len() > 512 {
                 let remove = session.shared_queue.len() - 512;
                 session.shared_queue.drain(0..remove);
+            }
+        }
+        LocalAction::QueueConsume { expected_path } => {
+            let can_consume = match (session.shared_queue.first(), expected_path.as_ref()) {
+                (Some(_), None) => true,
+                (Some(next), Some(expected)) => next.path == *expected,
+                _ => false,
+            };
+            if can_consume {
+                session.shared_queue.remove(0);
             }
         }
         LocalAction::DelayUpdate {
@@ -1309,6 +1326,26 @@ fn apply_action_to_session(
             session.last_transport = Some(envelope);
         }
     }
+}
+
+fn action_allowed_for_origin(
+    session: &OnlineSession,
+    action: &LocalAction,
+    origin_nickname: &str,
+) -> bool {
+    if session.mode != crate::online::OnlineRoomMode::HostOnly {
+        return true;
+    }
+    if origin_is_host(session, origin_nickname) {
+        return true;
+    }
+    matches!(action, LocalAction::DelayUpdate { .. })
+}
+
+fn origin_is_host(session: &OnlineSession, origin_nickname: &str) -> bool {
+    session.participants.iter().any(|participant| {
+        participant.is_host && participant.nickname.eq_ignore_ascii_case(origin_nickname)
+    })
 }
 
 fn broadcast_state(peers: &mut HashMap<u32, PeerConnection>, session: &OnlineSession) {
@@ -1803,6 +1840,9 @@ enum WireAction {
     SetMode(crate::online::OnlineRoomMode),
     SetQuality(StreamQuality),
     QueueAdd(SharedQueueItem),
+    QueueConsume {
+        expected_path: Option<PathBuf>,
+    },
     DelayUpdate {
         manual_extra_delay_ms: u16,
         auto_ping_delay: bool,
@@ -1815,6 +1855,7 @@ fn action_to_wire(action: LocalAction) -> WireAction {
         LocalAction::SetMode(mode) => WireAction::SetMode(mode),
         LocalAction::SetQuality(quality) => WireAction::SetQuality(quality),
         LocalAction::QueueAdd(item) => WireAction::QueueAdd(item),
+        LocalAction::QueueConsume { expected_path } => WireAction::QueueConsume { expected_path },
         LocalAction::DelayUpdate {
             manual_extra_delay_ms,
             auto_ping_delay,
@@ -1831,6 +1872,7 @@ fn wire_to_action(action: WireAction) -> LocalAction {
         WireAction::SetMode(mode) => LocalAction::SetMode(mode),
         WireAction::SetQuality(quality) => LocalAction::SetQuality(quality),
         WireAction::QueueAdd(item) => LocalAction::QueueAdd(item),
+        WireAction::QueueConsume { expected_path } => LocalAction::QueueConsume { expected_path },
         WireAction::DelayUpdate {
             manual_extra_delay_ms,
             auto_ping_delay,
@@ -1919,6 +1961,114 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[test]
+    fn queue_consume_removes_front_when_expected_matches() {
+        let mut session = OnlineSession::host("host");
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("a.flac"),
+            title: String::from("a"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("host")),
+        });
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("b.flac"),
+            title: String::from("b"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("host")),
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::QueueConsume {
+                expected_path: Some(PathBuf::from("a.flac")),
+            },
+            "host",
+        );
+
+        assert_eq!(session.shared_queue.len(), 1);
+        assert_eq!(session.shared_queue[0].path, PathBuf::from("b.flac"));
+    }
+
+    #[test]
+    fn queue_consume_keeps_queue_when_expected_mismatch() {
+        let mut session = OnlineSession::host("host");
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("a.flac"),
+            title: String::from("a"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("host")),
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::QueueConsume {
+                expected_path: Some(PathBuf::from("b.flac")),
+            },
+            "host",
+        );
+
+        assert_eq!(session.shared_queue.len(), 1);
+        assert_eq!(session.shared_queue[0].path, PathBuf::from("a.flac"));
+    }
+
+    #[test]
+    fn host_only_blocks_listener_queue_add_network_action() {
+        let mut session = OnlineSession::host("host");
+        session.mode = crate::online::OnlineRoomMode::HostOnly;
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("listener"),
+            is_local: false,
+            is_host: false,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::QueueAdd(crate::online::SharedQueueItem {
+                path: PathBuf::from("a.flac"),
+                title: String::from("a"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("listener")),
+            }),
+            "listener",
+        );
+
+        assert!(session.shared_queue.is_empty());
+    }
+
+    #[test]
+    fn host_only_allows_listener_delay_update_network_action() {
+        let mut session = OnlineSession::host("host");
+        session.mode = crate::online::OnlineRoomMode::HostOnly;
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("listener"),
+            is_local: false,
+            is_host: false,
+            ping_ms: 12,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::DelayUpdate {
+                manual_extra_delay_ms: 75,
+                auto_ping_delay: false,
+            },
+            "listener",
+        );
+
+        let listener = session
+            .participants
+            .iter()
+            .find(|participant| participant.nickname == "listener")
+            .expect("listener participant");
+        assert_eq!(listener.manual_extra_delay_ms, 75);
+        assert!(!listener.auto_ping_delay);
     }
 
     #[test]

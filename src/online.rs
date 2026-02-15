@@ -95,6 +95,7 @@ impl Participant {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TransportCommand {
+    StopPlayback,
     SetPaused {
         paused: bool,
     },
