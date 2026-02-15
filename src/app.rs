@@ -47,6 +47,7 @@ struct OnlineRuntime {
     last_transport_seq: u64,
     join_prompt_active: bool,
     join_code_input: String,
+    join_prompt_button: JoinPromptButton,
     password_prompt_active: bool,
     password_prompt_mode: OnlinePasswordPromptMode,
     password_input: String,
@@ -74,6 +75,7 @@ impl OnlineRuntime {
         self.password_prompt_mode = OnlinePasswordPromptMode::Host;
         self.password_input.clear();
         self.pending_join_invite_code.clear();
+        self.join_prompt_button = JoinPromptButton::Join;
         self.room_code_revealed = false;
         self.host_invite_modal_active = false;
         self.host_invite_code.clear();
@@ -87,6 +89,16 @@ impl OnlineRuntime {
         Some(crate::ui::HostInviteModalView {
             invite_code: self.host_invite_code.clone(),
             copy_selected: matches!(self.host_invite_button, HostInviteModalButton::Copy),
+        })
+    }
+
+    fn join_prompt_view(&self) -> Option<crate::ui::JoinPromptModalView> {
+        if !self.join_prompt_active {
+            return None;
+        }
+        Some(crate::ui::JoinPromptModalView {
+            invite_code: self.join_code_input.clone(),
+            paste_selected: matches!(self.join_prompt_button, JoinPromptButton::Paste),
         })
     }
 
@@ -122,6 +134,21 @@ enum OnlinePasswordPromptMode {
 enum HostInviteModalButton {
     Copy,
     Ok,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinPromptButton {
+    Join,
+    Paste,
+}
+
+impl JoinPromptButton {
+    fn toggle(self) -> Self {
+        match self {
+            Self::Join => Self::Paste,
+            Self::Paste => Self::Join,
+        }
+    }
 }
 
 impl HostInviteModalButton {
@@ -836,6 +863,7 @@ pub fn run() -> Result<()> {
         last_transport_seq: 0,
         join_prompt_active: false,
         join_code_input: String::new(),
+        join_prompt_button: JoinPromptButton::Join,
         password_prompt_active: false,
         password_prompt_mode: OnlinePasswordPromptMode::Host,
         password_input: String::new(),
@@ -891,6 +919,7 @@ pub fn run() -> Result<()> {
             terminal.draw(|frame| {
                 library_rect = crate::ui::library_rect(frame.area());
                 let panel_view = action_panel.to_view(&core, &*audio, &recent_root_actions);
+                let join_prompt_modal = online_runtime.join_prompt_view();
                 let host_invite_modal = online_runtime.host_invite_modal_view();
                 let password_prompt_modal = online_runtime.password_prompt_view();
                 let stats_snapshot = (core.header_section == HeaderSection::Stats).then(|| {
@@ -912,9 +941,7 @@ pub fn run() -> Result<()> {
                     panel_view.as_ref(),
                     stats_snapshot.as_ref(),
                     crate::ui::OverlayViews {
-                        join_prompt_input: (core.header_section == HeaderSection::Online
-                            && online_runtime.join_prompt_active)
-                            .then_some(online_runtime.join_code_input.as_str()),
+                        join_prompt_modal: join_prompt_modal.as_ref(),
                         online_password_prompt: password_prompt_modal.as_ref(),
                         host_invite_modal: host_invite_modal.as_ref(),
                         room_code_revealed: online_runtime.room_code_revealed,
@@ -947,6 +974,7 @@ pub fn run() -> Result<()> {
             && online_runtime.join_prompt_active
         {
             append_invite_input(&mut online_runtime, text);
+            online_runtime.join_prompt_button = JoinPromptButton::Join;
             core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
             core.dirty = true;
             continue;
@@ -1465,35 +1493,25 @@ fn handle_online_inline_input(
             KeyCode::Esc => {
                 online_runtime.join_prompt_active = false;
                 online_runtime.join_code_input.clear();
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
                 core.status = String::from("Join cancelled");
                 core.dirty = true;
                 return true;
             }
-            KeyCode::Tab => {
-                online_runtime.join_prompt_active = false;
-                online_runtime.join_code_input.clear();
-                core.status = String::from("Join cancelled");
+            KeyCode::Tab
+            | KeyCode::BackTab
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down => {
+                online_runtime.join_prompt_button = online_runtime.join_prompt_button.toggle();
                 core.dirty = true;
-                return false;
+                return true;
             }
             KeyCode::Backspace => {
                 online_runtime.join_code_input.pop();
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
                 core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
-                core.dirty = true;
-                return true;
-            }
-            KeyCode::Char('v') | KeyCode::Char('V')
-                if !key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                match paste_invite_from_clipboard(online_runtime) {
-                    Ok(()) => {
-                        core.status =
-                            format!("Pasted invite code: {}", online_runtime.join_code_input);
-                    }
-                    Err(err) => {
-                        core.status = format!("Clipboard paste failed: {err}");
-                    }
-                }
                 core.dirty = true;
                 return true;
             }
@@ -1510,10 +1528,25 @@ fn handle_online_inline_input(
                         core.status = format!("Clipboard paste failed: {err}");
                     }
                 }
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
                 core.dirty = true;
                 return true;
             }
             KeyCode::Enter => {
+                if matches!(online_runtime.join_prompt_button, JoinPromptButton::Paste) {
+                    match paste_invite_from_clipboard(online_runtime) {
+                        Ok(()) => {
+                            core.status =
+                                format!("Pasted invite code: {}", online_runtime.join_code_input);
+                        }
+                        Err(err) => {
+                            core.status = format!("Clipboard paste failed: {err}");
+                        }
+                    }
+                    online_runtime.join_prompt_button = JoinPromptButton::Join;
+                    core.dirty = true;
+                    return true;
+                }
                 if online_runtime.join_code_input.trim().is_empty() {
                     core.status = String::from("Enter invite code, then press Enter");
                     core.dirty = true;
@@ -1523,6 +1556,7 @@ fn handle_online_inline_input(
                     online_runtime.join_code_input.trim().to_string();
                 online_runtime.join_prompt_active = false;
                 online_runtime.join_code_input.clear();
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
                 online_runtime.password_prompt_active = true;
                 online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
                 online_runtime.password_input.clear();
@@ -1532,6 +1566,7 @@ fn handle_online_inline_input(
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 append_invite_char(online_runtime, ch);
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
                 core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
                 core.dirty = true;
                 return true;
@@ -1566,6 +1601,7 @@ fn handle_online_inline_input(
             }
             if let Some(room_code_input) = optional_env("TUNETUI_ONLINE_ROOM_CODE") {
                 online_runtime.pending_join_invite_code = room_code_input;
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
                 online_runtime.password_prompt_active = true;
                 online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
                 online_runtime.password_input.clear();
@@ -1574,6 +1610,7 @@ fn handle_online_inline_input(
             } else {
                 online_runtime.join_prompt_active = true;
                 online_runtime.join_code_input.clear();
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
                 core.status = String::from("Enter invite code: ");
                 core.dirty = true;
             }
@@ -4900,6 +4937,7 @@ mod tests {
             last_transport_seq: 0,
             join_prompt_active: false,
             join_code_input: String::new(),
+            join_prompt_button: JoinPromptButton::Join,
             password_prompt_active: false,
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),
@@ -4939,6 +4977,7 @@ mod tests {
             last_transport_seq: 0,
             join_prompt_active: false,
             join_code_input: String::new(),
+            join_prompt_button: JoinPromptButton::Join,
             password_prompt_active: false,
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),
@@ -4973,6 +5012,7 @@ mod tests {
             last_transport_seq: 0,
             join_prompt_active: false,
             join_code_input: String::new(),
+            join_prompt_button: JoinPromptButton::Join,
             password_prompt_active: false,
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),
@@ -5013,6 +5053,7 @@ mod tests {
             last_transport_seq: 0,
             join_prompt_active: false,
             join_code_input: String::new(),
+            join_prompt_button: JoinPromptButton::Join,
             password_prompt_active: false,
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),
@@ -5037,6 +5078,42 @@ mod tests {
     }
 
     #[test]
+    fn join_prompt_allows_typing_v_without_triggering_paste() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = OnlineRuntime {
+            network: None,
+            local_nickname: String::from("tester"),
+            last_transport_seq: 0,
+            join_prompt_active: true,
+            join_code_input: String::from("AB"),
+            join_prompt_button: JoinPromptButton::Join,
+            password_prompt_active: false,
+            password_prompt_mode: OnlinePasswordPromptMode::Host,
+            password_input: String::new(),
+            pending_join_invite_code: String::new(),
+            room_code_revealed: false,
+            host_invite_modal_active: false,
+            host_invite_code: String::new(),
+            host_invite_button: HostInviteModalButton::Copy,
+            streamed_track_cache: HashMap::new(),
+            pending_stream_path: None,
+            remote_logical_track: None,
+            last_remote_transport_origin: None,
+            last_periodic_sync_at: Instant::now(),
+        };
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.join_code_input, "ABV");
+    }
+
+    #[test]
     fn online_tab_uppercase_commands_work_with_caps_lock() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
@@ -5047,6 +5124,7 @@ mod tests {
             last_transport_seq: 0,
             join_prompt_active: false,
             join_code_input: String::new(),
+            join_prompt_button: JoinPromptButton::Join,
             password_prompt_active: false,
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),
@@ -5093,6 +5171,7 @@ mod tests {
             last_transport_seq: 0,
             join_prompt_active: false,
             join_code_input: String::new(),
+            join_prompt_button: JoinPromptButton::Join,
             password_prompt_active: false,
             password_prompt_mode: OnlinePasswordPromptMode::Host,
             password_input: String::new(),

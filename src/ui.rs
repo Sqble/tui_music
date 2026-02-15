@@ -37,8 +37,13 @@ pub struct OnlinePasswordPromptView {
     pub masked_input: String,
 }
 
+pub struct JoinPromptModalView {
+    pub invite_code: String,
+    pub paste_selected: bool,
+}
+
 pub struct OverlayViews<'a> {
-    pub join_prompt_input: Option<&'a str>,
+    pub join_prompt_modal: Option<&'a JoinPromptModalView>,
     pub online_password_prompt: Option<&'a OnlinePasswordPromptView>,
     pub host_invite_modal: Option<&'a HostInviteModalView>,
     pub room_code_revealed: bool,
@@ -475,8 +480,8 @@ pub fn draw(
     if let Some(panel) = action_panel {
         draw_action_panel(frame, panel, &colors);
     }
-    if let Some(invite_input) = overlays.join_prompt_input {
-        draw_join_prompt(frame, invite_input, &colors);
+    if let Some(join_prompt_modal) = overlays.join_prompt_modal {
+        draw_join_prompt(frame, join_prompt_modal, &colors);
     }
     if let Some(password_prompt) = overlays.online_password_prompt {
         draw_online_password_prompt(frame, password_prompt, &colors);
@@ -486,7 +491,7 @@ pub fn draw(
     }
 }
 
-fn draw_join_prompt(frame: &mut Frame, invite_input: &str, colors: &ThemePalette) {
+fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &ThemePalette) {
     let popup = centered_rect(frame.area(), 68, 34);
     frame.render_widget(Clear, popup);
     frame.render_widget(
@@ -507,11 +512,37 @@ fn draw_join_prompt(frame: &mut Frame, invite_input: &str, colors: &ThemePalette
         Line::from(vec![
             Span::styled("Invite code", Style::default().fg(colors.muted)),
             Span::styled(": ", Style::default().fg(colors.muted)),
-            Span::styled(invite_input, Style::default().fg(colors.text)),
+            Span::styled(modal.invite_code.as_str(), Style::default().fg(colors.text)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[ Join ]",
+                if modal.paste_selected {
+                    Style::default().fg(colors.muted)
+                } else {
+                    Style::default()
+                        .fg(colors.text)
+                        .bg(colors.popup_selected_bg)
+                        .add_modifier(Modifier::BOLD)
+                },
+            ),
+            Span::raw("   "),
+            Span::styled(
+                "[ Paste clipboard ]",
+                if modal.paste_selected {
+                    Style::default()
+                        .fg(colors.text)
+                        .bg(colors.popup_selected_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(colors.muted)
+                },
+            ),
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "[Enter] Join   [V] Paste Clipboard   [Esc] Cancel",
+            "Type invite code directly. Tab/arrow selects button. Enter activates. Ctrl+V pastes.",
             Style::default()
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
