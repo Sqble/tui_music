@@ -995,7 +995,12 @@ pub fn run() -> Result<()> {
         }
 
         match key.code {
-            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break Ok(()),
+            KeyCode::Char(ch)
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && ch.eq_ignore_ascii_case(&'c') =>
+            {
+                break Ok(());
+            }
             KeyCode::Down => core.select_next(),
             KeyCode::Up => core.select_prev(),
             KeyCode::Enter => {
@@ -1019,7 +1024,7 @@ pub fn run() -> Result<()> {
                 publish_current_playback_state(&core, &*audio, &online_runtime);
                 core.dirty = true;
             }
-            KeyCode::Char('n') => {
+            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'n') => {
                 if let Some(path) = core.next_track_path() {
                     if let Err(err) = audio.play(&path) {
                         core.status = concise_audio_error(&err);
@@ -1029,7 +1034,7 @@ pub fn run() -> Result<()> {
                     }
                 }
             }
-            KeyCode::Char('b') => {
+            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'b') => {
                 if let Some(path) = core.prev_track_path() {
                     if let Err(err) = audio.play(&path) {
                         core.status = concise_audio_error(&err);
@@ -1057,12 +1062,12 @@ pub fn run() -> Result<()> {
                 }
                 core.dirty = true;
             }
-            KeyCode::Char('m') => {
+            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'m') => {
                 core.cycle_mode();
                 auto_save_state(&mut core, &*audio);
             }
             KeyCode::Tab => core.cycle_header_section(),
-            KeyCode::Char('t') => {
+            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'t') => {
                 #[cfg(windows)]
                 {
                     minimize_to_tray();
@@ -1100,8 +1105,8 @@ pub fn run() -> Result<()> {
                 core.status = format!("Volume: {}%", (next * 100.0).round() as u16);
                 core.dirty = true;
             }
-            KeyCode::Char('r') => core.rescan(),
-            KeyCode::Char('s') => {
+            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'r') => core.rescan(),
+            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'s') => {
                 if let Err(err) = save_state_with_audio(&mut core, &*audio) {
                     core.status = format!("save error: {err:#}");
                     core.dirty = true;
@@ -1247,6 +1252,14 @@ fn maybe_auto_advance_track(core: &mut TuneCore, audio: &mut dyn AudioEngine) {
     }
 }
 
+fn key_code_matches_char(code: KeyCode, expected: char) -> bool {
+    matches!(code, KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&expected))
+}
+
+fn key_event_matches_ctrl_char(key: &KeyEvent, expected: char) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL) && key_code_matches_char(key.code, expected)
+}
+
 fn handle_stats_inline_input(core: &mut TuneCore, key: KeyEvent) -> bool {
     if core.header_section != HeaderSection::Stats {
         return false;
@@ -1378,7 +1391,7 @@ fn handle_lyrics_inline_input(core: &mut TuneCore, audio: &dyn AudioEngine, key:
             _ => true,
         }
     } else {
-        if key.code == KeyCode::Char('e') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key_event_matches_ctrl_char(&key, 'e') {
             core.toggle_lyrics_mode();
             return true;
         }
@@ -1416,7 +1429,10 @@ fn handle_lyrics_inline_input(core: &mut TuneCore, audio: &dyn AudioEngine, key:
                     core.lyrics_delete_selected_line();
                     true
                 }
-                KeyCode::Char('t') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyCode::Char(ch)
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && ch.eq_ignore_ascii_case(&'t') =>
+                {
                     core.lyrics_stamp_selected_line(audio.position());
                     true
                 }
@@ -1440,7 +1456,7 @@ fn handle_online_inline_input(
         return false;
     }
 
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key_event_matches_ctrl_char(&key, 'c') {
         return false;
     }
 
@@ -1481,7 +1497,10 @@ fn handle_online_inline_input(
                 core.dirty = true;
                 return true;
             }
-            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char(ch)
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && ch.eq_ignore_ascii_case(&'v') =>
+            {
                 match paste_invite_from_clipboard(online_runtime) {
                     Ok(()) => {
                         core.status =
@@ -1526,7 +1545,7 @@ fn handle_online_inline_input(
     }
 
     match key.code {
-        KeyCode::Char('h') => {
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'h') => {
             if core.online.session.is_some() {
                 core.status = String::from("Already in online room. Press l to leave first");
                 core.dirty = true;
@@ -1539,7 +1558,7 @@ fn handle_online_inline_input(
             core.dirty = true;
             true
         }
-        KeyCode::Char('j') => {
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'j') => {
             if core.online.session.is_some() {
                 core.status = String::from("Already in online room. Press l to leave first");
                 core.dirty = true;
@@ -1560,13 +1579,13 @@ fn handle_online_inline_input(
             }
             true
         }
-        KeyCode::Char('l') => {
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'l') => {
             online_runtime.shutdown();
             online_runtime.last_transport_seq = 0;
             core.online_leave_room();
             true
         }
-        KeyCode::Char('o') => {
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'o') => {
             core.online_toggle_mode();
             if let (Some(network), Some(session)) =
                 (&online_runtime.network, core.online.session.as_ref())
@@ -1575,7 +1594,7 @@ fn handle_online_inline_input(
             }
             true
         }
-        KeyCode::Char('q') => {
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'q') => {
             core.online_cycle_quality();
             if let (Some(network), Some(session)) =
                 (&online_runtime.network, core.online.session.as_ref())
@@ -1584,7 +1603,7 @@ fn handle_online_inline_input(
             }
             true
         }
-        KeyCode::Char('t') | KeyCode::Char('T') => {
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'t') => {
             online_runtime.room_code_revealed = !online_runtime.room_code_revealed;
             core.status = if online_runtime.room_code_revealed {
                 String::from("Room code shown")
@@ -1608,7 +1627,7 @@ fn handle_online_inline_input(
             }
             true
         }
-        KeyCode::Char('s') => {
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'s') => {
             let queued_path = audio
                 .current_track()
                 .map(Path::to_path_buf)
@@ -1634,7 +1653,7 @@ fn handle_online_password_prompt_input(
     if core.header_section != HeaderSection::Online || !online_runtime.password_prompt_active {
         return false;
     }
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key_event_matches_ctrl_char(&key, 'c') {
         return false;
     }
 
@@ -1758,7 +1777,7 @@ fn handle_host_invite_modal_input(
     if !online_runtime.host_invite_modal_active {
         return false;
     }
-    if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key_event_matches_ctrl_char(&key, 'c') {
         return false;
     }
 
@@ -1779,7 +1798,7 @@ fn handle_host_invite_modal_input(
             core.dirty = true;
             true
         }
-        KeyCode::Char('c') | KeyCode::Char('C') => {
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'c') => {
             match copy_invite_to_clipboard(&online_runtime.host_invite_code) {
                 Ok(()) => {
                     core.status =
@@ -5015,6 +5034,51 @@ mod tests {
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             &mut runtime,
         ));
+    }
+
+    #[test]
+    fn online_tab_uppercase_commands_work_with_caps_lock() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = OnlineRuntime {
+            network: None,
+            local_nickname: String::from("tester"),
+            last_transport_seq: 0,
+            join_prompt_active: false,
+            join_code_input: String::new(),
+            password_prompt_active: false,
+            password_prompt_mode: OnlinePasswordPromptMode::Host,
+            password_input: String::new(),
+            pending_join_invite_code: String::new(),
+            room_code_revealed: false,
+            host_invite_modal_active: false,
+            host_invite_code: String::new(),
+            host_invite_button: HostInviteModalButton::Copy,
+            streamed_track_cache: HashMap::new(),
+            pending_stream_path: None,
+            remote_logical_track: None,
+            last_remote_transport_origin: None,
+            last_periodic_sync_at: Instant::now(),
+        };
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(runtime.password_prompt_active);
+
+        runtime.password_prompt_active = false;
+        core.online_host_room("tester");
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(core.online.session.is_none());
     }
 
     #[test]

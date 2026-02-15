@@ -545,7 +545,9 @@ impl NullAudioEngine {
     fn estimate_duration(path: &Path) -> Option<Duration> {
         let file = File::open(path).ok()?;
         let source = Decoder::try_from(file).ok()?;
-        source.total_duration()
+        source
+            .total_duration()
+            .filter(|duration| !duration.is_zero())
     }
 
     fn current_position(&self) -> Duration {
@@ -820,5 +822,30 @@ mod tests {
             !engine.is_finished(),
             "unknown-duration playback should remain active"
         );
+    }
+
+    #[test]
+    fn null_engine_zero_length_duration_does_not_pin_position_to_zero() {
+        let dir = unique_test_dir("null-engine-zero-duration");
+        let track = dir.join("zero.wav");
+        write_test_wav(&track, 0);
+
+        let mut engine = NullAudioEngine::new();
+        engine
+            .play(&track)
+            .expect("play should succeed for zero-length wav fixture");
+
+        thread::sleep(Duration::from_millis(20));
+        let position = engine.position().expect("position should be present");
+        assert!(
+            position > Duration::ZERO,
+            "logical clock should still advance when decoded duration is zero"
+        );
+        assert!(
+            !engine.is_finished(),
+            "zero-length decoded duration should be treated as unknown"
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 }
