@@ -1422,8 +1422,8 @@ fn render_square_trend_graph(
     ));
     vec![format!(
         "span {} -> {}  max {}",
-        trend_label_at(trend, trend.start_epoch_seconds),
-        trend_label_at(trend, trend.end_epoch_seconds),
+        trend_span_label_at(trend, trend.start_epoch_seconds),
+        trend_span_label_at(trend, trend.end_epoch_seconds),
         format_seconds(max_value)
     )]
     .into_iter()
@@ -1534,6 +1534,17 @@ fn trend_label_at(trend: &TrendSeries, epoch_seconds: i64) -> String {
     }
 }
 
+fn trend_span_label_at(trend: &TrendSeries, epoch_seconds: i64) -> String {
+    if trend.show_clock_time_labels {
+        format_clock_span_label_local(epoch_seconds)
+    } else {
+        format_offset_label(
+            epoch_seconds.saturating_sub(trend.start_epoch_seconds),
+            trend.unit,
+        )
+    }
+}
+
 fn format_clock_label_local(
     epoch_seconds: i64,
     span_seconds: i64,
@@ -1564,6 +1575,43 @@ fn format_clock_label_local(
         )
     } else {
         format!("{}:{:02}{}", hour12, minute, am_pm)
+    }
+}
+
+fn format_clock_span_label_local(epoch_seconds: i64) -> String {
+    let offset = local_utc_offset();
+    let dt = OffsetDateTime::from_unix_timestamp(epoch_seconds)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .to_offset(offset);
+
+    let hour24 = dt.hour();
+    let minute = dt.minute();
+    let am_pm = if hour24 < 12 { "AM" } else { "PM" };
+    let hour12 = match hour24 % 12 {
+        0 => 12,
+        value => value,
+    };
+
+    format!(
+        "{} {}/{} {}:{:02}{}",
+        weekday_short(dt.weekday()),
+        dt.month() as u8,
+        dt.day(),
+        hour12,
+        minute,
+        am_pm
+    )
+}
+
+fn weekday_short(day: time::Weekday) -> &'static str {
+    match day {
+        time::Weekday::Monday => "Mon",
+        time::Weekday::Tuesday => "Tue",
+        time::Weekday::Wednesday => "Wed",
+        time::Weekday::Thursday => "Thu",
+        time::Weekday::Friday => "Fri",
+        time::Weekday::Saturday => "Sat",
+        time::Weekday::Sunday => "Sun",
     }
 }
 
@@ -1910,5 +1958,20 @@ mod tests {
     fn day_clock_labels_include_date_for_multi_day_span() {
         let label = format_clock_label_local(1_700_000_000, 200_000, crate::stats::TrendUnit::Days);
         assert!(label.contains('/'));
+    }
+
+    #[test]
+    fn span_labels_include_weekday_and_date() {
+        let label = format_clock_span_label_local(1_700_000_000);
+        assert!(label.contains('/'));
+        assert!(
+            label.starts_with("Mon")
+                || label.starts_with("Tue")
+                || label.starts_with("Wed")
+                || label.starts_with("Thu")
+                || label.starts_with("Fri")
+                || label.starts_with("Sat")
+                || label.starts_with("Sun")
+        );
     }
 }
