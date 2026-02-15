@@ -2,6 +2,7 @@ use crate::config;
 use crate::library;
 use crate::lyrics::{self, LyricLine, LyricsDocument, LyricsSource};
 use crate::model::{PersistedState, PlaybackMode, Playlist, Theme, Track};
+use crate::online::OnlineState;
 use crate::stats::{StatsRange, StatsSort};
 use rand::SeedableRng;
 use rand::rngs::SmallRng;
@@ -107,6 +108,7 @@ pub struct TuneCore {
     pub dirty: bool,
     pub status: String,
     pub stats_enabled: bool,
+    pub online_sync_correction_threshold_ms: u16,
     pub stats_range: StatsRange,
     pub stats_sort: StatsSort,
     pub stats_artist_filter: String,
@@ -121,6 +123,7 @@ pub struct TuneCore {
     pub lyrics_selected_line: usize,
     pub lyrics_missing_prompt: bool,
     pub lyrics_creation_declined: bool,
+    pub online: OnlineState,
     duration_lookup: RefCell<HashMap<String, Option<u32>>>,
     shuffle_order: Vec<usize>,
     shuffle_cursor: usize,
@@ -153,6 +156,9 @@ impl TuneCore {
             dirty: true,
             status: String::from("Ready"),
             stats_enabled: state.stats_enabled,
+            online_sync_correction_threshold_ms: normalize_online_sync_correction_threshold_ms(
+                state.online_sync_correction_threshold_ms,
+            ),
             stats_range: StatsRange::Lifetime,
             stats_sort: StatsSort::ListenTime,
             stats_artist_filter: String::new(),
@@ -167,6 +173,7 @@ impl TuneCore {
             lyrics_selected_line: 0,
             lyrics_missing_prompt: false,
             lyrics_creation_declined: false,
+            online: OnlineState::default(),
             duration_lookup: RefCell::new(HashMap::new()),
             shuffle_order: Vec::new(),
             shuffle_cursor: 0,
@@ -188,6 +195,7 @@ impl TuneCore {
             theme: self.theme,
             selected_output_device: None,
             stats_enabled: self.stats_enabled,
+            online_sync_correction_threshold_ms: self.online_sync_correction_threshold_ms,
         }
     }
 
@@ -581,6 +589,182 @@ impl TuneCore {
         self.stats_album_filter.clear();
         self.stats_search.clear();
         self.set_status("Stats filters cleared");
+    }
+
+    pub fn online_host_room(&mut self, nickname: &str) {
+        self.online.host_room(nickname);
+        if let Some(session) = self.online.session.as_ref() {
+            self.set_status(&format!("Hosting room {}", session.room_code));
+        }
+    }
+
+    pub fn online_join_room(&mut self, room_code: &str, nickname: &str) {
+        self.online.join_room(room_code, nickname);
+        if let Some(session) = self.online.session.as_ref() {
+            self.set_status(&format!("Joined room {}", session.room_code));
+        }
+    }
+
+    pub fn online_leave_room(&mut self) {
+        if self.online.session.is_some() {
+            self.online.leave_room();
+            self.set_status("Left online room");
+        } else {
+            self.set_status("Not connected to an online room");
+        }
+    }
+
+    pub fn online_toggle_mode(&mut self) {
+        if let Some(session) = self.online.session.as_mut() {
+            session.toggle_mode();
+            let label = session.mode.label();
+            self.set_status(&format!("Room mode: {label}"));
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_cycle_quality(&mut self) {
+        if let Some(session) = self.online.session.as_mut() {
+            session.cycle_quality();
+            let label = session.quality.label();
+            self.set_status(&format!("Stream quality: {label}"));
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_toggle_auto_delay(&mut self) {
+        if let Some(session) = self.online.session.as_mut() {
+            session.toggle_local_auto_delay();
+            let status = session
+                .local_participant()
+                .is_some_and(|local| local.auto_ping_delay);
+            self.set_status(if status {
+                "Delay mode: auto ping + manual"
+            } else {
+                "Delay mode: manual only"
+            });
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_adjust_manual_delay(&mut self, delta_ms: i16) {
+        if let Some(session) = self.online.session.as_mut() {
+            session.adjust_local_manual_delay(delta_ms);
+            let message = session.local_participant().map(|local| {
+                format!(
+                    "Manual delay {}ms (effective {}ms)",
+                    local.manual_extra_delay_ms,
+                    local.effective_delay_ms()
+                )
+            });
+            if let Some(message) = message {
+                self.set_status(&message);
+            }
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_recalibrate_ping(&mut self) {
+        if let Some(session) = self.online.session.as_mut() {
+            session.recalibrate_local_ping();
+            let drift = session.last_sync_drift_ms;
+            let message = session
+                .local_participant()
+                .map(|local| format!("Ping {}ms, sync drift {}ms", local.ping_ms, drift));
+            if let Some(message) = message {
+                self.set_status(&message);
+            }
+        } else {
+            self.set_status("Join or host a room first");
+        }
+    }
+
+    pub fn online_queue_current_track(&mut self, path: Option<&Path>) {
+        let Some(path) = path else {
+            self.set_status("No active track to add to shared queue");
+            return;
+        };
+
+        let title = self
+            .title_for_path(path)
+            .or_else(|| {
+                path.file_stem()
+                    .map(|name| name.to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| String::from("unknown"));
+
+        let Some(session) = self.online.session.as_mut() else {
+            self.set_status("Join or host a room first");
+            return;
+        };
+
+        if !session.can_local_control_playback() {
+            self.set_status("Room is host-only. Listener cannot edit queue");
+            return;
+        }
+
+        let owner_nickname = session
+            .local_participant()
+            .map(|entry| entry.nickname.clone());
+        session.push_shared_track(path, title.clone(), owner_nickname);
+        self.set_status(&format!("Shared queue + {title}"));
+    }
+
+    pub fn selected_paths_for_online_queue_action(&self) -> Vec<PathBuf> {
+        self.selected_paths_for_playlist_action()
+    }
+
+    pub fn online_queue_paths(&mut self, paths: &[PathBuf]) -> Vec<crate::online::SharedQueueItem> {
+        if paths.is_empty() {
+            self.set_status("No selection to add to shared queue");
+            return Vec::new();
+        }
+
+        let queue_items: Vec<(PathBuf, String)> = paths
+            .iter()
+            .map(|path| {
+                let title = self
+                    .title_for_path(path)
+                    .or_else(|| {
+                        path.file_stem()
+                            .map(|name| name.to_string_lossy().to_string())
+                    })
+                    .unwrap_or_else(|| String::from("unknown"));
+                (path.clone(), title)
+            })
+            .collect();
+
+        let Some(session) = self.online.session.as_mut() else {
+            self.set_status("Join or host a room first");
+            return Vec::new();
+        };
+
+        if !session.can_local_control_playback() {
+            self.set_status("Room is host-only. Listener cannot edit queue");
+            return Vec::new();
+        }
+
+        let owner_nickname = session
+            .local_participant()
+            .map(|entry| entry.nickname.clone());
+        let mut added = Vec::with_capacity(queue_items.len());
+
+        for (path, title) in queue_items {
+            session.push_shared_track(&path, title, owner_nickname.clone());
+            if let Some(item) = session.shared_queue.last().cloned() {
+                added.push(item);
+            }
+        }
+
+        if !added.is_empty() {
+            self.set_status("added to queue");
+        }
+
+        added
     }
 
     pub fn sync_lyrics_for_track(&mut self, track: Option<&Path>) {
@@ -1329,6 +1513,10 @@ fn normalize_scrub_seconds(seconds: u16) -> u16 {
     }
 }
 
+fn normalize_online_sync_correction_threshold_ms(ms: u16) -> u16 {
+    ms.clamp(50, 1_000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1856,6 +2044,45 @@ mod tests {
             playlist.tracks,
             vec![PathBuf::from("a.mp3"), PathBuf::from("z.mp3")]
         );
+    }
+
+    #[test]
+    fn online_queue_paths_adds_playlist_selection_in_order() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online_host_room("host");
+        core.playlists.insert(
+            String::from("source"),
+            Playlist {
+                tracks: vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")],
+            },
+        );
+        core.browser_entries = vec![BrowserEntry {
+            kind: BrowserEntryKind::Playlist,
+            path: PathBuf::from("source"),
+            label: String::from("[PL] source"),
+        }];
+        core.selected_browser = 0;
+
+        let selected = core.selected_paths_for_online_queue_action();
+        assert_eq!(
+            selected,
+            vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")]
+        );
+
+        let added = core.online_queue_paths(&selected);
+
+        assert_eq!(added.len(), 2);
+        let session = core.online.session.as_ref().expect("online session");
+        let queued_paths: Vec<PathBuf> = session
+            .shared_queue
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        assert_eq!(
+            queued_paths,
+            vec![PathBuf::from("a.mp3"), PathBuf::from("b.mp3")]
+        );
+        assert_eq!(core.status, "added to queue");
     }
 
     #[test]

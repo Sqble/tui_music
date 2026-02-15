@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use rodio::Source;
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink};
+#[cfg(unix)]
+use std::ffi::CString;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -149,24 +151,86 @@ impl WasapiAudioEngine {
     }
 
     fn open_output_stream(output: Option<&str>) -> Result<(OutputStream, Sink)> {
-        let mut stream = if let Some(requested) = output {
-            let device = rodio::cpal::default_host()
-                .output_devices()
-                .context("failed to enumerate output devices")?
-                .find(|candidate| candidate.name().ok().as_deref() == Some(requested))
-                .with_context(|| format!("audio output device not found: {requested}"))?;
-            OutputStreamBuilder::from_device(device)
-                .context("failed to open selected output device")?
-                .with_error_callback(|_| {})
-                .open_stream_or_fallback()
-                .context("failed to start selected output stream")?
-        } else {
-            OutputStreamBuilder::from_default_device()
-                .context("failed to open default system output stream")?
-                .with_error_callback(|_| {})
-                .open_stream_or_fallback()
-                .context("failed to start default output stream")?
-        };
+        let mut stream = with_silenced_stderr(|| {
+            let host = rodio::cpal::default_host();
+            if let Some(requested) = output {
+                let device = host
+                    .output_devices()
+                    .context("failed to enumerate output devices")?
+                    .find(|candidate| candidate.name().ok().as_deref() == Some(requested))
+                    .with_context(|| format!("audio output device not found: {requested}"))?;
+                OutputStreamBuilder::from_device(device)
+                    .context("failed to open selected output device")?
+                    .with_error_callback(|_| {})
+                    .open_stream_or_fallback()
+                    .context("failed to start selected output stream")
+            } else {
+                match OutputStreamBuilder::from_default_device()
+                    .context("failed to open default system output stream")
+                    .and_then(|builder| {
+                        builder
+                            .with_error_callback(|_| {})
+                            .open_stream_or_fallback()
+                            .context("failed to start default output stream")
+                    }) {
+                    Ok(stream) => Ok(stream),
+                    Err(default_err) => {
+                        let mut candidates: Vec<String> = host
+                            .output_devices()
+                            .ok()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|device| device.name().ok())
+                            .collect();
+                        candidates.sort_by_cached_key(|name| {
+                            let lower = name.to_ascii_lowercase();
+                            let rank = if lower.contains("pulse") {
+                                0_u8
+                            } else if lower.contains("pipewire") {
+                                1_u8
+                            } else if lower.contains("default") {
+                                2_u8
+                            } else {
+                                3_u8
+                            };
+                            (rank, lower)
+                        });
+                        candidates.dedup();
+
+                        let mut started: Option<OutputStream> = None;
+                        for candidate in candidates {
+                            let device =
+                                match host.output_devices().ok().into_iter().flatten().find(
+                                    |entry| {
+                                        entry.name().ok().as_deref() == Some(candidate.as_str())
+                                    },
+                                ) {
+                                    Some(device) => device,
+                                    None => continue,
+                                };
+                            let opened = OutputStreamBuilder::from_device(device)
+                                .context("failed to open fallback output device")
+                                .and_then(|builder| {
+                                    builder
+                                        .with_error_callback(|_| {})
+                                        .open_stream_or_fallback()
+                                        .context("failed to start fallback output stream")
+                                });
+                            if let Ok(stream) = opened {
+                                started = Some(stream);
+                                break;
+                            }
+                        }
+
+                        started.with_context(|| {
+                            format!(
+                                "unable to start any audio output stream after default failed: {default_err:#}"
+                            )
+                        })
+                    }
+                }
+            }
+        })?;
         stream.log_on_drop(false);
         let sink = Sink::connect_new(stream.mixer());
         Ok((stream, sink))
@@ -355,13 +419,15 @@ impl AudioEngine for WasapiAudioEngine {
     }
 
     fn available_outputs(&self) -> Vec<String> {
-        let mut outputs: Vec<String> = rodio::cpal::default_host()
-            .output_devices()
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|device| device.name().ok())
-            .collect();
+        let mut outputs: Vec<String> = with_silenced_stderr(|| {
+            rodio::cpal::default_host()
+                .output_devices()
+                .ok()
+                .into_iter()
+                .flatten()
+                .filter_map(|device| device.name().ok())
+                .collect()
+        });
         outputs.sort_by_cached_key(|name| name.to_ascii_lowercase());
         outputs.dedup();
         outputs
@@ -421,10 +487,47 @@ impl AudioEngine for WasapiAudioEngine {
     }
 }
 
+#[cfg(unix)]
+fn with_silenced_stderr<T>(operation: impl FnOnce() -> T) -> T {
+    let saved = unsafe { libc::dup(libc::STDERR_FILENO) };
+    if saved < 0 {
+        return operation();
+    }
+
+    let devnull = CString::new("/dev/null")
+        .ok()
+        .map(|path| unsafe { libc::open(path.as_ptr(), libc::O_WRONLY) })
+        .unwrap_or(-1);
+
+    if devnull >= 0 {
+        unsafe {
+            libc::dup2(devnull, libc::STDERR_FILENO);
+            libc::close(devnull);
+        }
+    }
+
+    let result = operation();
+
+    unsafe {
+        libc::dup2(saved, libc::STDERR_FILENO);
+        libc::close(saved);
+    }
+
+    result
+}
+
+#[cfg(not(unix))]
+fn with_silenced_stderr<T>(operation: impl FnOnce() -> T) -> T {
+    operation()
+}
+
 pub struct NullAudioEngine {
     paused: bool,
     current: Option<PathBuf>,
     volume: f32,
+    started_at: Option<Instant>,
+    position_offset: Duration,
+    track_duration: Option<Duration>,
 }
 
 impl NullAudioEngine {
@@ -433,7 +536,32 @@ impl NullAudioEngine {
             paused: false,
             current: None,
             volume: 1.0,
+            started_at: None,
+            position_offset: Duration::ZERO,
+            track_duration: None,
         }
+    }
+
+    fn estimate_duration(path: &Path) -> Option<Duration> {
+        let file = File::open(path).ok()?;
+        let source = Decoder::try_from(file).ok()?;
+        source
+            .total_duration()
+            .filter(|duration| !duration.is_zero())
+    }
+
+    fn current_position(&self) -> Duration {
+        let mut position = self.position_offset;
+        if !self.paused
+            && self.current.is_some()
+            && let Some(started_at) = self.started_at
+        {
+            position = position.saturating_add(started_at.elapsed());
+        }
+        if let Some(duration) = self.track_duration {
+            return position.min(duration);
+        }
+        position
     }
 }
 
@@ -447,6 +575,9 @@ impl AudioEngine for NullAudioEngine {
     fn play(&mut self, path: &Path) -> Result<()> {
         self.paused = false;
         self.current = Some(path.to_path_buf());
+        self.started_at = Some(Instant::now());
+        self.position_offset = Duration::ZERO;
+        self.track_duration = Self::estimate_duration(path);
         Ok(())
     }
 
@@ -457,15 +588,24 @@ impl AudioEngine for NullAudioEngine {
     fn tick(&mut self) {}
 
     fn pause(&mut self) {
+        self.position_offset = self.current_position();
+        self.started_at = None;
         self.paused = true;
     }
 
     fn resume(&mut self) {
+        if self.current.is_some() {
+            self.started_at = Some(Instant::now());
+        }
         self.paused = false;
     }
 
     fn stop(&mut self) {
         self.current = None;
+        self.paused = false;
+        self.started_at = None;
+        self.position_offset = Duration::ZERO;
+        self.track_duration = None;
     }
 
     fn is_paused(&self) -> bool {
@@ -477,17 +617,27 @@ impl AudioEngine for NullAudioEngine {
     }
 
     fn position(&self) -> Option<Duration> {
-        None
+        self.current.as_ref()?;
+        Some(self.current_position())
     }
 
     fn duration(&self) -> Option<Duration> {
-        None
+        self.track_duration
     }
 
-    fn seek_to(&mut self, _position: Duration) -> Result<()> {
+    fn seek_to(&mut self, position: Duration) -> Result<()> {
         if self.current.is_none() {
             return Err(anyhow::anyhow!("no active track"));
         }
+
+        self.position_offset = self
+            .track_duration
+            .map_or(position, |duration| position.min(duration));
+        self.started_at = if self.paused {
+            None
+        } else {
+            Some(Instant::now())
+        };
         Ok(())
     }
 
@@ -536,6 +686,166 @@ impl AudioEngine for NullAudioEngine {
     }
 
     fn is_finished(&self) -> bool {
-        false
+        let Some(duration) = self.track_duration else {
+            return false;
+        };
+        self.current.is_some() && !self.paused && self.current_position() >= duration
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AudioEngine, NullAudioEngine};
+    use std::env;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::thread;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time should be valid")
+            .as_nanos();
+        let dir = env::temp_dir().join(format!("tunetui-{name}-{stamp}"));
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir
+    }
+
+    fn write_test_wav(path: &Path, duration_ms: u32) {
+        let sample_rate: u32 = 44_100;
+        let channels: u16 = 1;
+        let bits_per_sample: u16 = 16;
+        let bytes_per_sample = u32::from(bits_per_sample / 8);
+        let total_samples = (u64::from(sample_rate) * u64::from(duration_ms) / 1_000) as u32;
+        let data_size = total_samples * u32::from(channels) * bytes_per_sample;
+        let byte_rate = sample_rate * u32::from(channels) * bytes_per_sample;
+        let block_align = channels * (bits_per_sample / 8);
+        let riff_chunk_size = 36_u32.saturating_add(data_size);
+
+        let mut bytes = Vec::with_capacity((44_u32 + data_size) as usize);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&riff_chunk_size.to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&channels.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&byte_rate.to_le_bytes());
+        bytes.extend_from_slice(&block_align.to_le_bytes());
+        bytes.extend_from_slice(&bits_per_sample.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&data_size.to_le_bytes());
+        bytes.resize((44_u32 + data_size) as usize, 0_u8);
+
+        fs::write(path, bytes).expect("wav fixture should be written");
+    }
+
+    #[test]
+    fn null_engine_position_advances_when_playing() {
+        let mut engine = NullAudioEngine::new();
+        engine
+            .play(Path::new("nonexistent-track.flac"))
+            .expect("play should still work in null mode");
+        let before = engine.position().expect("position should be present");
+        thread::sleep(Duration::from_millis(20));
+        let after = engine.position().expect("position should be present");
+        assert!(after > before, "position should advance while playing");
+    }
+
+    #[test]
+    fn null_engine_pause_and_resume_control_position_progression() {
+        let mut engine = NullAudioEngine::new();
+        engine
+            .play(Path::new("nonexistent-track.flac"))
+            .expect("play should still work in null mode");
+        thread::sleep(Duration::from_millis(20));
+
+        engine.pause();
+        let paused = engine.position().expect("position should be present");
+        thread::sleep(Duration::from_millis(20));
+        let paused_later = engine.position().expect("position should be present");
+        assert_eq!(paused_later, paused, "position should freeze while paused");
+
+        engine.resume();
+        thread::sleep(Duration::from_millis(20));
+        let resumed = engine.position().expect("position should be present");
+        assert!(resumed > paused, "position should continue after resume");
+    }
+
+    #[test]
+    fn null_engine_seek_updates_position() {
+        let mut engine = NullAudioEngine::new();
+        engine
+            .play(Path::new("nonexistent-track.flac"))
+            .expect("play should still work in null mode");
+
+        let target = Duration::from_secs(12);
+        engine.seek_to(target).expect("seek should succeed");
+        let position = engine.position().expect("position should be present");
+        assert!(position >= target, "seek should move logical position");
+    }
+
+    #[test]
+    fn null_engine_finishes_when_known_duration_elapses() {
+        let dir = unique_test_dir("null-engine-duration");
+        let track = dir.join("fixture.wav");
+        write_test_wav(&track, 80);
+
+        let mut engine = NullAudioEngine::new();
+        engine
+            .play(&track)
+            .expect("play should succeed for wav fixture");
+        let duration = engine.duration().expect("duration should be detected");
+        assert!(duration >= Duration::from_millis(70));
+
+        thread::sleep(Duration::from_millis(120));
+        assert!(
+            engine.is_finished(),
+            "known-duration playback should finish"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn null_engine_unknown_duration_does_not_auto_finish() {
+        let mut engine = NullAudioEngine::new();
+        engine
+            .play(Path::new("nonexistent-track.flac"))
+            .expect("play should still work in null mode");
+        assert_eq!(engine.duration(), None);
+
+        thread::sleep(Duration::from_millis(80));
+        assert!(
+            !engine.is_finished(),
+            "unknown-duration playback should remain active"
+        );
+    }
+
+    #[test]
+    fn null_engine_zero_length_duration_does_not_pin_position_to_zero() {
+        let dir = unique_test_dir("null-engine-zero-duration");
+        let track = dir.join("zero.wav");
+        write_test_wav(&track, 0);
+
+        let mut engine = NullAudioEngine::new();
+        engine
+            .play(&track)
+            .expect("play should succeed for zero-length wav fixture");
+
+        thread::sleep(Duration::from_millis(20));
+        let position = engine.position().expect("position should be present");
+        assert!(
+            position > Duration::ZERO,
+            "logical clock should still advance when decoded duration is zero"
+        );
+        assert!(
+            !engine.is_finished(),
+            "zero-length decoded duration should be treated as unknown"
+        );
+
+        let _ = fs::remove_dir_all(dir);
     }
 }

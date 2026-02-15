@@ -5,6 +5,7 @@ use crate::core::LyricsMode;
 use crate::core::StatsFilterFocus;
 use crate::core::TuneCore;
 use crate::model::Theme;
+use crate::online::OnlineSession;
 use crate::stats::{ListenEvent, StatsRange, StatsSnapshot, StatsSort, TrendSeries};
 use ratatui::prelude::*;
 use ratatui::widgets::{
@@ -15,7 +16,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 use time::{OffsetDateTime, UtcOffset};
 
-const APP_TITLE_WITH_VERSION: &str = "TuneTUI v1.0.0-alpha-2  ";
+const APP_TITLE_WITH_VERSION: &str = "TuneTUI v1.0.0-alpha-3  ";
 
 pub struct ActionPanelView {
     pub title: String,
@@ -23,6 +24,29 @@ pub struct ActionPanelView {
     pub search_query: Option<String>,
     pub options: Vec<String>,
     pub selected: usize,
+}
+
+pub struct HostInviteModalView {
+    pub invite_code: String,
+    pub copy_selected: bool,
+}
+
+pub struct OnlinePasswordPromptView {
+    pub title: String,
+    pub subtitle: String,
+    pub masked_input: String,
+}
+
+pub struct JoinPromptModalView {
+    pub invite_code: String,
+    pub paste_selected: bool,
+}
+
+pub struct OverlayViews<'a> {
+    pub join_prompt_modal: Option<&'a JoinPromptModalView>,
+    pub online_password_prompt: Option<&'a OnlinePasswordPromptView>,
+    pub host_invite_modal: Option<&'a HostInviteModalView>,
+    pub room_code_revealed: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -172,6 +196,7 @@ pub fn draw(
     audio: &dyn AudioEngine,
     action_panel: Option<&ActionPanelView>,
     stats_snapshot: Option<&StatsSnapshot>,
+    overlays: OverlayViews<'_>,
 ) {
     let colors = palette(core.theme);
     frame.render_widget(
@@ -218,6 +243,19 @@ pub fn draw(
         Span::styled(
             format!("Mode {:?}", core.playback_mode),
             Style::default().fg(colors.alert),
+        ),
+        Span::styled("  |  ", Style::default().fg(colors.muted)),
+        Span::styled(
+            if core.online.session.is_some() {
+                "Online LIVE"
+            } else {
+                "Online OFF"
+            },
+            Style::default().fg(if core.online.session.is_some() {
+                colors.accent
+            } else {
+                colors.muted
+            }),
         ),
     ]));
     frame.render_widget(header_left, header_chunks[0]);
@@ -398,13 +436,7 @@ pub fn draw(
                 draw_lyrics_section(frame, &body, colors, core, audio);
             }
             HeaderSection::Online => {
-                draw_placeholder_section(
-                    frame,
-                    &body,
-                    colors,
-                    "Online",
-                    "Online features are coming soon. Press Tab for Stats.",
-                );
+                draw_online_section(frame, &body, colors, core, overlays.room_code_revealed);
             }
         }
     }
@@ -427,6 +459,8 @@ pub fn draw(
         "Keys: Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top, Tab tabs"
     } else if core.header_section == HeaderSection::Lyrics {
         "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
+    } else if core.header_section == HeaderSection::Online {
+        "Keys: h host, j join, l leave, o mode, q quality, t hide/show code, 2 copy code, Ctrl+s queue (Library), / actions"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -446,6 +480,175 @@ pub fn draw(
     if let Some(panel) = action_panel {
         draw_action_panel(frame, panel, &colors);
     }
+    if let Some(join_prompt_modal) = overlays.join_prompt_modal {
+        draw_join_prompt(frame, join_prompt_modal, &colors);
+    }
+    if let Some(password_prompt) = overlays.online_password_prompt {
+        draw_online_password_prompt(frame, password_prompt, &colors);
+    }
+    if let Some(host_invite_modal) = overlays.host_invite_modal {
+        draw_host_invite_modal(frame, host_invite_modal, &colors);
+    }
+}
+
+fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &ThemePalette) {
+    let popup = centered_rect(frame.area(), 68, 34);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        panel_block(
+            "Join Online Room",
+            colors.popup_bg,
+            colors.text,
+            colors.border,
+        ),
+        popup,
+    );
+
+    let inner = popup.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Invite code", Style::default().fg(colors.muted)),
+            Span::styled(": ", Style::default().fg(colors.muted)),
+            Span::styled(modal.invite_code.as_str(), Style::default().fg(colors.text)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[ Join ]",
+                if modal.paste_selected {
+                    Style::default().fg(colors.muted)
+                } else {
+                    Style::default()
+                        .fg(colors.text)
+                        .bg(colors.popup_selected_bg)
+                        .add_modifier(Modifier::BOLD)
+                },
+            ),
+            Span::raw("   "),
+            Span::styled(
+                "[ Paste clipboard ]",
+                if modal.paste_selected {
+                    Style::default()
+                        .fg(colors.text)
+                        .bg(colors.popup_selected_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(colors.muted)
+                },
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Type invite code directly. Tab/arrow selects button. Enter activates. Ctrl+V pastes.",
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+}
+
+fn draw_online_password_prompt(
+    frame: &mut Frame,
+    prompt: &OnlinePasswordPromptView,
+    colors: &ThemePalette,
+) {
+    let popup = centered_rect(frame.area(), 58, 34);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        panel_block(&prompt.title, colors.popup_bg, colors.text, colors.border),
+        popup,
+    );
+    let inner = popup.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let masked = if prompt.masked_input.is_empty() {
+        String::from("(empty)")
+    } else {
+        prompt.masked_input.clone()
+    };
+    let lines = vec![
+        Line::from(Span::styled(
+            prompt.subtitle.as_str(),
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(masked, Style::default().fg(colors.accent))),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Press Enter to continue, Esc to cancel.",
+            Style::default().fg(colors.muted),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+fn draw_host_invite_modal(frame: &mut Frame, modal: &HostInviteModalView, colors: &ThemePalette) {
+    let popup = centered_rect(frame.area(), 54, 36);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        panel_block("Room Ready", colors.popup_bg, colors.text, colors.border),
+        popup,
+    );
+
+    let inner = popup.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let copy_style = if modal.copy_selected {
+        Style::default()
+            .fg(colors.text)
+            .bg(colors.popup_selected_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(colors.muted)
+    };
+    let ok_style = if modal.copy_selected {
+        Style::default().fg(colors.muted)
+    } else {
+        Style::default()
+            .fg(colors.text)
+            .bg(colors.popup_selected_bg)
+            .add_modifier(Modifier::BOLD)
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(
+            "Share this invite code",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            modal.invite_code.as_str(),
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled("[ Copy to clipboard ]", copy_style)),
+        Line::from(""),
+        Line::from(Span::styled("[ OK ]", ok_style)),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Use Up/Down or Tab. Enter activates selected button.",
+            Style::default().fg(colors.muted),
+        )),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
 }
 
 fn header_section_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'static> {
@@ -518,6 +721,191 @@ fn draw_placeholder_section(
         )),
         body[1],
     );
+}
+
+fn draw_online_section(
+    frame: &mut Frame,
+    body: &[Rect],
+    colors: ThemePalette,
+    core: &TuneCore,
+    room_code_revealed: bool,
+) {
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(Rect {
+            x: body[0].x,
+            y: body[0].y,
+            width: body[0].width.saturating_add(body[1].width),
+            height: body[0].height.max(body[1].height),
+        });
+
+    let Some(session) = core.online.session.as_ref() else {
+        draw_placeholder_section(
+            frame,
+            body,
+            colors,
+            "Online",
+            "No room connected. Press h to host or j to join.",
+        );
+        return;
+    };
+
+    let code_display = if room_code_revealed {
+        session.room_code.clone()
+    } else {
+        String::from("[hidden]")
+    };
+
+    let mut left_lines = vec![Line::from(vec![
+        Span::styled("Mode ", Style::default().fg(colors.muted)),
+        Span::styled(session.mode.label(), Style::default().fg(colors.text)),
+        Span::styled("  |  Stream ", Style::default().fg(colors.muted)),
+        Span::styled(session.quality.label(), Style::default().fg(colors.alert)),
+    ])];
+
+    left_lines.push(Line::from(vec![
+        Span::styled("Room code ", Style::default().fg(colors.muted)),
+        Span::styled(
+            code_display,
+            Style::default()
+                .fg(colors.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "  [t] show/hide  [2] copy",
+            Style::default().fg(colors.muted),
+        ),
+    ]));
+
+    left_lines.push(Line::from(Span::styled(
+        format!(
+            "Peers {}  Shared queue {}  Drift {}ms",
+            session.participants.len(),
+            session.shared_queue.len(),
+            session.last_sync_drift_ms
+        ),
+        Style::default().fg(colors.muted),
+    )));
+
+    if let Some(local) = session.local_participant() {
+        left_lines.push(Line::from(Span::styled(
+            format!(
+                "You {}  ping {}ms  manual {}ms  effective {}ms  auto {}",
+                local.nickname,
+                local.ping_ms,
+                local.manual_extra_delay_ms,
+                local.effective_delay_ms(),
+                if local.auto_ping_delay { "on" } else { "off" }
+            ),
+            Style::default().fg(colors.text),
+        )));
+    }
+
+    left_lines.push(Line::from(""));
+    left_lines.push(Line::from(Span::styled(
+        "Participants",
+        Style::default()
+            .fg(colors.text)
+            .add_modifier(Modifier::BOLD),
+    )));
+    for participant in &session.participants {
+        left_lines.push(Line::from(Span::styled(
+            participant_line(participant, session),
+            Style::default().fg(colors.text),
+        )));
+    }
+
+    let left = Paragraph::new(left_lines)
+        .block(panel_block(
+            "Online Session",
+            colors.panel_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(left, horizontal[0]);
+
+    let mut right_lines = vec![Line::from(Span::styled(
+        "Shared Queue",
+        Style::default()
+            .fg(colors.text)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    for (index, item) in session.shared_queue.iter().rev().take(10).enumerate() {
+        let owner_suffix = item
+            .owner_nickname
+            .as_deref()
+            .filter(|owner| !owner.is_empty())
+            .map(|owner| format!(" @{}", truncate_for_line(owner, 12)))
+            .unwrap_or_default();
+        right_lines.push(Line::from(Span::styled(
+            format!(
+                "{:>2}. {}{} [{}]",
+                index + 1,
+                truncate_for_line(&item.title, 28),
+                owner_suffix,
+                item.delivery.label()
+            ),
+            Style::default().fg(colors.muted),
+        )));
+    }
+    if session.shared_queue.is_empty() {
+        right_lines.push(Line::from(Span::styled(
+            "Queue empty. Press Ctrl+s in Library to add selected.",
+            Style::default().fg(colors.muted),
+        )));
+    }
+    right_lines.push(Line::from(""));
+    right_lines.push(Line::from(Span::styled(
+        "Networking",
+        Style::default()
+            .fg(colors.text)
+            .add_modifier(Modifier::BOLD),
+    )));
+    right_lines.push(Line::from(Span::styled(
+        "Direct TCP peer session active (host/client with room code handshake).",
+        Style::default().fg(colors.muted),
+    )));
+    right_lines.push(Line::from(Span::styled(
+        "Stream fallback works both directions over the existing room socket.",
+        Style::default().fg(colors.muted),
+    )));
+
+    let right = Paragraph::new(right_lines)
+        .block(panel_block(
+            "Room Data",
+            colors.panel_alt_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(right, horizontal[1]);
+}
+
+fn participant_line(participant: &crate::online::Participant, session: &OnlineSession) -> String {
+    let mut parts = Vec::with_capacity(5);
+    if participant.is_local {
+        parts.push(String::from("you"));
+    }
+    if participant.is_host {
+        parts.push(String::from("host"));
+    }
+    if session.mode == crate::online::OnlineRoomMode::HostOnly && !participant.is_host {
+        parts.push(String::from("listen-only"));
+    }
+    let tags = if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", parts.join(", "))
+    };
+    format!(
+        "- {}{}  ping {}ms  delay {}ms",
+        participant.nickname,
+        tags,
+        participant.ping_ms,
+        participant.effective_delay_ms()
+    )
 }
 
 fn draw_lyrics_section(
@@ -1034,8 +1422,8 @@ fn render_square_trend_graph(
     ));
     vec![format!(
         "span {} -> {}  max {}",
-        trend_label_at(trend, trend.start_epoch_seconds),
-        trend_label_at(trend, trend.end_epoch_seconds),
+        trend_span_label_at(trend, trend.start_epoch_seconds),
+        trend_span_label_at(trend, trend.end_epoch_seconds),
         format_seconds(max_value)
     )]
     .into_iter()
@@ -1137,7 +1525,7 @@ fn trend_label_at(trend: &TrendSeries, epoch_seconds: i64) -> String {
             .end_epoch_seconds
             .saturating_sub(trend.start_epoch_seconds)
             .max(1);
-        format_clock_label_local(epoch_seconds, span)
+        format_clock_label_local(epoch_seconds, span, trend.unit)
     } else {
         format_offset_label(
             epoch_seconds.saturating_sub(trend.start_epoch_seconds),
@@ -1146,7 +1534,22 @@ fn trend_label_at(trend: &TrendSeries, epoch_seconds: i64) -> String {
     }
 }
 
-fn format_clock_label_local(epoch_seconds: i64, span_seconds: i64) -> String {
+fn trend_span_label_at(trend: &TrendSeries, epoch_seconds: i64) -> String {
+    if trend.show_clock_time_labels {
+        format_clock_span_label_local(epoch_seconds)
+    } else {
+        format_offset_label(
+            epoch_seconds.saturating_sub(trend.start_epoch_seconds),
+            trend.unit,
+        )
+    }
+}
+
+fn format_clock_label_local(
+    epoch_seconds: i64,
+    span_seconds: i64,
+    unit: crate::stats::TrendUnit,
+) -> String {
     let offset = local_utc_offset();
     let dt = OffsetDateTime::from_unix_timestamp(epoch_seconds)
         .unwrap_or(OffsetDateTime::UNIX_EPOCH)
@@ -1160,7 +1563,8 @@ fn format_clock_label_local(epoch_seconds: i64, span_seconds: i64) -> String {
         value => value,
     };
 
-    if span_seconds > 86_400 {
+    let include_date = span_seconds > 86_400 && !matches!(unit, crate::stats::TrendUnit::Hours);
+    if include_date {
         format!(
             "{}/{} {}:{:02}{}",
             dt.month() as u8,
@@ -1171,6 +1575,43 @@ fn format_clock_label_local(epoch_seconds: i64, span_seconds: i64) -> String {
         )
     } else {
         format!("{}:{:02}{}", hour12, minute, am_pm)
+    }
+}
+
+fn format_clock_span_label_local(epoch_seconds: i64) -> String {
+    let offset = local_utc_offset();
+    let dt = OffsetDateTime::from_unix_timestamp(epoch_seconds)
+        .unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        .to_offset(offset);
+
+    let hour24 = dt.hour();
+    let minute = dt.minute();
+    let am_pm = if hour24 < 12 { "AM" } else { "PM" };
+    let hour12 = match hour24 % 12 {
+        0 => 12,
+        value => value,
+    };
+
+    format!(
+        "{} {}/{} {}:{:02}{}",
+        weekday_short(dt.weekday()),
+        dt.month() as u8,
+        dt.day(),
+        hour12,
+        minute,
+        am_pm
+    )
+}
+
+fn weekday_short(day: time::Weekday) -> &'static str {
+    match day {
+        time::Weekday::Monday => "Mon",
+        time::Weekday::Tuesday => "Tue",
+        time::Weekday::Wednesday => "Wed",
+        time::Weekday::Thursday => "Thu",
+        time::Weekday::Friday => "Fri",
+        time::Weekday::Saturday => "Sat",
+        time::Weekday::Sunday => "Sun",
     }
 }
 
@@ -1504,5 +1945,33 @@ mod tests {
     fn action_panel_scrollbar_only_when_overflow_exists() {
         assert!(list_overflows(8, 5));
         assert!(!list_overflows(5, 5));
+    }
+
+    #[test]
+    fn hour_clock_labels_omit_date_even_when_span_crosses_days() {
+        let label =
+            format_clock_label_local(1_700_000_000, 200_000, crate::stats::TrendUnit::Hours);
+        assert!(!label.contains('/'));
+    }
+
+    #[test]
+    fn day_clock_labels_include_date_for_multi_day_span() {
+        let label = format_clock_label_local(1_700_000_000, 200_000, crate::stats::TrendUnit::Days);
+        assert!(label.contains('/'));
+    }
+
+    #[test]
+    fn span_labels_include_weekday_and_date() {
+        let label = format_clock_span_label_local(1_700_000_000);
+        assert!(label.contains('/'));
+        assert!(
+            label.starts_with("Mon")
+                || label.starts_with("Tue")
+                || label.starts_with("Wed")
+                || label.starts_with("Thu")
+                || label.starts_with("Fri")
+                || label.starts_with("Sat")
+                || label.starts_with("Sun")
+        );
     }
 }

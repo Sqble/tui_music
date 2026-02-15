@@ -5,5 +5,7 @@ pub mod core;
 pub mod library;
 pub mod lyrics;
 pub mod model;
+pub mod online;
+pub mod online_net;
 pub mod stats;
 pub mod ui;
