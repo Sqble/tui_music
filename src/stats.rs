@@ -399,7 +399,6 @@ impl StatsStore {
         let mut recent: Vec<ListenEvent> = recent.into_values().collect();
         recent.sort_by(|a, b| b.started_at_epoch_seconds.cmp(&a.started_at_epoch_seconds));
         let trend = build_trend_series(query.range, query.sort, now_epoch_seconds, &recent);
-        recent.truncate(12);
 
         StatsSnapshot {
             total_plays,
@@ -444,15 +443,18 @@ fn build_trend_series(
 ) -> TrendSeries {
     let day = 86_400_i64;
     let week = day * 7;
-    let default_start = range_start_epoch(range, now_epoch_seconds)
-        .unwrap_or(now_epoch_seconds.saturating_sub(week * 12));
+    let range_start = range_start_epoch(range, now_epoch_seconds);
+    let default_start = range_start.unwrap_or(now_epoch_seconds.saturating_sub(week * 12));
     let default_end = now_epoch_seconds.max(default_start + 1);
 
-    let start = events
-        .iter()
-        .map(|event| event.started_at_epoch_seconds)
-        .min()
-        .unwrap_or(default_start);
+    let start = match range {
+        StatsRange::Today | StatsRange::Days7 | StatsRange::Days30 => default_start,
+        StatsRange::Lifetime => events
+            .iter()
+            .map(|event| event.started_at_epoch_seconds)
+            .min()
+            .unwrap_or(default_start),
+    };
     let mut end = events
         .iter()
         .map(|event| event.started_at_epoch_seconds)
@@ -954,7 +956,7 @@ mod tests {
             counted_play: true,
         }];
 
-        let trend = build_trend_series(StatsRange::Today, StatsSort::ListenTime, 95, &events);
+        let trend = build_trend_series(StatsRange::Lifetime, StatsSort::ListenTime, 95, &events);
 
         assert_eq!(trend.unit, TrendUnit::Minutes);
         assert_eq!(trend.end_epoch_seconds, 95);
@@ -973,7 +975,7 @@ mod tests {
             counted_play: true,
         }];
 
-        let trend = build_trend_series(StatsRange::Today, StatsSort::ListenTime, 70, &events);
+        let trend = build_trend_series(StatsRange::Lifetime, StatsSort::ListenTime, 70, &events);
 
         assert_eq!(trend.unit, TrendUnit::Minutes);
         assert_eq!(trend.end_epoch_seconds, 60);
@@ -992,7 +994,7 @@ mod tests {
             counted_play: true,
         }];
 
-        let trend = build_trend_series(StatsRange::Today, StatsSort::ListenTime, 4_740, &events);
+        let trend = build_trend_series(StatsRange::Lifetime, StatsSort::ListenTime, 4_740, &events);
 
         assert_eq!(trend.unit, TrendUnit::Minutes);
         assert_eq!(trend.buckets.iter().copied().max().unwrap_or(0), 60);
@@ -1015,10 +1017,80 @@ mod tests {
             });
         }
 
-        let trend = build_trend_series(StatsRange::Today, StatsSort::ListenTime, 21_000, &events);
+        let trend =
+            build_trend_series(StatsRange::Lifetime, StatsSort::ListenTime, 21_000, &events);
 
         assert_eq!(trend.unit, TrendUnit::Minutes);
         assert!(trend.buckets.iter().copied().max().unwrap_or(0) <= 60);
+    }
+
+    #[test]
+    fn today_trend_starts_one_day_before_now_even_with_recent_events_only() {
+        let now = 2_000_000;
+        let events = vec![ListenEvent {
+            track_path: PathBuf::from("C:/music/A.mp3"),
+            title: "A".to_string(),
+            artist: None,
+            album: None,
+            provider_track_id: None,
+            started_at_epoch_seconds: now - 600,
+            listened_seconds: 120,
+            counted_play: true,
+        }];
+
+        let trend = build_trend_series(StatsRange::Today, StatsSort::ListenTime, now, &events);
+        assert_eq!(trend.start_epoch_seconds, now - 86_400);
+    }
+
+    #[test]
+    fn day_ranges_start_at_fixed_window_offsets() {
+        let now = 3_000_000;
+        let events = vec![ListenEvent {
+            track_path: PathBuf::from("C:/music/A.mp3"),
+            title: "A".to_string(),
+            artist: None,
+            album: None,
+            provider_track_id: None,
+            started_at_epoch_seconds: now - 1_200,
+            listened_seconds: 90,
+            counted_play: true,
+        }];
+
+        let trend_7d = build_trend_series(StatsRange::Days7, StatsSort::ListenTime, now, &events);
+        let trend_30d = build_trend_series(StatsRange::Days30, StatsSort::ListenTime, now, &events);
+
+        assert_eq!(trend_7d.start_epoch_seconds, now - (86_400 * 7));
+        assert_eq!(trend_30d.start_epoch_seconds, now - (86_400 * 30));
+    }
+
+    #[test]
+    fn lifetime_trend_starts_at_first_event() {
+        let now = 4_000_000;
+        let events = vec![
+            ListenEvent {
+                track_path: PathBuf::from("C:/music/A.mp3"),
+                title: "A".to_string(),
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                started_at_epoch_seconds: now - 50_000,
+                listened_seconds: 90,
+                counted_play: true,
+            },
+            ListenEvent {
+                track_path: PathBuf::from("C:/music/B.mp3"),
+                title: "B".to_string(),
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                started_at_epoch_seconds: now - 400,
+                listened_seconds: 120,
+                counted_play: true,
+            },
+        ];
+
+        let trend = build_trend_series(StatsRange::Lifetime, StatsSort::ListenTime, now, &events);
+        assert_eq!(trend.start_epoch_seconds, now - 50_000);
     }
 
     #[test]

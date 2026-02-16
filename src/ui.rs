@@ -7,16 +7,20 @@ use crate::core::TuneCore;
 use crate::model::Theme;
 use crate::online::OnlineSession;
 use crate::stats::{ListenEvent, StatsRange, StatsSnapshot, StatsSort, TrendSeries};
+use image::imageops::FilterType;
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use time::{OffsetDateTime, UtcOffset};
 
-const APP_TITLE_WITH_VERSION: &str = "TuneTUI v1.0.0-alpha-3  ";
+const APP_TITLE: &str = "TuneTUI";
+const APP_VERSION: &str = "v1.0.0-alpha-3";
 
 pub struct ActionPanelView {
     pub title: String,
@@ -214,27 +218,26 @@ pub fn draw(
         ])
         .split(frame.area());
 
-    frame.render_widget(
-        panel_block("Status", colors.panel_bg, colors.text, colors.border),
-        vertical[0],
-    );
+    frame.render_widget(status_panel_block(&colors), vertical[0]);
 
     let header_inner = vertical[0].inner(Margin {
         vertical: 0,
         horizontal: 1,
     });
+    let tabs_width = header_tabs_width().min(header_inner.width.saturating_sub(1));
     let header_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .constraints([Constraint::Min(0), Constraint::Length(tabs_width)])
         .split(header_inner);
 
     let header_left = Paragraph::new(Line::from(vec![
         Span::styled(
-            APP_TITLE_WITH_VERSION,
+            APP_TITLE,
             Style::default()
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled("  ", Style::default().fg(colors.muted)),
         Span::styled(
             format!("Tracks {}", core.tracks.len()),
             Style::default().fg(colors.text),
@@ -247,9 +250,9 @@ pub fn draw(
         Span::styled("  |  ", Style::default().fg(colors.muted)),
         Span::styled(
             if core.online.session.is_some() {
-                "Online LIVE"
+                "ONLINE"
             } else {
-                "Online OFF"
+                "OFFLINE"
             },
             Style::default().fg(if core.online.session.is_some() {
                 colors.accent
@@ -260,8 +263,8 @@ pub fn draw(
     ]));
     frame.render_widget(header_left, header_chunks[0]);
 
-    let header_right = Paragraph::new(header_section_line(core.header_section, &colors))
-        .alignment(Alignment::Right);
+    let header_right =
+        Paragraph::new(header_tabs_line(core.header_section, &colors)).alignment(Alignment::Right);
     frame.render_widget(header_right, header_chunks[1]);
 
     let body = Layout::default()
@@ -417,15 +420,46 @@ pub fn draw(
                 Style::default().fg(colors.muted),
             )),
         ];
-        let info_block = Paragraph::new(info_text)
-            .block(panel_block(
-                "Song Info",
-                colors.panel_alt_bg,
-                colors.text,
-                colors.border,
-            ))
-            .wrap(Wrap { trim: true });
-        frame.render_widget(info_block, body[1]);
+
+        frame.render_widget(
+            panel_block("Song Info", colors.panel_alt_bg, colors.text, colors.border),
+            body[1],
+        );
+
+        let info_inner = body[1].inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        if info_inner.width > 0 && info_inner.height > 0 {
+            let details_height = info_inner.height.min(9);
+            let cover_height = info_inner.height.saturating_sub(details_height);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(cover_height),
+                    Constraint::Length(details_height),
+                ])
+                .split(info_inner);
+
+            if chunks[0].height > 0 {
+                let cover_lines = now_playing
+                    .and_then(|path| {
+                        cover_art_lines_for_path(path, core, chunks[0].width, chunks[0].height)
+                    })
+                    .unwrap_or_else(|| cover_placeholder_lines(chunks[0].width, chunks[0].height));
+                frame.render_widget(
+                    Paragraph::new(cover_lines).style(Style::default().fg(colors.muted)),
+                    chunks[0],
+                );
+            }
+
+            if chunks[1].height > 0 {
+                frame.render_widget(
+                    Paragraph::new(info_text).wrap(Wrap { trim: true }),
+                    chunks[1],
+                );
+            }
+        }
     } else {
         match core.header_section {
             HeaderSection::Library => {}
@@ -651,14 +685,8 @@ fn draw_host_invite_modal(frame: &mut Frame, modal: &HostInviteModalView, colors
     );
 }
 
-fn header_section_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        "Press Tab to switch",
-        Style::default()
-            .fg(colors.switch_hint)
-            .add_modifier(Modifier::BOLD),
-    )];
-    spans.push(Span::styled(" - ", Style::default().fg(colors.muted)));
+fn header_tabs_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'static> {
+    let mut spans = Vec::new();
 
     for (idx, section) in [
         HeaderSection::Library,
@@ -687,6 +715,27 @@ fn header_section_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'
     }
 
     Line::from(spans)
+}
+
+fn header_tabs_width() -> u16 {
+    let labels = [
+        HeaderSection::Library.label(),
+        HeaderSection::Lyrics.label(),
+        HeaderSection::Stats.label(),
+        HeaderSection::Online.label(),
+    ];
+    let labels_len: usize = labels.iter().map(|label| label.len()).sum();
+    let separators_len = " -- ".len() * labels.len().saturating_sub(1);
+    (labels_len + separators_len) as u16
+}
+
+fn header_switch_hint_line(colors: &ThemePalette) -> Line<'static> {
+    Line::from(Span::styled(
+        "Press Tab to switch",
+        Style::default()
+            .fg(colors.switch_hint)
+            .add_modifier(Modifier::BOLD),
+    ))
 }
 
 fn draw_placeholder_section(
@@ -1213,7 +1262,8 @@ fn draw_stats_section(
             .add_modifier(Modifier::BOLD),
     )));
 
-    for (index, row) in snapshot.rows.iter().take(8).enumerate() {
+    let top_songs_limit = usize::from(core.stats_top_songs_count.max(1));
+    for (index, row) in snapshot.rows.iter().take(top_songs_limit).enumerate() {
         let value = match core.stats_sort {
             StatsSort::Plays => row.play_count,
             StatsSort::ListenTime => row.listen_seconds,
@@ -1243,6 +1293,7 @@ fn draw_stats_section(
         )));
     }
 
+    let total_left_lines = left_lines.len();
     let left = Paragraph::new(left_lines)
         .block(panel_block(
             "Stats",
@@ -1254,19 +1305,41 @@ fn draw_stats_section(
         .wrap(Wrap { trim: false });
     frame.render_widget(left, horizontal[0]);
 
+    let stats_inner = horizontal[0].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let stats_viewport_lines = usize::from(stats_inner.height);
+    if stats_viewport_lines > 0 && list_overflows(total_left_lines, stats_viewport_lines) {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_style(Style::default().fg(colors.border))
+            .thumb_style(Style::default().fg(colors.accent));
+        let mut scrollbar_state = ScrollbarState::new(total_left_lines)
+            .position(usize::from(core.stats_scroll))
+            .viewport_content_length(stats_viewport_lines);
+        frame.render_stateful_widget(scrollbar, horizontal[0], &mut scrollbar_state);
+    }
+
     let mut recent_lines = vec![Line::from(Span::styled(
         "Recent plays",
         Style::default()
             .fg(colors.text)
             .add_modifier(Modifier::BOLD),
     ))];
-    for event in &snapshot.recent {
+    let recent_inner = horizontal[1].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let max_recent_rows = usize::from(recent_inner.height.saturating_sub(1));
+    for event in snapshot.recent.iter().take(max_recent_rows) {
         recent_lines.push(Line::from(Span::styled(
             format_recent_event(event, now),
             Style::default().fg(colors.muted),
         )));
     }
-    if snapshot.recent.is_empty() {
+    if snapshot.recent.is_empty() && max_recent_rows > 0 {
         recent_lines.push(Line::from(Span::styled(
             "No recent listens yet.",
             Style::default().fg(colors.muted),
@@ -1563,8 +1636,14 @@ fn format_clock_label_local(
         value => value,
     };
 
-    let include_date = span_seconds > 86_400 && !matches!(unit, crate::stats::TrendUnit::Hours);
-    if include_date {
+    if matches!(
+        unit,
+        crate::stats::TrendUnit::Days
+            | crate::stats::TrendUnit::Weeks
+            | crate::stats::TrendUnit::AllTime
+    ) {
+        format!("{}/{}", dt.month() as u8, dt.day())
+    } else if span_seconds > 86_400 && !matches!(unit, crate::stats::TrendUnit::Hours) {
         format!(
             "{}/{} {}:{:02}{}",
             dt.month() as u8,
@@ -1624,7 +1703,9 @@ fn short_metric_label(value: u64, sort: StatsSort) -> String {
     match sort {
         StatsSort::Plays => format!("{value}p"),
         StatsSort::ListenTime => {
-            if value >= 60 {
+            if value >= 7_200 {
+                format!("{:.1}h", value as f64 / 3_600.0)
+            } else if value >= 60 {
                 format!("{}m", value / 60)
             } else {
                 format!("{}s", value)
@@ -1719,6 +1800,21 @@ fn panel_block(title: &str, bg: Color, text: Color, border: Color) -> Block<'_> 
         ))
         .border_style(Style::default().fg(border))
         .style(Style::default().bg(bg))
+}
+
+fn status_panel_block(colors: &ThemePalette) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            " Status ",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(APP_VERSION, Style::default().fg(colors.muted)))
+        .title_bottom(header_switch_hint_line(colors).alignment(Alignment::Right))
+        .border_style(Style::default().fg(colors.border))
+        .style(Style::default().bg(colors.panel_bg))
 }
 
 fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemePalette) {
@@ -1865,6 +1961,159 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
     horizontal[1]
 }
 
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct CoverRasterCacheKey {
+    track_path: String,
+    width: u16,
+    height: u16,
+}
+
+fn cover_art_lines_for_path(
+    path: &Path,
+    core: &TuneCore,
+    width: u16,
+    height: u16,
+) -> Option<Vec<Line<'static>>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let art_bytes = core.cover_art_for_path(path)?;
+    let key = CoverRasterCacheKey {
+        track_path: path.to_string_lossy().into_owned(),
+        width,
+        height,
+    };
+
+    if let Ok(cache) = cover_raster_cache().lock()
+        && let Some(cached) = cache.get(&key)
+    {
+        return Some(cached.clone());
+    }
+
+    let rasterized = rasterize_cover_art(&art_bytes, width, height)?;
+
+    if let Ok(mut cache) = cover_raster_cache().lock() {
+        cache.insert(key, rasterized.clone());
+    }
+
+    Some(rasterized)
+}
+
+fn cover_raster_cache() -> &'static Mutex<HashMap<CoverRasterCacheKey, Vec<Line<'static>>>> {
+    static COVER_RASTER_CACHE: OnceLock<Mutex<HashMap<CoverRasterCacheKey, Vec<Line<'static>>>>> =
+        OnceLock::new();
+    COVER_RASTER_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn rasterize_cover_art(bytes: &[u8], width: u16, height: u16) -> Option<Vec<Line<'static>>> {
+    let width = width.max(1) as usize;
+    let height = height.max(1) as usize;
+    let target_width_pixels = width as u32;
+    let target_height_pixels = (height * 2) as u32;
+
+    let decoded = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let source_width = decoded.width();
+    let source_height = decoded.height();
+    if source_width == 0 || source_height == 0 {
+        return None;
+    }
+
+    let (scaled_width, scaled_height, x_offset, y_offset) = fit_image_box(
+        source_width,
+        source_height,
+        target_width_pixels,
+        target_height_pixels,
+    );
+    let resized =
+        image::imageops::resize(&decoded, scaled_width, scaled_height, FilterType::Triangle);
+
+    let mut lines = Vec::with_capacity(height);
+    for row in 0..height {
+        let top_y = (row * 2) as u32;
+        let bottom_y = (top_y + 1).min(target_height_pixels.saturating_sub(1));
+        let mut spans = Vec::with_capacity(width);
+
+        for column in 0..width {
+            let x = column as u32;
+            if x < x_offset || x >= x_offset + scaled_width {
+                spans.push(Span::raw(" "));
+                continue;
+            }
+
+            if top_y < y_offset || top_y >= y_offset + scaled_height {
+                spans.push(Span::raw(" "));
+                continue;
+            }
+
+            let local_x = x - x_offset;
+            let top_local_y = top_y - y_offset;
+            let bottom_local_y = bottom_y.saturating_sub(y_offset).min(scaled_height - 1);
+            let top = resized.get_pixel(local_x, top_local_y).0;
+            let bottom = resized.get_pixel(local_x, bottom_local_y).0;
+            spans.push(Span::styled(
+                "▀",
+                Style::default()
+                    .fg(rgba_to_color(top))
+                    .bg(rgba_to_color(bottom)),
+            ));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    Some(lines)
+}
+
+fn fit_image_box(
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> (u32, u32, u32, u32) {
+    let width_limited =
+        target_width.saturating_mul(source_height) <= target_height.saturating_mul(source_width);
+
+    let (scaled_width, scaled_height) = if width_limited {
+        let scaled_height = (source_height.saturating_mul(target_width) / source_width).max(1);
+        (target_width.max(1), scaled_height)
+    } else {
+        let scaled_width = (source_width.saturating_mul(target_height) / source_height).max(1);
+        (scaled_width, target_height.max(1))
+    };
+
+    let x_offset = target_width.saturating_sub(scaled_width) / 2;
+    let y_offset = target_height.saturating_sub(scaled_height) / 2;
+    (scaled_width, scaled_height, x_offset, y_offset)
+}
+
+fn rgba_to_color(pixel: [u8; 4]) -> Color {
+    let alpha = pixel[3];
+    if alpha == 255 {
+        return Color::Rgb(pixel[0], pixel[1], pixel[2]);
+    }
+
+    let blend = |channel: u8| ((u16::from(channel) * u16::from(alpha)) / 255) as u8;
+    Color::Rgb(blend(pixel[0]), blend(pixel[1]), blend(pixel[2]))
+}
+
+fn cover_placeholder_lines(width: u16, height: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    let height = height.max(1) as usize;
+    let mut lines = vec![Line::from(" ".repeat(width)); height];
+
+    let label = "No cover art";
+    let row = height / 2;
+    let available = width.min(label.len());
+    let start = width.saturating_sub(available) / 2;
+    let end = start + available;
+
+    let mut content = " ".repeat(width);
+    content.replace_range(start..end, &label[..available]);
+    lines[row] = Line::from(content);
+    lines
+}
+
 fn format_duration(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
     let minutes = total_seconds / 60;
@@ -1920,6 +2169,8 @@ fn timeline_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{ImageBuffer, ImageFormat, Rgba};
+    use std::io::Cursor;
 
     #[test]
     fn centered_scroll_top_centers_focus_when_possible() {
@@ -1958,6 +2209,17 @@ mod tests {
     fn day_clock_labels_include_date_for_multi_day_span() {
         let label = format_clock_label_local(1_700_000_000, 200_000, crate::stats::TrendUnit::Days);
         assert!(label.contains('/'));
+        assert!(!label.contains(':'));
+    }
+
+    #[test]
+    fn listen_metric_label_uses_decimal_hours_when_over_two_hours() {
+        assert_eq!(short_metric_label(43_080, StatsSort::ListenTime), "12.0h");
+    }
+
+    #[test]
+    fn listen_metric_label_stays_in_minutes_under_two_hours() {
+        assert_eq!(short_metric_label(7_140, StatsSort::ListenTime), "119m");
     }
 
     #[test]
@@ -1973,5 +2235,53 @@ mod tests {
                 || label.starts_with("Sat")
                 || label.starts_with("Sun")
         );
+    }
+
+    #[test]
+    fn rasterize_cover_art_outputs_requested_dimensions() {
+        let image = ImageBuffer::from_fn(2, 2, |x, y| {
+            if (x + y) % 2 == 0 {
+                Rgba([255u8, 40u8, 40u8, 255u8])
+            } else {
+                Rgba([40u8, 180u8, 255u8, 255u8])
+            }
+        });
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("encode png");
+
+        let lines = rasterize_cover_art(&bytes, 6, 4).expect("rasterized lines");
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|line| line.spans.len() == 6));
+    }
+
+    #[test]
+    fn cover_placeholder_contains_label() {
+        let lines = cover_placeholder_lines(16, 5);
+        assert_eq!(lines.len(), 5);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.to_string().contains("No cover art"))
+        );
+    }
+
+    #[test]
+    fn fit_image_box_letterboxes_wide_image() {
+        let (scaled_w, scaled_h, x_off, y_off) = fit_image_box(1000, 500, 20, 24);
+        assert_eq!(scaled_w, 20);
+        assert_eq!(scaled_h, 10);
+        assert_eq!(x_off, 0);
+        assert_eq!(y_off, 7);
+    }
+
+    #[test]
+    fn fit_image_box_letterboxes_tall_image() {
+        let (scaled_w, scaled_h, x_off, y_off) = fit_image_box(500, 1000, 20, 24);
+        assert_eq!(scaled_h, 24);
+        assert_eq!(scaled_w, 12);
+        assert_eq!(x_off, 4);
+        assert_eq!(y_off, 0);
     }
 }

@@ -67,6 +67,8 @@ pub struct PersistedState {
     pub stats_enabled: bool,
     #[serde(default = "default_online_sync_correction_threshold_ms")]
     pub online_sync_correction_threshold_ms: u16,
+    #[serde(default = "default_stats_top_songs_count")]
+    pub stats_top_songs_count: u8,
 }
 
 fn default_stats_enabled() -> bool {
@@ -79,6 +81,10 @@ fn default_scrub_seconds() -> u16 {
 
 fn default_online_sync_correction_threshold_ms() -> u16 {
     300
+}
+
+fn default_stats_top_songs_count() -> u8 {
+    10
 }
 
 impl Default for PersistedState {
@@ -94,6 +100,7 @@ impl Default for PersistedState {
             selected_output_device: None,
             stats_enabled: default_stats_enabled(),
             online_sync_correction_threshold_ms: default_online_sync_correction_threshold_ms(),
+            stats_top_songs_count: default_stats_top_songs_count(),
         }
     }
 }

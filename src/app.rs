@@ -38,6 +38,7 @@ const MAX_VOLUME: f32 = 2.5;
 const VOLUME_STEP_COARSE: f32 = 0.05;
 const VOLUME_STEP_FINE: f32 = 0.01;
 const SCRUB_SECONDS_OPTIONS: [u16; 5] = [5, 10, 15, 30, 60];
+const STATS_TOP_SONGS_COUNT_OPTIONS: [u8; 5] = [5, 8, 10, 12, 15];
 const PARTIAL_LISTEN_FLUSH_SECONDS: u32 = 10;
 const ONLINE_DEFAULT_BIND_ADDR: &str = "0.0.0.0:7878";
 const LOOP_RESTART_END_WINDOW_SECONDS: u64 = 2;
@@ -1147,8 +1148,9 @@ pub fn run() -> Result<()> {
 
         match key.code {
             KeyCode::Char(ch)
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && ch.eq_ignore_ascii_case(&'c') =>
+                if (key.modifiers.contains(KeyModifiers::CONTROL)
+                    && ch.eq_ignore_ascii_case(&'c'))
+                    || ch == '\u{3}' =>
             {
                 break Ok(());
             }
@@ -1664,7 +1666,12 @@ fn handle_stats_inline_input(core: &mut TuneCore, key: KeyEvent) -> bool {
 
             true
         }
-        KeyCode::Char(ch) => {
+        KeyCode::Char(ch)
+            if !key
+                .modifiers
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER)
+                && !ch.is_control() =>
+        {
             let target = match core.stats_focus {
                 StatsFilterFocus::Artist => Some(&mut core.stats_artist_filter),
                 StatsFilterFocus::Album => Some(&mut core.stats_album_filter),
@@ -1681,6 +1688,7 @@ fn handle_stats_inline_input(core: &mut TuneCore, key: KeyEvent) -> bool {
 
             false
         }
+        KeyCode::Char(_) => false,
         KeyCode::Delete => {
             match core.stats_focus {
                 StatsFilterFocus::Artist => core.stats_artist_filter.clear(),
@@ -2944,8 +2952,22 @@ fn apply_saved_audio_output(
 fn handle_mouse(core: &mut TuneCore, mouse: MouseEvent, library_rect: ratatui::prelude::Rect) {
     let inside_library = point_in_rect(mouse.column, mouse.row, library_rect);
     match mouse.kind {
-        MouseEventKind::ScrollDown if inside_library => core.select_next(),
-        MouseEventKind::ScrollUp if inside_library => core.select_prev(),
+        MouseEventKind::ScrollDown if inside_library => match core.header_section {
+            HeaderSection::Library => core.select_next(),
+            HeaderSection::Stats => {
+                stats_scroll_down(core);
+                core.stats_focus = StatsFilterFocus::Search;
+            }
+            HeaderSection::Lyrics | HeaderSection::Online => {}
+        },
+        MouseEventKind::ScrollUp if inside_library => match core.header_section {
+            HeaderSection::Library => core.select_prev(),
+            HeaderSection::Stats => {
+                stats_scroll_up(core);
+                core.stats_focus = StatsFilterFocus::Search;
+            }
+            HeaderSection::Lyrics | HeaderSection::Online => {}
+        },
         _ => {}
     }
 }
@@ -3013,6 +3035,7 @@ fn playback_settings_options(core: &TuneCore) -> Vec<String> {
             "Stats tracking: {}",
             if core.stats_enabled { "On" } else { "Off" }
         ),
+        format!("Stats top songs rows: {}", core.stats_top_songs_count),
         String::from("Online sync delay settings"),
         String::from("Back"),
     ]
@@ -3114,6 +3137,19 @@ fn next_scrub_seconds(current: u16) -> u16 {
         .position(|entry| *entry == current)
         .unwrap_or(0);
     SCRUB_SECONDS_OPTIONS[(index + 1) % SCRUB_SECONDS_OPTIONS.len()]
+}
+
+fn next_stats_top_songs_count(current: u8) -> u8 {
+    let index = STATS_TOP_SONGS_COUNT_OPTIONS
+        .iter()
+        .position(|entry| *entry == current)
+        .unwrap_or_else(|| {
+            STATS_TOP_SONGS_COUNT_OPTIONS
+                .iter()
+                .position(|entry| *entry >= current)
+                .unwrap_or(0)
+        });
+    STATS_TOP_SONGS_COUNT_OPTIONS[(index + 1) % STATS_TOP_SONGS_COUNT_OPTIONS.len()]
 }
 
 fn next_online_sync_correction_threshold_ms(current: u16) -> u16 {
@@ -3285,7 +3321,7 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::PlaylistCreate { .. } => 1,
         ActionPanelState::AudioSettings { .. } => 3,
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
-        ActionPanelState::PlaybackSettings { .. } => 6,
+        ActionPanelState::PlaybackSettings { .. } => 7,
         ActionPanelState::OnlineDelaySettings { .. } => 6,
         ActionPanelState::ThemeSettings { .. } => 6,
         ActionPanelState::LyricsImportTxt { .. } => 3,
@@ -3373,7 +3409,7 @@ fn handle_action_panel_input_with_recent(
                     query: String::new(),
                 },
                 ActionPanelState::OnlineDelaySettings { .. } => {
-                    ActionPanelState::PlaybackSettings { selected: 4 }
+                    ActionPanelState::PlaybackSettings { selected: 5 }
                 }
                 ActionPanelState::AddDirectory { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
@@ -3722,6 +3758,13 @@ fn handle_action_panel_input_with_recent(
                     auto_save_state(core, &*audio);
                 }
                 4 => {
+                    core.stats_top_songs_count =
+                        next_stats_top_songs_count(core.stats_top_songs_count);
+                    core.status = format!("Stats top songs rows: {}", core.stats_top_songs_count);
+                    core.dirty = true;
+                    auto_save_state(core, &*audio);
+                }
+                5 => {
                     *panel = ActionPanelState::OnlineDelaySettings { selected: 0 };
                     core.dirty = true;
                 }
@@ -3766,7 +3809,7 @@ fn handle_action_panel_input_with_recent(
                     auto_save_state(core, &*audio);
                 }
                 _ => {
-                    *panel = ActionPanelState::PlaybackSettings { selected: 4 };
+                    *panel = ActionPanelState::PlaybackSettings { selected: 5 };
                     core.dirty = true;
                 }
             },
@@ -4859,6 +4902,10 @@ mod tests {
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(!core.stats_enabled);
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert_eq!(core.stats_top_songs_count, 12);
     }
 
     #[test]
@@ -4929,6 +4976,91 @@ mod tests {
     }
 
     #[test]
+    fn stats_mouse_scroll_down_moves_scroll_and_focuses_search() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = crate::core::HeaderSection::Stats;
+        core.stats_focus = crate::core::StatsFilterFocus::Range(0);
+        core.stats_scroll = 0;
+
+        handle_mouse(
+            &mut core,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 2,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            ratatui::prelude::Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 20,
+            },
+        );
+
+        assert_eq!(core.stats_scroll, 1);
+        assert!(matches!(
+            core.stats_focus,
+            crate::core::StatsFilterFocus::Search
+        ));
+    }
+
+    #[test]
+    fn stats_mouse_scroll_up_moves_scroll_and_focuses_search() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = crate::core::HeaderSection::Stats;
+        core.stats_focus = crate::core::StatsFilterFocus::Range(3);
+        core.stats_scroll = 3;
+
+        handle_mouse(
+            &mut core,
+            MouseEvent {
+                kind: MouseEventKind::ScrollUp,
+                column: 2,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            ratatui::prelude::Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 20,
+            },
+        );
+
+        assert_eq!(core.stats_scroll, 2);
+        assert!(matches!(
+            core.stats_focus,
+            crate::core::StatsFilterFocus::Search
+        ));
+    }
+
+    #[test]
+    fn stats_tab_does_not_consume_ctrl_c() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Stats;
+        core.stats_focus = crate::core::StatsFilterFocus::Search;
+
+        assert!(!handle_stats_inline_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+        ));
+    }
+
+    #[test]
+    fn stats_tab_does_not_consume_etx_char_or_mutate_filters() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Stats;
+        core.stats_focus = crate::core::StatsFilterFocus::Artist;
+
+        assert!(!handle_stats_inline_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Char('\u{3}'), KeyModifiers::NONE)
+        ));
+        assert!(core.stats_artist_filter.is_empty());
+    }
+
+    #[test]
     fn theme_settings_updates_core() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
@@ -4970,6 +5102,7 @@ mod tests {
         core.online_sync_correction_threshold_ms = 500;
         core.theme = Theme::Galaxy;
         core.stats_enabled = false;
+        core.stats_top_songs_count = 15;
         let audio = TestAudioEngine::new();
 
         let state = persisted_state_with_audio(&core, &audio);
@@ -4979,6 +5112,7 @@ mod tests {
         assert_eq!(state.online_sync_correction_threshold_ms, 500);
         assert_eq!(state.theme, Theme::Galaxy);
         assert!(!state.stats_enabled);
+        assert_eq!(state.stats_top_songs_count, 15);
     }
 
     #[test]

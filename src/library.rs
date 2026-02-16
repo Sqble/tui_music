@@ -67,6 +67,40 @@ fn metadata_for(path: &Path) -> TrackMetadata {
     id3v2_fallback(&stripped)
 }
 
+pub fn embedded_cover_art(path: &Path) -> Option<Vec<u8>> {
+    let stripped = crate::config::strip_windows_verbatim_prefix(path);
+    symphonia_embedded_cover_art(&stripped).or_else(|| id3v2_cover_art(&stripped))
+}
+
+fn symphonia_embedded_cover_art(path: &Path) -> Option<Vec<u8>> {
+    let Ok(file) = File::open(path) else {
+        return None;
+    };
+    let source = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
+
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(OsStr::to_str) {
+        hint.with_extension(extension);
+    }
+
+    let Ok(mut probed) = get_probe().format(
+        &hint,
+        source,
+        &FormatOptions::default(),
+        &MetadataOptions::default(),
+    ) else {
+        return None;
+    };
+
+    let metadata = probed.format.metadata();
+    let revision = metadata.current()?;
+    let visual = revision
+        .visuals()
+        .iter()
+        .find(|entry| !entry.data.is_empty())?;
+    Some(visual.data.as_ref().to_vec())
+}
+
 fn symphonia_metadata(path: &Path) -> TrackMetadata {
     let Ok(file) = File::open(path) else {
         return TrackMetadata::default();
@@ -242,6 +276,145 @@ fn id3v2_fallback(path: &Path) -> TrackMetadata {
         title,
         artist,
         album,
+    }
+}
+
+fn id3v2_cover_art(path: &Path) -> Option<Vec<u8>> {
+    let mut file = File::open(path).ok()?;
+    let mut header = [0u8; 10];
+    file.read_exact(&mut header).ok()?;
+    if !header.starts_with(b"ID3") {
+        return None;
+    }
+    let major_version = header[3];
+    let size = {
+        let bytes = &header[6..10];
+        ((bytes[0] as u32) & 0x7f) << 21
+            | ((bytes[1] as u32) & 0x7f) << 14
+            | ((bytes[2] as u32) & 0x7f) << 7
+            | ((bytes[3] as u32) & 0x7f)
+    } as usize;
+    let mut tag_bytes = vec![0u8; size];
+    file.read_exact(&mut tag_bytes).ok()?;
+
+    let mut pos = 0;
+    while pos < tag_bytes.len() {
+        let (frame_id, frame_size, data_start) = if major_version == 2 {
+            if pos + 6 > tag_bytes.len() {
+                break;
+            }
+            let frame_id = std::str::from_utf8(&tag_bytes[pos..pos + 3]).unwrap_or("");
+            let bytes = &tag_bytes[pos + 3..pos + 6];
+            let frame_size =
+                ((bytes[0] as u32) << 16 | (bytes[1] as u32) << 8 | (bytes[2] as u32)) as usize;
+            (frame_id, frame_size, pos + 6)
+        } else {
+            if pos + 10 > tag_bytes.len() {
+                break;
+            }
+            let frame_id = std::str::from_utf8(&tag_bytes[pos..pos + 4]).unwrap_or("");
+            let bytes = &tag_bytes[pos + 4..pos + 8];
+            let frame_size = if major_version == 4 {
+                (((bytes[0] as u32) & 0x7f) << 21
+                    | ((bytes[1] as u32) & 0x7f) << 14
+                    | ((bytes[2] as u32) & 0x7f) << 7
+                    | ((bytes[3] as u32) & 0x7f)) as usize
+            } else {
+                ((bytes[0] as u32) << 24
+                    | (bytes[1] as u32) << 16
+                    | (bytes[2] as u32) << 8
+                    | (bytes[3] as u32)) as usize
+            };
+            (frame_id, frame_size, pos + 10)
+        };
+
+        if frame_id.trim_matches('\0').is_empty() || frame_size == 0 {
+            break;
+        }
+
+        let data_end = data_start + frame_size;
+        if data_end > tag_bytes.len() {
+            break;
+        }
+        let payload = &tag_bytes[data_start..data_end];
+
+        match frame_id {
+            "APIC" => {
+                if let Some(bytes) = parse_apic_payload(payload) {
+                    return Some(bytes);
+                }
+            }
+            "PIC" => {
+                if let Some(bytes) = parse_pic_payload(payload) {
+                    return Some(bytes);
+                }
+            }
+            _ => {}
+        }
+
+        pos = data_end;
+    }
+
+    None
+}
+
+fn parse_apic_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.len() < 4 {
+        return None;
+    }
+
+    let encoding = payload[0];
+    let mime_start = 1;
+    let mime_end = payload[mime_start..]
+        .iter()
+        .position(|byte| *byte == 0)
+        .map(|idx| mime_start + idx)?;
+    let mut pos = mime_end + 1;
+    if pos >= payload.len() {
+        return None;
+    }
+
+    pos += 1;
+    let description_end = id3_description_end(&payload[pos..], encoding)?;
+    pos = pos.saturating_add(description_end);
+    if pos >= payload.len() {
+        return None;
+    }
+
+    Some(payload[pos..].to_vec())
+}
+
+fn parse_pic_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    if payload.len() < 6 {
+        return None;
+    }
+
+    let encoding = payload[0];
+    let mut pos = 5;
+
+    let description_end = id3_description_end(&payload[pos..], encoding)?;
+    pos = pos.saturating_add(description_end);
+    if pos >= payload.len() {
+        return None;
+    }
+
+    Some(payload[pos..].to_vec())
+}
+
+fn id3_description_end(payload: &[u8], encoding: u8) -> Option<usize> {
+    match encoding {
+        0 | 3 => payload
+            .iter()
+            .position(|byte| *byte == 0)
+            .map(|idx| idx + 1),
+        1 | 2 => payload
+            .windows(2)
+            .position(|window| window[0] == 0 && window[1] == 0)
+            .map(|idx| idx + 2),
+        _ => payload
+            .iter()
+            .position(|byte| *byte == 0)
+            .map(|idx| idx + 1),
     }
 }
 

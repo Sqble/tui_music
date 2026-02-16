@@ -16,7 +16,8 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with metadata-keyed listen events/aggregates (normalized title-first merge across local/online sources), automatic migration from legacy path-keyed totals, and provider-ID pinning for stable online mapping
 - Keyboard-driven TUI with actions panel search, recent actions (session-local, last 3), and overflow scrollbar
 - Right-aligned status tabs with `Tab` cycling (Library, Lyrics, Stats, Online)
-- Stats tab with totals, ASCII charts, top songs, and recent listen log (looped track replays count as separate plays)
+- Song Info panel renders now-playing embedded album art as a cached Unicode color raster (with "No cover art" placeholder fallback)
+- Stats tab with totals, ASCII charts, configurable top songs rows (default 10 via Playback settings), and range-filtered recent listen log sized to panel space (looped track replays count as separate plays)
 - Lyrics tab with live line sync from `.lrc` sidecars or embedded lyric metadata
 - Lyrics sidecars are stored in the config dir lyrics folder (`$XDG_CONFIG_HOME/tunetui/lyrics/` on Linux, `%USERPROFILE%\.config\tunetui\lyrics\` on Windows)
 - Split-pane lyrics editor in TUI (`Ctrl+e` toggle in Lyrics tab) with per-line timestamp stamping
