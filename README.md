@@ -16,7 +16,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with metadata-keyed listen events/aggregates (normalized title-first merge across local/online sources), automatic migration from legacy path-keyed totals, and provider-ID pinning for stable online mapping
 - Keyboard-driven TUI with actions panel search, recent actions (session-local, last 3), and overflow scrollbar
 - Right-aligned status tabs with `Tab` cycling (Library, Lyrics, Stats, Online)
-- Song Info panel renders now-playing embedded album art as a cached Unicode color raster (with "No cover art" placeholder fallback)
+- Song Info panel renders now-playing embedded album art as a cached Unicode color raster, with configurable built-in fallback templates for tracks missing embedded art
 - Stats tab with totals, ASCII charts, configurable top songs rows (default 10 via Playback settings), and range-filtered recent listen log sized to panel space (looped track replays count as separate plays)
 - Lyrics tab with live line sync from `.lrc` sidecars or embedded lyric metadata
 - Lyrics sidecars are stored in the config dir lyrics folder (`$XDG_CONFIG_HOME/tunetui/lyrics/` on Linux, `%USERPROFILE%\.config\tunetui\lyrics\` on Windows)
@@ -26,7 +26,9 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Sidecar-first source precedence (`.lrc` wins over embedded tags when both exist)
 - Audio driver recovery and output speaker selection from actions panel
 - Selected output speaker persists across launches with fallback to default when unavailable
-- Playback settings in actions panel: loudness normalization, crossfade, scrub length cycle (5s/10s/15s/30s/1m), stats tracking toggle, and themes (Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy)
+- Volume level persists across launches in saved state
+- Playback settings in actions panel: loudness normalization, crossfade, scrub length cycle (5s/10s/15s/30s/1m), stats tracking toggle, top songs rows, missing-cover fallback template (Music Note), and themes (Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy)
+- Middle status area uses separate `Timeline` and `Control` panels (`Control` shows volume and scrub/adjust hints)
 - Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
 - Add directory from actions panel via typed path or external folder picker (PowerShell on Windows, zenity/kdialog on Linux)
 - Remove directory from actions panel

@@ -4,10 +4,11 @@ use crate::core::HeaderSection;
 use crate::core::LyricsMode;
 use crate::core::StatsFilterFocus;
 use crate::core::TuneCore;
-use crate::model::Theme;
+use crate::model::{CoverArtTemplate, Theme};
 use crate::online::OnlineSession;
 use crate::stats::{ListenEvent, StatsRange, StatsSnapshot, StatsSort, TrendSeries};
 use image::imageops::FilterType;
+use image::{ImageBuffer, ImageFormat, Rgba};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
@@ -15,7 +16,7 @@ use ratatui::widgets::{
 };
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use time::{OffsetDateTime, UtcOffset};
 
@@ -57,7 +58,8 @@ pub struct OverlayViews<'a> {
 struct ThemePalette {
     bg: Color,
     panel_bg: Color,
-    panel_alt_bg: Color,
+    content_panel_bg: Color,
+    content_panel_alt_bg: Color,
     border: Color,
     text: Color,
     muted: Color,
@@ -75,8 +77,9 @@ fn palette(theme: Theme) -> ThemePalette {
     match theme {
         Theme::Dark => ThemePalette {
             bg: Color::Rgb(10, 15, 24),
-            panel_bg: Color::Rgb(19, 29, 43),
-            panel_alt_bg: Color::Rgb(24, 38, 58),
+            panel_bg: Color::Rgb(29, 47, 72),
+            content_panel_bg: Color::Rgb(19, 29, 43),
+            content_panel_alt_bg: Color::Rgb(22, 36, 56),
             border: Color::Rgb(69, 121, 176),
             text: Color::Rgb(214, 228, 248),
             muted: Color::Rgb(149, 173, 204),
@@ -91,8 +94,9 @@ fn palette(theme: Theme) -> ThemePalette {
         },
         Theme::PitchBlack => ThemePalette {
             bg: Color::Rgb(0, 0, 0),
-            panel_bg: Color::Rgb(8, 8, 8),
-            panel_alt_bg: Color::Rgb(15, 15, 15),
+            panel_bg: Color::Rgb(20, 20, 20),
+            content_panel_bg: Color::Rgb(8, 8, 8),
+            content_panel_alt_bg: Color::Rgb(13, 13, 13),
             border: Color::Rgb(74, 74, 74),
             text: Color::Rgb(242, 242, 242),
             muted: Color::Rgb(150, 150, 150),
@@ -107,8 +111,9 @@ fn palette(theme: Theme) -> ThemePalette {
         },
         Theme::Galaxy => ThemePalette {
             bg: Color::Rgb(7, 8, 23),
-            panel_bg: Color::Rgb(18, 16, 44),
-            panel_alt_bg: Color::Rgb(27, 25, 61),
+            panel_bg: Color::Rgb(36, 33, 82),
+            content_panel_bg: Color::Rgb(18, 16, 44),
+            content_panel_alt_bg: Color::Rgb(26, 24, 63),
             border: Color::Rgb(108, 107, 205),
             text: Color::Rgb(227, 225, 252),
             muted: Color::Rgb(167, 165, 210),
@@ -123,8 +128,9 @@ fn palette(theme: Theme) -> ThemePalette {
         },
         Theme::Matrix => ThemePalette {
             bg: Color::Rgb(4, 12, 4),
-            panel_bg: Color::Rgb(8, 22, 8),
-            panel_alt_bg: Color::Rgb(12, 30, 12),
+            panel_bg: Color::Rgb(16, 40, 16),
+            content_panel_bg: Color::Rgb(8, 22, 8),
+            content_panel_alt_bg: Color::Rgb(11, 28, 11),
             border: Color::Rgb(39, 143, 62),
             text: Color::Rgb(180, 255, 185),
             muted: Color::Rgb(102, 177, 115),
@@ -139,8 +145,9 @@ fn palette(theme: Theme) -> ThemePalette {
         },
         Theme::Demonic => ThemePalette {
             bg: Color::Rgb(16, 2, 2),
-            panel_bg: Color::Rgb(30, 6, 7),
-            panel_alt_bg: Color::Rgb(44, 10, 11),
+            panel_bg: Color::Rgb(56, 13, 14),
+            content_panel_bg: Color::Rgb(30, 6, 7),
+            content_panel_alt_bg: Color::Rgb(41, 9, 10),
             border: Color::Rgb(176, 38, 38),
             text: Color::Rgb(245, 214, 214),
             muted: Color::Rgb(188, 133, 133),
@@ -155,8 +162,9 @@ fn palette(theme: Theme) -> ThemePalette {
         },
         Theme::CottonCandy => ThemePalette {
             bg: Color::Rgb(34, 21, 44),
-            panel_bg: Color::Rgb(51, 29, 68),
-            panel_alt_bg: Color::Rgb(66, 38, 86),
+            panel_bg: Color::Rgb(80, 46, 105),
+            content_panel_bg: Color::Rgb(51, 29, 68),
+            content_panel_alt_bg: Color::Rgb(61, 35, 81),
             border: Color::Rgb(245, 146, 208),
             text: Color::Rgb(255, 233, 250),
             muted: Color::Rgb(224, 173, 219),
@@ -181,6 +189,7 @@ pub fn library_rect(area: Rect) -> Rect {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
         ])
@@ -213,6 +222,7 @@ pub fn draw(
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
         ])
@@ -317,7 +327,7 @@ pub fn draw(
         let list = List::new(items)
             .block(panel_block(
                 &library_title,
-                colors.panel_bg,
+                colors.content_panel_bg,
                 colors.text,
                 colors.border,
             ))
@@ -329,6 +339,25 @@ pub fn draw(
             )
             .highlight_symbol("-> ");
         frame.render_stateful_widget(list, body[0], &mut state);
+
+        let library_inner = body[0].inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        let library_viewport_lines = usize::from(library_inner.height);
+        let total_library_rows = core.browser_entries.len();
+        if library_viewport_lines > 0 && list_overflows(total_library_rows, library_viewport_lines)
+        {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_style(Style::default().fg(colors.border))
+                .thumb_style(Style::default().fg(colors.accent));
+            let mut scrollbar_state = ScrollbarState::new(total_library_rows)
+                .position(state.offset())
+                .viewport_content_length(library_viewport_lines);
+            frame.render_stateful_widget(scrollbar, body[0], &mut scrollbar_state);
+        }
 
         let now_playing = audio.current_track().or_else(|| core.current_path());
         let now_playing_title = now_playing
@@ -422,7 +451,12 @@ pub fn draw(
         ];
 
         frame.render_widget(
-            panel_block("Song Info", colors.panel_alt_bg, colors.text, colors.border),
+            panel_block(
+                "Song Info",
+                colors.content_panel_alt_bg,
+                colors.text,
+                colors.border,
+            ),
             body[1],
         );
 
@@ -475,7 +509,7 @@ pub fn draw(
         }
     }
 
-    let timeline_text = timeline_line(audio, 26, 14);
+    let timeline_text = timeline_line(audio, 42);
     let timeline_block = Paragraph::new(Span::styled(
         timeline_text,
         Style::default().fg(colors.text),
@@ -488,6 +522,18 @@ pub fn draw(
     ))
     .wrap(Wrap { trim: true });
     frame.render_widget(timeline_block, vertical[2]);
+
+    let control_text = control_line(audio, 16);
+    let control_block =
+        Paragraph::new(Span::styled(control_text, Style::default().fg(colors.text)))
+            .block(panel_block(
+                "Control",
+                colors.panel_bg,
+                colors.text,
+                colors.border,
+            ))
+            .wrap(Wrap { trim: true });
+    frame.render_widget(control_block, vertical[3]);
 
     let key_hint = if core.header_section == HeaderSection::Stats {
         "Keys: Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top, Tab tabs"
@@ -509,7 +555,7 @@ pub fn draw(
         colors.text,
         colors.border,
     ));
-    frame.render_widget(footer, vertical[3]);
+    frame.render_widget(footer, vertical[4]);
 
     if let Some(panel) = action_panel {
         draw_action_panel(frame, panel, &colors);
@@ -749,7 +795,7 @@ fn draw_placeholder_section(
         Paragraph::new(Span::styled(message, Style::default().fg(colors.muted)))
             .block(panel_block(
                 title,
-                colors.panel_bg,
+                colors.content_panel_bg,
                 colors.text,
                 colors.border,
             ))
@@ -764,7 +810,7 @@ fn draw_placeholder_section(
         ))
         .block(panel_block(
             "Info",
-            colors.panel_alt_bg,
+            colors.content_panel_alt_bg,
             colors.text,
             colors.border,
         )),
@@ -868,7 +914,7 @@ fn draw_online_section(
     let left = Paragraph::new(left_lines)
         .block(panel_block(
             "Online Session",
-            colors.panel_bg,
+            colors.content_panel_bg,
             colors.text,
             colors.border,
         ))
@@ -924,7 +970,7 @@ fn draw_online_section(
     let right = Paragraph::new(right_lines)
         .block(panel_block(
             "Room Data",
-            colors.panel_alt_bg,
+            colors.content_panel_alt_bg,
             colors.text,
             colors.border,
         ))
@@ -1018,7 +1064,7 @@ fn draw_lyrics_section(
     let left = Paragraph::new(playback_lines)
         .block(panel_block(
             "Lyrics Playback",
-            colors.panel_bg,
+            colors.content_panel_bg,
             colors.text,
             colors.border,
         ))
@@ -1096,7 +1142,7 @@ fn draw_lyrics_section(
             let right = Paragraph::new(right_lines)
                 .block(panel_block(
                     "Lyrics Editor",
-                    colors.panel_alt_bg,
+                    colors.content_panel_alt_bg,
                     colors.text,
                     colors.border,
                 ))
@@ -1110,7 +1156,7 @@ fn draw_lyrics_section(
     let right = Paragraph::new(right_lines)
         .block(panel_block(
             "Lyrics Editor",
-            colors.panel_alt_bg,
+            colors.content_panel_alt_bg,
             colors.text,
             colors.border,
         ))
@@ -1297,7 +1343,7 @@ fn draw_stats_section(
     let left = Paragraph::new(left_lines)
         .block(panel_block(
             "Stats",
-            colors.panel_bg,
+            colors.content_panel_bg,
             colors.text,
             colors.border,
         ))
@@ -1349,7 +1395,7 @@ fn draw_stats_section(
     let right = Paragraph::new(recent_lines)
         .block(panel_block(
             "Recent Log",
-            colors.panel_alt_bg,
+            colors.content_panel_alt_bg,
             colors.text,
             colors.border,
         ))
@@ -1963,7 +2009,7 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
 
 #[derive(Clone, Hash, PartialEq, Eq)]
 struct CoverRasterCacheKey {
-    track_path: String,
+    source_key: String,
     width: u16,
     height: u16,
 }
@@ -1978,9 +2024,21 @@ fn cover_art_lines_for_path(
         return None;
     }
 
-    let art_bytes = core.cover_art_for_path(path)?;
+    let (source_key, art_bytes) = if let Some(embedded_art) = core.cover_art_for_path(path) {
+        (path.to_string_lossy().into_owned(), embedded_art)
+    } else {
+        let fallback = fallback_cover_template_bytes(core.fallback_cover_template)?;
+        (
+            format!(
+                "fallback:{}",
+                fallback_cover_template_id(core.fallback_cover_template)
+            ),
+            fallback,
+        )
+    };
+
     let key = CoverRasterCacheKey {
-        track_path: path.to_string_lossy().into_owned(),
+        source_key,
         width,
         height,
     };
@@ -1998,6 +2056,125 @@ fn cover_art_lines_for_path(
     }
 
     Some(rasterized)
+}
+
+fn fallback_cover_template_cache() -> &'static Mutex<HashMap<CoverArtTemplate, Arc<[u8]>>> {
+    static FALLBACK_COVER_TEMPLATE_CACHE: OnceLock<Mutex<HashMap<CoverArtTemplate, Arc<[u8]>>>> =
+        OnceLock::new();
+    FALLBACK_COVER_TEMPLATE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn fallback_cover_template_bytes(template: CoverArtTemplate) -> Option<Arc<[u8]>> {
+    if let Ok(cache) = fallback_cover_template_cache().lock()
+        && let Some(bytes) = cache.get(&template)
+    {
+        return Some(bytes.clone());
+    }
+
+    let generated = generate_fallback_cover_template_png(template)?;
+    let generated = Arc::<[u8]>::from(generated);
+    if let Ok(mut cache) = fallback_cover_template_cache().lock() {
+        cache.insert(template, generated.clone());
+    }
+    Some(generated)
+}
+
+fn fallback_cover_template_id(_template: CoverArtTemplate) -> &'static str {
+    "music-note"
+}
+
+fn generate_fallback_cover_template_png(template: CoverArtTemplate) -> Option<Vec<u8>> {
+    const WIDTH: u32 = 160;
+    const HEIGHT: u32 = 160;
+    let image = ImageBuffer::from_fn(WIDTH, HEIGHT, |x, y| {
+        let pixel = fallback_cover_template_pixel(template, x, y, WIDTH, HEIGHT);
+        Rgba([pixel.0, pixel.1, pixel.2, 255])
+    });
+
+    let mut bytes = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut bytes);
+    image
+        .write_to(&mut cursor, ImageFormat::Png)
+        .ok()
+        .map(|_| bytes)
+}
+
+fn fallback_cover_template_pixel(
+    _template: CoverArtTemplate,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> (u8, u8, u8) {
+    let x = x.min(width.saturating_sub(1));
+    let y = y.min(height.saturating_sub(1));
+    let x_ratio = (x.saturating_mul(255) / width.max(1)) as u8;
+    let y_ratio = (y.saturating_mul(255) / height.max(1)) as u8;
+
+    let mut r = 10u8.saturating_add(x_ratio / 7);
+    let mut g = 24u8.saturating_add(y_ratio / 5);
+    let mut b = 48u8.saturating_add(x_ratio / 3).saturating_add(y_ratio / 6);
+
+    let xi = x as i32;
+    let yi = y as i32;
+    let wi = width.max(1) as i32;
+    let hi = height.max(1) as i32;
+
+    let stem_left = wi * 9 / 16;
+    let stem_right = stem_left + (wi / 16).max(3);
+    let stem_top = hi * 3 / 16;
+    let stem_bottom = hi * 11 / 16;
+    let on_stem = xi >= stem_left && xi <= stem_right && yi >= stem_top && yi <= stem_bottom;
+
+    let head_cx = wi * 7 / 16;
+    let head_cy = hi * 11 / 16;
+    let head_rx = (wi / 7).max(5);
+    let head_ry = (hi / 9).max(4);
+    let dx = xi - head_cx;
+    let dy = yi - head_cy;
+    let in_head = (dx * dx * head_ry * head_ry) + (dy * dy * head_rx * head_rx)
+        <= (head_rx * head_rx * head_ry * head_ry);
+
+    let flag_top = hi * 3 / 16;
+    let flag_height = (hi / 5).max(6);
+    let flag_width = (wi / 4).max(10);
+    let rel_x = xi - stem_left;
+    let rel_y = yi - flag_top;
+    let in_flag = rel_x >= 0
+        && rel_x <= flag_width
+        && rel_y >= 0
+        && rel_y <= flag_height
+        && (rel_y * flag_width) <= (flag_height * rel_x + flag_width / 2);
+
+    let note_color = (230u8, 236u8, 247u8);
+    if on_stem || in_head || in_flag {
+        return note_color;
+    }
+
+    let dist_stem = if xi < stem_left {
+        stem_left - xi
+    } else if xi > stem_right {
+        xi - stem_right
+    } else {
+        0
+    } + if yi < stem_top {
+        stem_top - yi
+    } else if yi > stem_bottom {
+        yi - stem_bottom
+    } else {
+        0
+    };
+
+    let head_distance = ((dx * dx + dy * dy) as f32).sqrt() as i32 - head_rx.max(head_ry);
+    let glow_dist = dist_stem.min(head_distance.max(0));
+    if glow_dist <= 4 {
+        let glow = (5 - glow_dist).max(1) as u8 * 10;
+        r = r.saturating_add(glow / 2);
+        g = g.saturating_add(glow / 2);
+        b = b.saturating_add(glow);
+    }
+
+    (r, g, b)
 }
 
 fn cover_raster_cache() -> &'static Mutex<HashMap<CoverRasterCacheKey, Vec<Line<'static>>>> {
@@ -2139,11 +2316,7 @@ fn progress_bar(ratio: Option<f64>, width: usize) -> String {
     bar
 }
 
-fn timeline_line(
-    audio: &dyn AudioEngine,
-    timeline_bar_width: usize,
-    volume_bar_width: usize,
-) -> String {
+fn timeline_line(audio: &dyn AudioEngine, timeline_bar_width: usize) -> String {
     let elapsed = audio.position().unwrap_or(Duration::from_secs(0));
     let total = audio.duration();
     let ratio = total.and_then(|duration| {
@@ -2151,16 +2324,22 @@ fn timeline_line(
         (total_secs > 0.0).then_some((elapsed.as_secs_f64() / total_secs).clamp(0.0, 1.0))
     });
 
-    let volume_percent = (audio.volume() * 100.0).round() as u16;
-    let volume_ratio = audio.volume().clamp(0.0, 1.0) as f64;
-
     format!(
-        "{} / {} {}  |  Vol {} {:>3}%  +/- adjust  Shift fine  |  A/D scrub",
+        "{} / {} {}",
         format_duration(elapsed),
         total
             .map(format_duration)
             .unwrap_or_else(|| String::from("--:--")),
         progress_bar(ratio, timeline_bar_width),
+    )
+}
+
+fn control_line(audio: &dyn AudioEngine, volume_bar_width: usize) -> String {
+    let volume_percent = (audio.volume() * 100.0).round() as u16;
+    let volume_ratio = audio.volume().clamp(0.0, 1.0) as f64;
+
+    format!(
+        "Vol {} {:>3}%  +/- adjust  Shift fine  |  A/D scrub",
         progress_bar(Some(volume_ratio), volume_bar_width),
         volume_percent
     )
@@ -2196,6 +2375,24 @@ mod tests {
     fn action_panel_scrollbar_only_when_overflow_exists() {
         assert!(list_overflows(8, 5));
         assert!(!list_overflows(5, 5));
+    }
+
+    #[test]
+    fn timeline_line_only_shows_timeline_data() {
+        let mut audio = crate::audio::NullAudioEngine::new();
+        audio.set_volume(1.4);
+        let line = timeline_line(&audio, 10);
+        assert!(line.contains('/'));
+        assert!(!line.contains("Vol"));
+    }
+
+    #[test]
+    fn control_line_shows_volume_and_scrub_hints() {
+        let mut audio = crate::audio::NullAudioEngine::new();
+        audio.set_volume(1.2);
+        let line = control_line(&audio, 10);
+        assert!(line.contains("Vol"));
+        assert!(line.contains("A/D scrub"));
     }
 
     #[test]
@@ -2283,5 +2480,21 @@ mod tests {
         assert_eq!(scaled_w, 12);
         assert_eq!(x_off, 4);
         assert_eq!(y_off, 0);
+    }
+
+    #[test]
+    fn fallback_template_png_generation_works_for_all_templates() {
+        let bytes =
+            generate_fallback_cover_template_png(CoverArtTemplate::Aurora).expect("template png");
+        let lines = rasterize_cover_art(&bytes, 8, 4).expect("rasterized lines");
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|line| line.spans.len() == 8));
+    }
+
+    #[test]
+    fn fallback_template_bytes_are_cached_by_template() {
+        let first = fallback_cover_template_bytes(CoverArtTemplate::Aurora).expect("first");
+        let second = fallback_cover_template_bytes(CoverArtTemplate::Aurora).expect("second");
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }

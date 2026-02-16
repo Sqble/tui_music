@@ -1,7 +1,7 @@
 use crate::audio::{AudioEngine, NullAudioEngine, WasapiAudioEngine};
 use crate::config;
 use crate::core::{HeaderSection, LyricsMode, StatsFilterFocus, TuneCore};
-use crate::model::{PlaybackMode, Theme};
+use crate::model::{CoverArtTemplate, PlaybackMode, Theme};
 use crate::online::{OnlineSession, Participant, TransportCommand, TransportEnvelope};
 use crate::online_net::{
     LocalAction as NetworkLocalAction, NetworkEvent, NetworkRole, OnlineNetwork, build_invite_code,
@@ -943,6 +943,7 @@ pub fn run() -> Result<()> {
 
     let state = config::load_state()?;
     let preferred_output = state.selected_output_device.clone();
+    let saved_volume = state.saved_volume;
     let mut core = TuneCore::from_persisted(state);
     let mut stats_store = stats::load_stats().unwrap_or_default();
     let mut listen_tracker = ListenTracker::default();
@@ -953,6 +954,7 @@ pub fn run() -> Result<()> {
     };
 
     apply_audio_preferences_from_core(&core, &mut *audio);
+    apply_saved_volume(&mut *audio, saved_volume);
     apply_saved_audio_output(&mut core, &mut *audio, preferred_output);
 
     enable_raw_mode()?;
@@ -1104,7 +1106,15 @@ pub fn run() -> Result<()> {
             continue;
         }
         if let Event::Mouse(mouse) = event {
-            handle_mouse(&mut core, mouse, library_rect);
+            handle_mouse_with_panel(
+                &mut core,
+                &mut *audio,
+                &mut action_panel,
+                &mut recent_root_actions,
+                &online_runtime,
+                mouse,
+                library_rect,
+            );
             continue;
         }
 
@@ -2920,7 +2930,12 @@ fn persisted_state_with_audio(
 ) -> crate::model::PersistedState {
     let mut state = core.persisted_state();
     state.selected_output_device = audio.selected_output_device();
+    state.saved_volume = audio.volume().clamp(0.0, MAX_VOLUME);
     state
+}
+
+fn apply_saved_volume(audio: &mut dyn AudioEngine, saved_volume: f32) {
+    audio.set_volume(saved_volume.clamp(0.0, MAX_VOLUME));
 }
 
 fn apply_saved_audio_output(
@@ -2970,6 +2985,46 @@ fn handle_mouse(core: &mut TuneCore, mouse: MouseEvent, library_rect: ratatui::p
         },
         _ => {}
     }
+}
+
+fn handle_mouse_with_panel(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    panel: &mut ActionPanelState,
+    recent_root_actions: &mut Vec<RootActionId>,
+    online_runtime: &OnlineRuntime,
+    mouse: MouseEvent,
+    library_rect: ratatui::prelude::Rect,
+) {
+    if panel.is_open() {
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                handle_action_panel_input_with_recent(
+                    core,
+                    audio,
+                    panel,
+                    recent_root_actions,
+                    Some(online_runtime),
+                    KeyCode::Down,
+                );
+                return;
+            }
+            MouseEventKind::ScrollUp => {
+                handle_action_panel_input_with_recent(
+                    core,
+                    audio,
+                    panel,
+                    recent_root_actions,
+                    Some(online_runtime),
+                    KeyCode::Up,
+                );
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    handle_mouse(core, mouse, library_rect);
 }
 
 fn point_in_rect(x: u16, y: u16, rect: ratatui::prelude::Rect) -> bool {
@@ -3036,9 +3091,17 @@ fn playback_settings_options(core: &TuneCore) -> Vec<String> {
             if core.stats_enabled { "On" } else { "Off" }
         ),
         format!("Stats top songs rows: {}", core.stats_top_songs_count),
+        format!(
+            "Missing cover fallback: {}",
+            cover_template_label(core.fallback_cover_template)
+        ),
         String::from("Online sync delay settings"),
         String::from("Back"),
     ]
+}
+
+fn cover_template_label(_template: CoverArtTemplate) -> &'static str {
+    "Music Note"
 }
 
 fn online_delay_settings_options(core: &TuneCore) -> Vec<String> {
@@ -3321,7 +3384,7 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::PlaylistCreate { .. } => 1,
         ActionPanelState::AudioSettings { .. } => 3,
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
-        ActionPanelState::PlaybackSettings { .. } => 7,
+        ActionPanelState::PlaybackSettings { .. } => 8,
         ActionPanelState::OnlineDelaySettings { .. } => 6,
         ActionPanelState::ThemeSettings { .. } => 6,
         ActionPanelState::LyricsImportTxt { .. } => 3,
@@ -3409,7 +3472,7 @@ fn handle_action_panel_input_with_recent(
                     query: String::new(),
                 },
                 ActionPanelState::OnlineDelaySettings { .. } => {
-                    ActionPanelState::PlaybackSettings { selected: 5 }
+                    ActionPanelState::PlaybackSettings { selected: 6 }
                 }
                 ActionPanelState::AddDirectory { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
@@ -3765,6 +3828,15 @@ fn handle_action_panel_input_with_recent(
                     auto_save_state(core, &*audio);
                 }
                 5 => {
+                    core.fallback_cover_template = core.fallback_cover_template.next();
+                    core.status = format!(
+                        "Missing cover fallback: {}",
+                        cover_template_label(core.fallback_cover_template)
+                    );
+                    core.dirty = true;
+                    auto_save_state(core, &*audio);
+                }
+                6 => {
                     *panel = ActionPanelState::OnlineDelaySettings { selected: 0 };
                     core.dirty = true;
                 }
@@ -3809,7 +3881,7 @@ fn handle_action_panel_input_with_recent(
                     auto_save_state(core, &*audio);
                 }
                 _ => {
-                    *panel = ActionPanelState::PlaybackSettings { selected: 5 };
+                    *panel = ActionPanelState::PlaybackSettings { selected: 6 };
                     core.dirty = true;
                 }
             },
@@ -4376,6 +4448,7 @@ mod tests {
         reload_calls: usize,
         loudness_normalization: bool,
         crossfade_seconds: u16,
+        volume: f32,
     }
 
     impl TestAudioEngine {
@@ -4394,6 +4467,7 @@ mod tests {
                 reload_calls: 0,
                 loudness_normalization: false,
                 crossfade_seconds: 0,
+                volume: 1.0,
             }
         }
 
@@ -4412,6 +4486,7 @@ mod tests {
                 reload_calls: 0,
                 loudness_normalization: false,
                 crossfade_seconds: 0,
+                volume: 1.0,
             }
         }
     }
@@ -4520,10 +4595,12 @@ mod tests {
         }
 
         fn volume(&self) -> f32 {
-            1.0
+            self.volume
         }
 
-        fn set_volume(&mut self, _volume: f32) {}
+        fn set_volume(&mut self, volume: f32) {
+            self.volume = volume.clamp(0.0, MAX_VOLUME);
+        }
 
         fn output_name(&self) -> Option<String> {
             Some(
@@ -4906,6 +4983,10 @@ mod tests {
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert_eq!(core.stats_top_songs_count, 12);
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert_eq!(core.fallback_cover_template, CoverArtTemplate::Aurora);
     }
 
     #[test]
@@ -4918,6 +4999,19 @@ mod tests {
 
         assert_eq!(core.online_sync_correction_threshold_ms, 400);
         assert_eq!(core.status, "Online sync correction threshold: 400ms");
+    }
+
+    #[test]
+    fn playback_settings_cover_template_cycle_stays_music_note() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.fallback_cover_template = CoverArtTemplate::Aurora;
+        let mut audio = TestAudioEngine::new();
+        let mut panel = ActionPanelState::PlaybackSettings { selected: 5 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert_eq!(core.fallback_cover_template, CoverArtTemplate::Aurora);
+        assert_eq!(core.status, "Missing cover fallback: Music Note");
     }
 
     #[test]
@@ -5036,6 +5130,46 @@ mod tests {
     }
 
     #[test]
+    fn mouse_scroll_targets_action_panel_when_open() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = TestAudioEngine::new();
+        let mut panel = ActionPanelState::Root {
+            selected: 0,
+            query: String::new(),
+        };
+        let mut recent_root_actions = Vec::new();
+        let online_runtime = test_online_runtime();
+
+        handle_mouse_with_panel(
+            &mut core,
+            &mut audio,
+            &mut panel,
+            &mut recent_root_actions,
+            &online_runtime,
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 2,
+                row: 2,
+                modifiers: KeyModifiers::NONE,
+            },
+            ratatui::prelude::Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 20,
+            },
+        );
+
+        assert!(matches!(
+            panel,
+            ActionPanelState::Root {
+                selected: 1,
+                query: _
+            }
+        ));
+    }
+
+    #[test]
     fn stats_tab_does_not_consume_ctrl_c() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Stats;
@@ -5103,7 +5237,9 @@ mod tests {
         core.theme = Theme::Galaxy;
         core.stats_enabled = false;
         core.stats_top_songs_count = 15;
-        let audio = TestAudioEngine::new();
+        core.fallback_cover_template = CoverArtTemplate::Aurora;
+        let mut audio = TestAudioEngine::new();
+        audio.set_volume(1.75);
 
         let state = persisted_state_with_audio(&core, &audio);
         assert!(state.loudness_normalization);
@@ -5113,6 +5249,19 @@ mod tests {
         assert_eq!(state.theme, Theme::Galaxy);
         assert!(!state.stats_enabled);
         assert_eq!(state.stats_top_songs_count, 15);
+        assert_eq!(state.fallback_cover_template, CoverArtTemplate::Aurora);
+        assert!((state.saved_volume - 1.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn apply_saved_volume_clamps_into_supported_range() {
+        let mut audio = TestAudioEngine::new();
+
+        apply_saved_volume(&mut audio, 3.25);
+        assert!((audio.volume() - MAX_VOLUME).abs() < f32::EPSILON);
+
+        apply_saved_volume(&mut audio, -0.5);
+        assert!((audio.volume() - 0.0).abs() < f32::EPSILON);
     }
 
     #[test]

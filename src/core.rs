@@ -1,7 +1,7 @@
 use crate::config;
 use crate::library;
 use crate::lyrics::{self, LyricLine, LyricsDocument, LyricsSource};
-use crate::model::{PersistedState, PlaybackMode, Playlist, Theme, Track};
+use crate::model::{CoverArtTemplate, PersistedState, PlaybackMode, Playlist, Theme, Track};
 use crate::online::OnlineState;
 use crate::stats::{StatsRange, StatsSort};
 use rand::SeedableRng;
@@ -111,6 +111,7 @@ pub struct TuneCore {
     pub stats_enabled: bool,
     pub online_sync_correction_threshold_ms: u16,
     pub stats_top_songs_count: u8,
+    pub fallback_cover_template: CoverArtTemplate,
     pub stats_range: StatsRange,
     pub stats_sort: StatsSort,
     pub stats_artist_filter: String,
@@ -163,6 +164,7 @@ impl TuneCore {
                 state.online_sync_correction_threshold_ms,
             ),
             stats_top_songs_count: normalize_stats_top_songs_count(state.stats_top_songs_count),
+            fallback_cover_template: state.fallback_cover_template,
             stats_range: StatsRange::Lifetime,
             stats_sort: StatsSort::ListenTime,
             stats_artist_filter: String::new(),
@@ -199,9 +201,11 @@ impl TuneCore {
             scrub_seconds: self.scrub_seconds,
             theme: self.theme,
             selected_output_device: None,
+            saved_volume: 1.0,
             stats_enabled: self.stats_enabled,
             online_sync_correction_threshold_ms: self.online_sync_correction_threshold_ms,
             stats_top_songs_count: self.stats_top_songs_count,
+            fallback_cover_template: self.fallback_cover_template,
         }
     }
 
