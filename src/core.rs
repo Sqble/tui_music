@@ -1,7 +1,7 @@
 use crate::config;
 use crate::library;
 use crate::lyrics::{self, LyricLine, LyricsDocument, LyricsSource};
-use crate::model::{PersistedState, PlaybackMode, Playlist, Theme, Track};
+use crate::model::{CoverArtTemplate, PersistedState, PlaybackMode, Playlist, Theme, Track};
 use crate::online::OnlineState;
 use crate::stats::{StatsRange, StatsSort};
 use rand::SeedableRng;
@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +110,8 @@ pub struct TuneCore {
     pub status: String,
     pub stats_enabled: bool,
     pub online_sync_correction_threshold_ms: u16,
+    pub stats_top_songs_count: u8,
+    pub fallback_cover_template: CoverArtTemplate,
     pub stats_range: StatsRange,
     pub stats_sort: StatsSort,
     pub stats_artist_filter: String,
@@ -125,6 +128,7 @@ pub struct TuneCore {
     pub lyrics_creation_declined: bool,
     pub online: OnlineState,
     duration_lookup: RefCell<HashMap<String, Option<u32>>>,
+    cover_art_lookup: RefCell<HashMap<String, Option<Arc<[u8]>>>>,
     shuffle_order: Vec<usize>,
     shuffle_cursor: usize,
     shuffle_rng: SmallRng,
@@ -159,6 +163,8 @@ impl TuneCore {
             online_sync_correction_threshold_ms: normalize_online_sync_correction_threshold_ms(
                 state.online_sync_correction_threshold_ms,
             ),
+            stats_top_songs_count: normalize_stats_top_songs_count(state.stats_top_songs_count),
+            fallback_cover_template: state.fallback_cover_template,
             stats_range: StatsRange::Lifetime,
             stats_sort: StatsSort::ListenTime,
             stats_artist_filter: String::new(),
@@ -175,6 +181,7 @@ impl TuneCore {
             lyrics_creation_declined: false,
             online: OnlineState::default(),
             duration_lookup: RefCell::new(HashMap::new()),
+            cover_art_lookup: RefCell::new(HashMap::new()),
             shuffle_order: Vec::new(),
             shuffle_cursor: 0,
             shuffle_rng: SmallRng::from_os_rng(),
@@ -194,8 +201,11 @@ impl TuneCore {
             scrub_seconds: self.scrub_seconds,
             theme: self.theme,
             selected_output_device: None,
+            saved_volume: 1.0,
             stats_enabled: self.stats_enabled,
             online_sync_correction_threshold_ms: self.online_sync_correction_threshold_ms,
+            stats_top_songs_count: self.stats_top_songs_count,
+            fallback_cover_template: self.fallback_cover_template,
         }
     }
 
@@ -1069,6 +1079,24 @@ impl TuneCore {
         duration
     }
 
+    pub fn cover_art_for_path(&self, path: &Path) -> Option<Arc<[u8]>> {
+        let key = normalized_path_key(path);
+        if let Some(cached) = self.cover_art_lookup.borrow().get(&key) {
+            return cached.clone();
+        }
+
+        let idx = self.track_index(path)?;
+        let cover_art = self
+            .tracks
+            .get(idx)
+            .and_then(|track| library::embedded_cover_art(&track.path))
+            .map(Arc::<[u8]>::from);
+        self.cover_art_lookup
+            .borrow_mut()
+            .insert(key, cover_art.clone());
+        cover_art
+    }
+
     pub fn next_track_path(&mut self) -> Option<PathBuf> {
         if self.queue.is_empty() {
             self.set_status("Queue is empty");
@@ -1517,6 +1545,13 @@ fn normalize_online_sync_correction_threshold_ms(ms: u16) -> u16 {
     ms.clamp(50, 1_000)
 }
 
+fn normalize_stats_top_songs_count(count: u8) -> u8 {
+    match count {
+        5 | 8 | 10 | 12 | 15 => count,
+        _ => 10,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1562,6 +1597,17 @@ mod tests {
         core.cycle_header_section();
         core.cycle_header_section();
         assert_eq!(core.header_section, HeaderSection::Library);
+    }
+
+    #[test]
+    fn invalid_stats_top_songs_count_defaults_to_ten() {
+        let state = PersistedState {
+            stats_top_songs_count: 99,
+            ..PersistedState::default()
+        };
+
+        let core = TuneCore::from_persisted(state);
+        assert_eq!(core.stats_top_songs_count, 10);
     }
 
     #[test]

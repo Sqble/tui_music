@@ -4,19 +4,24 @@ use crate::core::HeaderSection;
 use crate::core::LyricsMode;
 use crate::core::StatsFilterFocus;
 use crate::core::TuneCore;
-use crate::model::Theme;
+use crate::model::{CoverArtTemplate, Theme};
 use crate::online::OnlineSession;
 use crate::stats::{ListenEvent, StatsRange, StatsSnapshot, StatsSort, TrendSeries};
+use image::imageops::FilterType;
+use image::{ImageBuffer, ImageFormat, Rgba};
 use ratatui::prelude::*;
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use time::{OffsetDateTime, UtcOffset};
 
-const APP_TITLE_WITH_VERSION: &str = "TuneTUI v1.0.0-alpha-3  ";
+const APP_TITLE: &str = "TuneTUI";
+const APP_VERSION: &str = "v1.0.0-alpha-3";
 
 pub struct ActionPanelView {
     pub title: String,
@@ -53,7 +58,8 @@ pub struct OverlayViews<'a> {
 struct ThemePalette {
     bg: Color,
     panel_bg: Color,
-    panel_alt_bg: Color,
+    content_panel_bg: Color,
+    content_panel_alt_bg: Color,
     border: Color,
     text: Color,
     muted: Color,
@@ -71,8 +77,9 @@ fn palette(theme: Theme) -> ThemePalette {
     match theme {
         Theme::Dark => ThemePalette {
             bg: Color::Rgb(10, 15, 24),
-            panel_bg: Color::Rgb(19, 29, 43),
-            panel_alt_bg: Color::Rgb(24, 38, 58),
+            panel_bg: Color::Rgb(29, 47, 72),
+            content_panel_bg: Color::Rgb(19, 29, 43),
+            content_panel_alt_bg: Color::Rgb(22, 36, 56),
             border: Color::Rgb(69, 121, 176),
             text: Color::Rgb(214, 228, 248),
             muted: Color::Rgb(149, 173, 204),
@@ -87,8 +94,9 @@ fn palette(theme: Theme) -> ThemePalette {
         },
         Theme::PitchBlack => ThemePalette {
             bg: Color::Rgb(0, 0, 0),
-            panel_bg: Color::Rgb(8, 8, 8),
-            panel_alt_bg: Color::Rgb(15, 15, 15),
+            panel_bg: Color::Rgb(20, 20, 20),
+            content_panel_bg: Color::Rgb(8, 8, 8),
+            content_panel_alt_bg: Color::Rgb(13, 13, 13),
             border: Color::Rgb(74, 74, 74),
             text: Color::Rgb(242, 242, 242),
             muted: Color::Rgb(150, 150, 150),
@@ -103,8 +111,9 @@ fn palette(theme: Theme) -> ThemePalette {
         },
         Theme::Galaxy => ThemePalette {
             bg: Color::Rgb(7, 8, 23),
-            panel_bg: Color::Rgb(18, 16, 44),
-            panel_alt_bg: Color::Rgb(27, 25, 61),
+            panel_bg: Color::Rgb(36, 33, 82),
+            content_panel_bg: Color::Rgb(18, 16, 44),
+            content_panel_alt_bg: Color::Rgb(26, 24, 63),
             border: Color::Rgb(108, 107, 205),
             text: Color::Rgb(227, 225, 252),
             muted: Color::Rgb(167, 165, 210),
@@ -119,8 +128,9 @@ fn palette(theme: Theme) -> ThemePalette {
         },
         Theme::Matrix => ThemePalette {
             bg: Color::Rgb(4, 12, 4),
-            panel_bg: Color::Rgb(8, 22, 8),
-            panel_alt_bg: Color::Rgb(12, 30, 12),
+            panel_bg: Color::Rgb(16, 40, 16),
+            content_panel_bg: Color::Rgb(8, 22, 8),
+            content_panel_alt_bg: Color::Rgb(11, 28, 11),
             border: Color::Rgb(39, 143, 62),
             text: Color::Rgb(180, 255, 185),
             muted: Color::Rgb(102, 177, 115),
@@ -135,8 +145,9 @@ fn palette(theme: Theme) -> ThemePalette {
         },
         Theme::Demonic => ThemePalette {
             bg: Color::Rgb(16, 2, 2),
-            panel_bg: Color::Rgb(30, 6, 7),
-            panel_alt_bg: Color::Rgb(44, 10, 11),
+            panel_bg: Color::Rgb(56, 13, 14),
+            content_panel_bg: Color::Rgb(30, 6, 7),
+            content_panel_alt_bg: Color::Rgb(41, 9, 10),
             border: Color::Rgb(176, 38, 38),
             text: Color::Rgb(245, 214, 214),
             muted: Color::Rgb(188, 133, 133),
@@ -151,8 +162,9 @@ fn palette(theme: Theme) -> ThemePalette {
         },
         Theme::CottonCandy => ThemePalette {
             bg: Color::Rgb(34, 21, 44),
-            panel_bg: Color::Rgb(51, 29, 68),
-            panel_alt_bg: Color::Rgb(66, 38, 86),
+            panel_bg: Color::Rgb(80, 46, 105),
+            content_panel_bg: Color::Rgb(51, 29, 68),
+            content_panel_alt_bg: Color::Rgb(61, 35, 81),
             border: Color::Rgb(245, 146, 208),
             text: Color::Rgb(255, 233, 250),
             muted: Color::Rgb(224, 173, 219),
@@ -177,6 +189,7 @@ pub fn library_rect(area: Rect) -> Rect {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
         ])
@@ -211,30 +224,30 @@ pub fn draw(
             Constraint::Min(8),
             Constraint::Length(3),
             Constraint::Length(3),
+            Constraint::Length(3),
         ])
         .split(frame.area());
 
-    frame.render_widget(
-        panel_block("Status", colors.panel_bg, colors.text, colors.border),
-        vertical[0],
-    );
+    frame.render_widget(status_panel_block(&colors), vertical[0]);
 
     let header_inner = vertical[0].inner(Margin {
         vertical: 0,
         horizontal: 1,
     });
+    let tabs_width = header_tabs_width().min(header_inner.width.saturating_sub(1));
     let header_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(44), Constraint::Percentage(56)])
+        .constraints([Constraint::Min(0), Constraint::Length(tabs_width)])
         .split(header_inner);
 
     let header_left = Paragraph::new(Line::from(vec![
         Span::styled(
-            APP_TITLE_WITH_VERSION,
+            APP_TITLE,
             Style::default()
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled("  ", Style::default().fg(colors.muted)),
         Span::styled(
             format!("Tracks {}", core.tracks.len()),
             Style::default().fg(colors.text),
@@ -247,9 +260,9 @@ pub fn draw(
         Span::styled("  |  ", Style::default().fg(colors.muted)),
         Span::styled(
             if core.online.session.is_some() {
-                "Online LIVE"
+                "ONLINE"
             } else {
-                "Online OFF"
+                "OFFLINE"
             },
             Style::default().fg(if core.online.session.is_some() {
                 colors.accent
@@ -260,8 +273,8 @@ pub fn draw(
     ]));
     frame.render_widget(header_left, header_chunks[0]);
 
-    let header_right = Paragraph::new(header_section_line(core.header_section, &colors))
-        .alignment(Alignment::Right);
+    let header_right =
+        Paragraph::new(header_tabs_line(core.header_section, &colors)).alignment(Alignment::Right);
     frame.render_widget(header_right, header_chunks[1]);
 
     let body = Layout::default()
@@ -314,7 +327,7 @@ pub fn draw(
         let list = List::new(items)
             .block(panel_block(
                 &library_title,
-                colors.panel_bg,
+                colors.content_panel_bg,
                 colors.text,
                 colors.border,
             ))
@@ -326,6 +339,25 @@ pub fn draw(
             )
             .highlight_symbol("-> ");
         frame.render_stateful_widget(list, body[0], &mut state);
+
+        let library_inner = body[0].inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        let library_viewport_lines = usize::from(library_inner.height);
+        let total_library_rows = core.browser_entries.len();
+        if library_viewport_lines > 0 && list_overflows(total_library_rows, library_viewport_lines)
+        {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_style(Style::default().fg(colors.border))
+                .thumb_style(Style::default().fg(colors.accent));
+            let mut scrollbar_state = ScrollbarState::new(total_library_rows)
+                .position(state.offset())
+                .viewport_content_length(library_viewport_lines);
+            frame.render_stateful_widget(scrollbar, body[0], &mut scrollbar_state);
+        }
 
         let now_playing = audio.current_track().or_else(|| core.current_path());
         let now_playing_title = now_playing
@@ -417,15 +449,51 @@ pub fn draw(
                 Style::default().fg(colors.muted),
             )),
         ];
-        let info_block = Paragraph::new(info_text)
-            .block(panel_block(
+
+        frame.render_widget(
+            panel_block(
                 "Song Info",
-                colors.panel_alt_bg,
+                colors.content_panel_alt_bg,
                 colors.text,
                 colors.border,
-            ))
-            .wrap(Wrap { trim: true });
-        frame.render_widget(info_block, body[1]);
+            ),
+            body[1],
+        );
+
+        let info_inner = body[1].inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        if info_inner.width > 0 && info_inner.height > 0 {
+            let details_height = info_inner.height.min(9);
+            let cover_height = info_inner.height.saturating_sub(details_height);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(cover_height),
+                    Constraint::Length(details_height),
+                ])
+                .split(info_inner);
+
+            if chunks[0].height > 0 {
+                let cover_lines = now_playing
+                    .and_then(|path| {
+                        cover_art_lines_for_path(path, core, chunks[0].width, chunks[0].height)
+                    })
+                    .unwrap_or_else(|| cover_placeholder_lines(chunks[0].width, chunks[0].height));
+                frame.render_widget(
+                    Paragraph::new(cover_lines).style(Style::default().fg(colors.muted)),
+                    chunks[0],
+                );
+            }
+
+            if chunks[1].height > 0 {
+                frame.render_widget(
+                    Paragraph::new(info_text).wrap(Wrap { trim: true }),
+                    chunks[1],
+                );
+            }
+        }
     } else {
         match core.header_section {
             HeaderSection::Library => {}
@@ -441,7 +509,7 @@ pub fn draw(
         }
     }
 
-    let timeline_text = timeline_line(audio, 26, 14);
+    let timeline_text = timeline_line(audio, 42);
     let timeline_block = Paragraph::new(Span::styled(
         timeline_text,
         Style::default().fg(colors.text),
@@ -454,6 +522,18 @@ pub fn draw(
     ))
     .wrap(Wrap { trim: true });
     frame.render_widget(timeline_block, vertical[2]);
+
+    let control_text = control_line(audio, 16);
+    let control_block =
+        Paragraph::new(Span::styled(control_text, Style::default().fg(colors.text)))
+            .block(panel_block(
+                "Control",
+                colors.panel_bg,
+                colors.text,
+                colors.border,
+            ))
+            .wrap(Wrap { trim: true });
+    frame.render_widget(control_block, vertical[3]);
 
     let key_hint = if core.header_section == HeaderSection::Stats {
         "Keys: Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top, Tab tabs"
@@ -475,7 +555,7 @@ pub fn draw(
         colors.text,
         colors.border,
     ));
-    frame.render_widget(footer, vertical[3]);
+    frame.render_widget(footer, vertical[4]);
 
     if let Some(panel) = action_panel {
         draw_action_panel(frame, panel, &colors);
@@ -651,14 +731,8 @@ fn draw_host_invite_modal(frame: &mut Frame, modal: &HostInviteModalView, colors
     );
 }
 
-fn header_section_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'static> {
-    let mut spans = vec![Span::styled(
-        "Press Tab to switch",
-        Style::default()
-            .fg(colors.switch_hint)
-            .add_modifier(Modifier::BOLD),
-    )];
-    spans.push(Span::styled(" - ", Style::default().fg(colors.muted)));
+fn header_tabs_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'static> {
+    let mut spans = Vec::new();
 
     for (idx, section) in [
         HeaderSection::Library,
@@ -689,6 +763,27 @@ fn header_section_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'
     Line::from(spans)
 }
 
+fn header_tabs_width() -> u16 {
+    let labels = [
+        HeaderSection::Library.label(),
+        HeaderSection::Lyrics.label(),
+        HeaderSection::Stats.label(),
+        HeaderSection::Online.label(),
+    ];
+    let labels_len: usize = labels.iter().map(|label| label.len()).sum();
+    let separators_len = " -- ".len() * labels.len().saturating_sub(1);
+    (labels_len + separators_len) as u16
+}
+
+fn header_switch_hint_line(colors: &ThemePalette) -> Line<'static> {
+    Line::from(Span::styled(
+        "Press Tab to switch",
+        Style::default()
+            .fg(colors.switch_hint)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
 fn draw_placeholder_section(
     frame: &mut Frame,
     body: &[Rect],
@@ -700,7 +795,7 @@ fn draw_placeholder_section(
         Paragraph::new(Span::styled(message, Style::default().fg(colors.muted)))
             .block(panel_block(
                 title,
-                colors.panel_bg,
+                colors.content_panel_bg,
                 colors.text,
                 colors.border,
             ))
@@ -715,7 +810,7 @@ fn draw_placeholder_section(
         ))
         .block(panel_block(
             "Info",
-            colors.panel_alt_bg,
+            colors.content_panel_alt_bg,
             colors.text,
             colors.border,
         )),
@@ -819,7 +914,7 @@ fn draw_online_section(
     let left = Paragraph::new(left_lines)
         .block(panel_block(
             "Online Session",
-            colors.panel_bg,
+            colors.content_panel_bg,
             colors.text,
             colors.border,
         ))
@@ -875,7 +970,7 @@ fn draw_online_section(
     let right = Paragraph::new(right_lines)
         .block(panel_block(
             "Room Data",
-            colors.panel_alt_bg,
+            colors.content_panel_alt_bg,
             colors.text,
             colors.border,
         ))
@@ -969,7 +1064,7 @@ fn draw_lyrics_section(
     let left = Paragraph::new(playback_lines)
         .block(panel_block(
             "Lyrics Playback",
-            colors.panel_bg,
+            colors.content_panel_bg,
             colors.text,
             colors.border,
         ))
@@ -1047,7 +1142,7 @@ fn draw_lyrics_section(
             let right = Paragraph::new(right_lines)
                 .block(panel_block(
                     "Lyrics Editor",
-                    colors.panel_alt_bg,
+                    colors.content_panel_alt_bg,
                     colors.text,
                     colors.border,
                 ))
@@ -1061,7 +1156,7 @@ fn draw_lyrics_section(
     let right = Paragraph::new(right_lines)
         .block(panel_block(
             "Lyrics Editor",
-            colors.panel_alt_bg,
+            colors.content_panel_alt_bg,
             colors.text,
             colors.border,
         ))
@@ -1213,7 +1308,8 @@ fn draw_stats_section(
             .add_modifier(Modifier::BOLD),
     )));
 
-    for (index, row) in snapshot.rows.iter().take(8).enumerate() {
+    let top_songs_limit = usize::from(core.stats_top_songs_count.max(1));
+    for (index, row) in snapshot.rows.iter().take(top_songs_limit).enumerate() {
         let value = match core.stats_sort {
             StatsSort::Plays => row.play_count,
             StatsSort::ListenTime => row.listen_seconds,
@@ -1243,10 +1339,11 @@ fn draw_stats_section(
         )));
     }
 
+    let total_left_lines = left_lines.len();
     let left = Paragraph::new(left_lines)
         .block(panel_block(
             "Stats",
-            colors.panel_bg,
+            colors.content_panel_bg,
             colors.text,
             colors.border,
         ))
@@ -1254,19 +1351,41 @@ fn draw_stats_section(
         .wrap(Wrap { trim: false });
     frame.render_widget(left, horizontal[0]);
 
+    let stats_inner = horizontal[0].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let stats_viewport_lines = usize::from(stats_inner.height);
+    if stats_viewport_lines > 0 && list_overflows(total_left_lines, stats_viewport_lines) {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
+            .track_style(Style::default().fg(colors.border))
+            .thumb_style(Style::default().fg(colors.accent));
+        let mut scrollbar_state = ScrollbarState::new(total_left_lines)
+            .position(usize::from(core.stats_scroll))
+            .viewport_content_length(stats_viewport_lines);
+        frame.render_stateful_widget(scrollbar, horizontal[0], &mut scrollbar_state);
+    }
+
     let mut recent_lines = vec![Line::from(Span::styled(
         "Recent plays",
         Style::default()
             .fg(colors.text)
             .add_modifier(Modifier::BOLD),
     ))];
-    for event in &snapshot.recent {
+    let recent_inner = horizontal[1].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let max_recent_rows = usize::from(recent_inner.height.saturating_sub(1));
+    for event in snapshot.recent.iter().take(max_recent_rows) {
         recent_lines.push(Line::from(Span::styled(
             format_recent_event(event, now),
             Style::default().fg(colors.muted),
         )));
     }
-    if snapshot.recent.is_empty() {
+    if snapshot.recent.is_empty() && max_recent_rows > 0 {
         recent_lines.push(Line::from(Span::styled(
             "No recent listens yet.",
             Style::default().fg(colors.muted),
@@ -1276,7 +1395,7 @@ fn draw_stats_section(
     let right = Paragraph::new(recent_lines)
         .block(panel_block(
             "Recent Log",
-            colors.panel_alt_bg,
+            colors.content_panel_alt_bg,
             colors.text,
             colors.border,
         ))
@@ -1563,8 +1682,14 @@ fn format_clock_label_local(
         value => value,
     };
 
-    let include_date = span_seconds > 86_400 && !matches!(unit, crate::stats::TrendUnit::Hours);
-    if include_date {
+    if matches!(
+        unit,
+        crate::stats::TrendUnit::Days
+            | crate::stats::TrendUnit::Weeks
+            | crate::stats::TrendUnit::AllTime
+    ) {
+        format!("{}/{}", dt.month() as u8, dt.day())
+    } else if span_seconds > 86_400 && !matches!(unit, crate::stats::TrendUnit::Hours) {
         format!(
             "{}/{} {}:{:02}{}",
             dt.month() as u8,
@@ -1624,7 +1749,9 @@ fn short_metric_label(value: u64, sort: StatsSort) -> String {
     match sort {
         StatsSort::Plays => format!("{value}p"),
         StatsSort::ListenTime => {
-            if value >= 60 {
+            if value >= 7_200 {
+                format!("{:.1}h", value as f64 / 3_600.0)
+            } else if value >= 60 {
                 format!("{}m", value / 60)
             } else {
                 format!("{}s", value)
@@ -1719,6 +1846,21 @@ fn panel_block(title: &str, bg: Color, text: Color, border: Color) -> Block<'_> 
         ))
         .border_style(Style::default().fg(border))
         .style(Style::default().bg(bg))
+}
+
+fn status_panel_block(colors: &ThemePalette) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .title(Span::styled(
+            " Status ",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(APP_VERSION, Style::default().fg(colors.muted)))
+        .title_bottom(header_switch_hint_line(colors).alignment(Alignment::Right))
+        .border_style(Style::default().fg(colors.border))
+        .style(Style::default().bg(colors.panel_bg))
 }
 
 fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemePalette) {
@@ -1865,6 +2007,290 @@ fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
     horizontal[1]
 }
 
+#[derive(Clone, Hash, PartialEq, Eq)]
+struct CoverRasterCacheKey {
+    source_key: String,
+    width: u16,
+    height: u16,
+}
+
+fn cover_art_lines_for_path(
+    path: &Path,
+    core: &TuneCore,
+    width: u16,
+    height: u16,
+) -> Option<Vec<Line<'static>>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let (source_key, art_bytes) = if let Some(embedded_art) = core.cover_art_for_path(path) {
+        (path.to_string_lossy().into_owned(), embedded_art)
+    } else {
+        let fallback = fallback_cover_template_bytes(core.fallback_cover_template)?;
+        (
+            format!(
+                "fallback:{}",
+                fallback_cover_template_id(core.fallback_cover_template)
+            ),
+            fallback,
+        )
+    };
+
+    let key = CoverRasterCacheKey {
+        source_key,
+        width,
+        height,
+    };
+
+    if let Ok(cache) = cover_raster_cache().lock()
+        && let Some(cached) = cache.get(&key)
+    {
+        return Some(cached.clone());
+    }
+
+    let rasterized = rasterize_cover_art(&art_bytes, width, height)?;
+
+    if let Ok(mut cache) = cover_raster_cache().lock() {
+        cache.insert(key, rasterized.clone());
+    }
+
+    Some(rasterized)
+}
+
+fn fallback_cover_template_cache() -> &'static Mutex<HashMap<CoverArtTemplate, Arc<[u8]>>> {
+    static FALLBACK_COVER_TEMPLATE_CACHE: OnceLock<Mutex<HashMap<CoverArtTemplate, Arc<[u8]>>>> =
+        OnceLock::new();
+    FALLBACK_COVER_TEMPLATE_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn fallback_cover_template_bytes(template: CoverArtTemplate) -> Option<Arc<[u8]>> {
+    if let Ok(cache) = fallback_cover_template_cache().lock()
+        && let Some(bytes) = cache.get(&template)
+    {
+        return Some(bytes.clone());
+    }
+
+    let generated = generate_fallback_cover_template_png(template)?;
+    let generated = Arc::<[u8]>::from(generated);
+    if let Ok(mut cache) = fallback_cover_template_cache().lock() {
+        cache.insert(template, generated.clone());
+    }
+    Some(generated)
+}
+
+fn fallback_cover_template_id(_template: CoverArtTemplate) -> &'static str {
+    "music-note"
+}
+
+fn generate_fallback_cover_template_png(template: CoverArtTemplate) -> Option<Vec<u8>> {
+    const WIDTH: u32 = 160;
+    const HEIGHT: u32 = 160;
+    let image = ImageBuffer::from_fn(WIDTH, HEIGHT, |x, y| {
+        let pixel = fallback_cover_template_pixel(template, x, y, WIDTH, HEIGHT);
+        Rgba([pixel.0, pixel.1, pixel.2, 255])
+    });
+
+    let mut bytes = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut bytes);
+    image
+        .write_to(&mut cursor, ImageFormat::Png)
+        .ok()
+        .map(|_| bytes)
+}
+
+fn fallback_cover_template_pixel(
+    _template: CoverArtTemplate,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> (u8, u8, u8) {
+    let x = x.min(width.saturating_sub(1));
+    let y = y.min(height.saturating_sub(1));
+    let x_ratio = (x.saturating_mul(255) / width.max(1)) as u8;
+    let y_ratio = (y.saturating_mul(255) / height.max(1)) as u8;
+
+    let mut r = 10u8.saturating_add(x_ratio / 7);
+    let mut g = 24u8.saturating_add(y_ratio / 5);
+    let mut b = 48u8.saturating_add(x_ratio / 3).saturating_add(y_ratio / 6);
+
+    let xi = x as i32;
+    let yi = y as i32;
+    let wi = width.max(1) as i32;
+    let hi = height.max(1) as i32;
+
+    let stem_left = wi * 9 / 16;
+    let stem_right = stem_left + (wi / 16).max(3);
+    let stem_top = hi * 3 / 16;
+    let stem_bottom = hi * 11 / 16;
+    let on_stem = xi >= stem_left && xi <= stem_right && yi >= stem_top && yi <= stem_bottom;
+
+    let head_cx = wi * 7 / 16;
+    let head_cy = hi * 11 / 16;
+    let head_rx = (wi / 7).max(5);
+    let head_ry = (hi / 9).max(4);
+    let dx = xi - head_cx;
+    let dy = yi - head_cy;
+    let in_head = (dx * dx * head_ry * head_ry) + (dy * dy * head_rx * head_rx)
+        <= (head_rx * head_rx * head_ry * head_ry);
+
+    let flag_top = hi * 3 / 16;
+    let flag_height = (hi / 5).max(6);
+    let flag_width = (wi / 4).max(10);
+    let rel_x = xi - stem_left;
+    let rel_y = yi - flag_top;
+    let in_flag = rel_x >= 0
+        && rel_x <= flag_width
+        && rel_y >= 0
+        && rel_y <= flag_height
+        && (rel_y * flag_width) <= (flag_height * rel_x + flag_width / 2);
+
+    let note_color = (230u8, 236u8, 247u8);
+    if on_stem || in_head || in_flag {
+        return note_color;
+    }
+
+    let dist_stem = if xi < stem_left {
+        stem_left - xi
+    } else if xi > stem_right {
+        xi - stem_right
+    } else {
+        0
+    } + if yi < stem_top {
+        stem_top - yi
+    } else if yi > stem_bottom {
+        yi - stem_bottom
+    } else {
+        0
+    };
+
+    let head_distance = ((dx * dx + dy * dy) as f32).sqrt() as i32 - head_rx.max(head_ry);
+    let glow_dist = dist_stem.min(head_distance.max(0));
+    if glow_dist <= 4 {
+        let glow = (5 - glow_dist).max(1) as u8 * 10;
+        r = r.saturating_add(glow / 2);
+        g = g.saturating_add(glow / 2);
+        b = b.saturating_add(glow);
+    }
+
+    (r, g, b)
+}
+
+fn cover_raster_cache() -> &'static Mutex<HashMap<CoverRasterCacheKey, Vec<Line<'static>>>> {
+    static COVER_RASTER_CACHE: OnceLock<Mutex<HashMap<CoverRasterCacheKey, Vec<Line<'static>>>>> =
+        OnceLock::new();
+    COVER_RASTER_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn rasterize_cover_art(bytes: &[u8], width: u16, height: u16) -> Option<Vec<Line<'static>>> {
+    let width = width.max(1) as usize;
+    let height = height.max(1) as usize;
+    let target_width_pixels = width as u32;
+    let target_height_pixels = (height * 2) as u32;
+
+    let decoded = image::load_from_memory(bytes).ok()?.to_rgba8();
+    let source_width = decoded.width();
+    let source_height = decoded.height();
+    if source_width == 0 || source_height == 0 {
+        return None;
+    }
+
+    let (scaled_width, scaled_height, x_offset, y_offset) = fit_image_box(
+        source_width,
+        source_height,
+        target_width_pixels,
+        target_height_pixels,
+    );
+    let resized =
+        image::imageops::resize(&decoded, scaled_width, scaled_height, FilterType::Triangle);
+
+    let mut lines = Vec::with_capacity(height);
+    for row in 0..height {
+        let top_y = (row * 2) as u32;
+        let bottom_y = (top_y + 1).min(target_height_pixels.saturating_sub(1));
+        let mut spans = Vec::with_capacity(width);
+
+        for column in 0..width {
+            let x = column as u32;
+            if x < x_offset || x >= x_offset + scaled_width {
+                spans.push(Span::raw(" "));
+                continue;
+            }
+
+            if top_y < y_offset || top_y >= y_offset + scaled_height {
+                spans.push(Span::raw(" "));
+                continue;
+            }
+
+            let local_x = x - x_offset;
+            let top_local_y = top_y - y_offset;
+            let bottom_local_y = bottom_y.saturating_sub(y_offset).min(scaled_height - 1);
+            let top = resized.get_pixel(local_x, top_local_y).0;
+            let bottom = resized.get_pixel(local_x, bottom_local_y).0;
+            spans.push(Span::styled(
+                "▀",
+                Style::default()
+                    .fg(rgba_to_color(top))
+                    .bg(rgba_to_color(bottom)),
+            ));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    Some(lines)
+}
+
+fn fit_image_box(
+    source_width: u32,
+    source_height: u32,
+    target_width: u32,
+    target_height: u32,
+) -> (u32, u32, u32, u32) {
+    let width_limited =
+        target_width.saturating_mul(source_height) <= target_height.saturating_mul(source_width);
+
+    let (scaled_width, scaled_height) = if width_limited {
+        let scaled_height = (source_height.saturating_mul(target_width) / source_width).max(1);
+        (target_width.max(1), scaled_height)
+    } else {
+        let scaled_width = (source_width.saturating_mul(target_height) / source_height).max(1);
+        (scaled_width, target_height.max(1))
+    };
+
+    let x_offset = target_width.saturating_sub(scaled_width) / 2;
+    let y_offset = target_height.saturating_sub(scaled_height) / 2;
+    (scaled_width, scaled_height, x_offset, y_offset)
+}
+
+fn rgba_to_color(pixel: [u8; 4]) -> Color {
+    let alpha = pixel[3];
+    if alpha == 255 {
+        return Color::Rgb(pixel[0], pixel[1], pixel[2]);
+    }
+
+    let blend = |channel: u8| ((u16::from(channel) * u16::from(alpha)) / 255) as u8;
+    Color::Rgb(blend(pixel[0]), blend(pixel[1]), blend(pixel[2]))
+}
+
+fn cover_placeholder_lines(width: u16, height: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    let height = height.max(1) as usize;
+    let mut lines = vec![Line::from(" ".repeat(width)); height];
+
+    let label = "No cover art";
+    let row = height / 2;
+    let available = width.min(label.len());
+    let start = width.saturating_sub(available) / 2;
+    let end = start + available;
+
+    let mut content = " ".repeat(width);
+    content.replace_range(start..end, &label[..available]);
+    lines[row] = Line::from(content);
+    lines
+}
+
 fn format_duration(duration: Duration) -> String {
     let total_seconds = duration.as_secs();
     let minutes = total_seconds / 60;
@@ -1890,11 +2316,7 @@ fn progress_bar(ratio: Option<f64>, width: usize) -> String {
     bar
 }
 
-fn timeline_line(
-    audio: &dyn AudioEngine,
-    timeline_bar_width: usize,
-    volume_bar_width: usize,
-) -> String {
+fn timeline_line(audio: &dyn AudioEngine, timeline_bar_width: usize) -> String {
     let elapsed = audio.position().unwrap_or(Duration::from_secs(0));
     let total = audio.duration();
     let ratio = total.and_then(|duration| {
@@ -1902,16 +2324,22 @@ fn timeline_line(
         (total_secs > 0.0).then_some((elapsed.as_secs_f64() / total_secs).clamp(0.0, 1.0))
     });
 
-    let volume_percent = (audio.volume() * 100.0).round() as u16;
-    let volume_ratio = audio.volume().clamp(0.0, 1.0) as f64;
-
     format!(
-        "{} / {} {}  |  Vol {} {:>3}%  +/- adjust  Shift fine  |  A/D scrub",
+        "{} / {} {}",
         format_duration(elapsed),
         total
             .map(format_duration)
             .unwrap_or_else(|| String::from("--:--")),
         progress_bar(ratio, timeline_bar_width),
+    )
+}
+
+fn control_line(audio: &dyn AudioEngine, volume_bar_width: usize) -> String {
+    let volume_percent = (audio.volume() * 100.0).round() as u16;
+    let volume_ratio = audio.volume().clamp(0.0, 1.0) as f64;
+
+    format!(
+        "Vol {} {:>3}%  +/- adjust  Shift fine  |  A/D scrub",
         progress_bar(Some(volume_ratio), volume_bar_width),
         volume_percent
     )
@@ -1920,6 +2348,8 @@ fn timeline_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{ImageBuffer, ImageFormat, Rgba};
+    use std::io::Cursor;
 
     #[test]
     fn centered_scroll_top_centers_focus_when_possible() {
@@ -1948,6 +2378,24 @@ mod tests {
     }
 
     #[test]
+    fn timeline_line_only_shows_timeline_data() {
+        let mut audio = crate::audio::NullAudioEngine::new();
+        audio.set_volume(1.4);
+        let line = timeline_line(&audio, 10);
+        assert!(line.contains('/'));
+        assert!(!line.contains("Vol"));
+    }
+
+    #[test]
+    fn control_line_shows_volume_and_scrub_hints() {
+        let mut audio = crate::audio::NullAudioEngine::new();
+        audio.set_volume(1.2);
+        let line = control_line(&audio, 10);
+        assert!(line.contains("Vol"));
+        assert!(line.contains("A/D scrub"));
+    }
+
+    #[test]
     fn hour_clock_labels_omit_date_even_when_span_crosses_days() {
         let label =
             format_clock_label_local(1_700_000_000, 200_000, crate::stats::TrendUnit::Hours);
@@ -1958,6 +2406,17 @@ mod tests {
     fn day_clock_labels_include_date_for_multi_day_span() {
         let label = format_clock_label_local(1_700_000_000, 200_000, crate::stats::TrendUnit::Days);
         assert!(label.contains('/'));
+        assert!(!label.contains(':'));
+    }
+
+    #[test]
+    fn listen_metric_label_uses_decimal_hours_when_over_two_hours() {
+        assert_eq!(short_metric_label(43_080, StatsSort::ListenTime), "12.0h");
+    }
+
+    #[test]
+    fn listen_metric_label_stays_in_minutes_under_two_hours() {
+        assert_eq!(short_metric_label(7_140, StatsSort::ListenTime), "119m");
     }
 
     #[test]
@@ -1973,5 +2432,69 @@ mod tests {
                 || label.starts_with("Sat")
                 || label.starts_with("Sun")
         );
+    }
+
+    #[test]
+    fn rasterize_cover_art_outputs_requested_dimensions() {
+        let image = ImageBuffer::from_fn(2, 2, |x, y| {
+            if (x + y) % 2 == 0 {
+                Rgba([255u8, 40u8, 40u8, 255u8])
+            } else {
+                Rgba([40u8, 180u8, 255u8, 255u8])
+            }
+        });
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("encode png");
+
+        let lines = rasterize_cover_art(&bytes, 6, 4).expect("rasterized lines");
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|line| line.spans.len() == 6));
+    }
+
+    #[test]
+    fn cover_placeholder_contains_label() {
+        let lines = cover_placeholder_lines(16, 5);
+        assert_eq!(lines.len(), 5);
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.to_string().contains("No cover art"))
+        );
+    }
+
+    #[test]
+    fn fit_image_box_letterboxes_wide_image() {
+        let (scaled_w, scaled_h, x_off, y_off) = fit_image_box(1000, 500, 20, 24);
+        assert_eq!(scaled_w, 20);
+        assert_eq!(scaled_h, 10);
+        assert_eq!(x_off, 0);
+        assert_eq!(y_off, 7);
+    }
+
+    #[test]
+    fn fit_image_box_letterboxes_tall_image() {
+        let (scaled_w, scaled_h, x_off, y_off) = fit_image_box(500, 1000, 20, 24);
+        assert_eq!(scaled_h, 24);
+        assert_eq!(scaled_w, 12);
+        assert_eq!(x_off, 4);
+        assert_eq!(y_off, 0);
+    }
+
+    #[test]
+    fn fallback_template_png_generation_works_for_all_templates() {
+        let bytes =
+            generate_fallback_cover_template_png(CoverArtTemplate::Aurora).expect("template png");
+        let lines = rasterize_cover_art(&bytes, 8, 4).expect("rasterized lines");
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().all(|line| line.spans.len() == 8));
+    }
+
+    #[test]
+    fn fallback_template_bytes_are_cached_by_template() {
+        let first = fallback_cover_template_bytes(CoverArtTemplate::Aurora).expect("first");
+        let second = fallback_cover_template_bytes(CoverArtTemplate::Aurora).expect("second");
+        assert!(Arc::ptr_eq(&first, &second));
     }
 }
