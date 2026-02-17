@@ -123,3 +123,7 @@ powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
 ```bash
 bash scripts/verify.sh
 ```
+
+## License
+
+This project is licensed under the MIT License. See `LICENSE`.
