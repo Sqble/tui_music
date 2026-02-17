@@ -3211,15 +3211,10 @@ fn handle_stream_quality_change(
     new_quality: StreamQuality,
 ) {
     let remote_path = online_runtime.remote_logical_track.clone();
-    let active_streamed = remote_path.as_ref().is_some_and(|path| {
-        online_runtime
-            .streamed_track_cache
-            .get(path)
-            .is_some_and(|cached| {
-                audio
-                    .current_track()
-                    .is_some_and(|current| current == cached)
-            })
+    let active_streamed = remote_path.as_ref().is_some_and(|logical_path| {
+        audio
+            .current_track()
+            .is_some_and(|current| current != logical_path.as_path())
     });
 
     for cached in online_runtime.streamed_track_cache.values() {
