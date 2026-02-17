@@ -3342,14 +3342,15 @@ fn apply_remote_transport(
             album,
             provider_track_id,
         } => {
+            online_runtime.remote_logical_track = Some(path.clone());
+            online_runtime.remote_track_title = title.clone();
+            online_runtime.remote_track_artist = artist.clone();
+            online_runtime.remote_track_album = album.clone();
+            online_runtime.remote_provider_track_id = provider_track_id
+                .clone()
+                .or_else(|| Some(provider_track_id_for_path(path)));
             if ensure_remote_track(core, audio, online_runtime, path) {
                 online_runtime.online_playback_source = OnlinePlaybackSource::LocalQueue;
-                online_runtime.remote_track_title = title.clone();
-                online_runtime.remote_track_artist = artist.clone();
-                online_runtime.remote_track_album = album.clone();
-                online_runtime.remote_provider_track_id = provider_track_id
-                    .clone()
-                    .or_else(|| Some(provider_track_id_for_path(path)));
                 core.current_queue_index = core.queue_position_for_path(path);
                 core.status = String::from("Remote switched track");
             }
@@ -3364,6 +3365,13 @@ fn apply_remote_transport(
             position_ms,
             paused,
         } => {
+            online_runtime.remote_logical_track = Some(path.clone());
+            online_runtime.remote_track_title = title.clone();
+            online_runtime.remote_track_artist = artist.clone();
+            online_runtime.remote_track_album = album.clone();
+            online_runtime.remote_provider_track_id = provider_track_id
+                .clone()
+                .or_else(|| Some(provider_track_id_for_path(path)));
             if !ensure_remote_track(core, audio, online_runtime, path) {
                 core.dirty = true;
                 return;
@@ -3401,13 +3409,6 @@ fn apply_remote_transport(
                 audio.resume();
             }
 
-            online_runtime.remote_logical_track = Some(path.clone());
-            online_runtime.remote_track_title = title.clone();
-            online_runtime.remote_track_artist = artist.clone();
-            online_runtime.remote_track_album = album.clone();
-            online_runtime.remote_provider_track_id = provider_track_id
-                .clone()
-                .or_else(|| Some(provider_track_id_for_path(path)));
             core.current_queue_index = core.queue_position_for_path(path);
             if let Some(session) = core.online.session.as_mut() {
                 session.last_sync_drift_ms = drift_ms.min(i64::from(i32::MAX)) as i32;
@@ -5528,6 +5529,7 @@ mod tests {
         loudness_normalization: bool,
         crossfade_seconds: u16,
         volume: f32,
+        fail_play: bool,
     }
 
     impl TestAudioEngine {
@@ -5547,6 +5549,7 @@ mod tests {
                 loudness_normalization: false,
                 crossfade_seconds: 0,
                 volume: 1.0,
+                fail_play: false,
             }
         }
 
@@ -5566,6 +5569,7 @@ mod tests {
                 loudness_normalization: false,
                 crossfade_seconds: 0,
                 volume: 1.0,
+                fail_play: false,
             }
         }
     }
@@ -5628,6 +5632,9 @@ mod tests {
 
     impl AudioEngine for TestAudioEngine {
         fn play(&mut self, path: &Path) -> Result<()> {
+            if self.fail_play {
+                return Err(anyhow::anyhow!("playback failed"));
+            }
             self.current = Some(path.to_path_buf());
             self.queued = None;
             self.finished = false;
@@ -6666,6 +6673,39 @@ mod tests {
         assert_eq!(hint.title.as_deref(), Some("Song"));
         assert_eq!(hint.artist.as_deref(), Some("Artist"));
         assert_eq!(hint.provider_track_id.as_deref(), Some("provider:host:42"));
+    }
+
+    #[test]
+    fn remote_sync_preserves_metadata_when_stream_fallback_is_pending() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut runtime = test_online_runtime();
+        let mut audio = TestAudioEngine::new();
+        audio.fail_play = true;
+        let path = PathBuf::from("a.mp3");
+
+        apply_remote_transport(
+            &mut core,
+            &mut audio,
+            &mut runtime,
+            &TransportCommand::SetPlaybackState {
+                path: path.clone(),
+                title: Some(String::from("Meta Song")),
+                artist: Some(String::from("Meta Artist")),
+                album: Some(String::from("Meta Album")),
+                provider_track_id: Some(String::from("provider:host:1")),
+                position_ms: 0,
+                paused: false,
+            },
+        );
+
+        assert_eq!(runtime.remote_logical_track, Some(path));
+        assert_eq!(runtime.remote_track_title.as_deref(), Some("Meta Song"));
+        assert_eq!(runtime.remote_track_artist.as_deref(), Some("Meta Artist"));
+        assert_eq!(runtime.remote_track_album.as_deref(), Some("Meta Album"));
+        assert_eq!(
+            runtime.remote_provider_track_id.as_deref(),
+            Some("provider:host:1")
+        );
     }
 
     #[test]
