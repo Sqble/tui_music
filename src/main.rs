@@ -29,13 +29,13 @@ fn main() -> anyhow::Result<()> {
         let app_target = local_home_target_from_bind_addr(&home_addr);
         return tune::app::run_with_startup(tune::app::AppStartupOptions {
             default_home_server_addr: Some(app_target),
-            home_server_from_cli: ip_provided,
+            home_server_connected: true,
         });
     }
 
     tune::app::run_with_startup(tune::app::AppStartupOptions {
         default_home_server_addr: args.ip,
-        home_server_from_cli: ip_provided,
+        home_server_connected: ip_provided,
     })
 }
 

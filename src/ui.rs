@@ -45,6 +45,7 @@ pub struct OnlinePasswordPromptView {
 pub struct JoinPromptModalView {
     pub invite_code: String,
     pub paste_selected: bool,
+    pub room_name_mode: bool,
 }
 
 pub struct OnlineRoomDirectoryModalView {
@@ -642,13 +643,23 @@ fn draw_room_directory_modal(
 fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &ThemePalette) {
     let popup = centered_rect(frame.area(), 68, 34);
     frame.render_widget(Clear, popup);
+    let title = if modal.room_name_mode {
+        "Host Online Room"
+    } else {
+        "Connect to Homeserver"
+    };
+    let input_label = if modal.room_name_mode {
+        "Room name"
+    } else {
+        "Server / Link"
+    };
+    let help_line = if modal.room_name_mode {
+        "Type room name. Enter continues. Tab/arrow selects button. Ctrl+V pastes."
+    } else {
+        "Type homeserver address or room link. Server-only opens room directory; link with /room/<name> auto-joins."
+    };
     frame.render_widget(
-        panel_block(
-            "Join Online Room",
-            colors.popup_bg,
-            colors.text,
-            colors.border,
-        ),
+        panel_block(title, colors.popup_bg, colors.text, colors.border),
         popup,
     );
 
@@ -658,14 +669,14 @@ fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &The
     });
     let lines = vec![
         Line::from(vec![
-            Span::styled("Server / Link", Style::default().fg(colors.muted)),
+            Span::styled(input_label, Style::default().fg(colors.muted)),
             Span::styled(": ", Style::default().fg(colors.muted)),
             Span::styled(modal.invite_code.as_str(), Style::default().fg(colors.text)),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "[ Join ]",
+                "[ Continue ]",
                 if modal.paste_selected {
                     Style::default().fg(colors.muted)
                 } else {
@@ -690,7 +701,7 @@ fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &The
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Type server address or room link. Tab/arrow selects button. Enter continues. Ctrl+V pastes.",
+            help_line,
             Style::default()
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),

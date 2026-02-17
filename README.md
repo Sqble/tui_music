@@ -75,9 +75,9 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - `h` / `j` / `l` (Online tab): host room / join room or browse room directory / leave room
 - `o` / `q` (Online tab): toggle room mode / cycle stream quality profile
 - `Ctrl+s` (Library tab, while in online room): add selected item to shared queue (track, folder, playlist, or all songs in selection order)
-- Join prompt modal: type home-server link/address (supports bare `127.0.0.1:7878/room/name` and `http(s)://...`), `V` paste clipboard, `Enter` continue, `Esc` cancel
-- Host flow: `h` asks for room link (`<server>/room/<name>`) and optional `?max=2..32`, then optional password
-- Join flow: if link includes room, optional password prompt appears before connect; if link has only server, a searchable room directory modal opens (lock/open + current/max)
+- Connect-to-homeserver modal: type home-server link/address (supports bare `127.0.0.1:7878/room/name` and `http(s)://...`), `V` paste clipboard, `Enter` continue, `Esc` cancel
+- Host flow: if connected to a homeserver, `h` asks for room name then optional password; if not connected, `h` opens the same connect-to-homeserver modal first
+- Join flow: if link includes room, optional password prompt appears before connect; if link has only server, a searchable room directory modal opens (lock/open + current/max); missing rooms from links are not auto-created
 - Online delay tuning moved to actions panel: `/` -> `Playback settings` -> `Online sync delay settings` (manual delay, auto-ping, recalibrate, sync correction threshold)
 - Clipboard copy falls back to terminal OSC 52 when native clipboard access is unavailable (useful over SSH, including tmux/screen passthrough; terminal/tmux must allow clipboard escape sequences)
 - `Ctrl+C`: quit
