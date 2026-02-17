@@ -6,7 +6,8 @@ use crate::model::{CoverArtTemplate, PlaybackMode, Theme};
 use crate::online::{OnlineSession, Participant, TransportCommand, TransportEnvelope};
 use crate::online_net::{
     HomeRoomDirectoryEntry, LocalAction as NetworkLocalAction, NetworkEvent, NetworkRole,
-    OnlineNetwork, create_home_room, list_home_rooms, resolve_home_room, verify_home_server,
+    OnlineNetwork, StreamTrackFormat, create_home_room, list_home_rooms, resolve_home_room,
+    verify_home_server,
 };
 use crate::stats::{self, ListenSessionRecord, StatsStore};
 use anyhow::{Context, Result};
@@ -3108,6 +3109,7 @@ fn drain_online_network_events(
             NetworkEvent::StreamTrackReady {
                 requested_path,
                 local_temp_path,
+                format,
             } => {
                 online_runtime
                     .streamed_track_cache
@@ -3116,8 +3118,14 @@ fn drain_online_network_events(
                     match audio.play(&local_temp_path) {
                         Ok(()) => {
                             online_runtime.remote_logical_track = Some(requested_path.clone());
+                            let format_label = match format {
+                                StreamTrackFormat::LosslessOriginal => "Lossless original",
+                                StreamTrackFormat::BalancedOpus160kVbrStereo => {
+                                    "Balanced Opus 160k VBR stereo"
+                                }
+                            };
                             core.status = format!(
-                                "Streaming fallback active: {}",
+                                "Streaming fallback active ({format_label}): {}",
                                 requested_path
                                     .file_name()
                                     .and_then(|name| name.to_str())

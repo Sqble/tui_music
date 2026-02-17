@@ -108,8 +108,15 @@ pub enum NetworkEvent {
     StreamTrackReady {
         requested_path: PathBuf,
         local_temp_path: PathBuf,
+        format: StreamTrackFormat,
     },
     Status(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum StreamTrackFormat {
+    LosslessOriginal,
+    BalancedOpus160kVbrStereo,
 }
 
 #[derive(Debug, Clone)]
@@ -1245,6 +1252,7 @@ fn client_loop(
                             let _ = read_event_tx.send(NetworkEvent::StreamTrackReady {
                                 requested_path: state.requested_path,
                                 local_temp_path: ready_path,
+                                format: stream_track_format(state.payload_format),
                             });
                         }
                         Ok(WireServerMessage::Status(message)) => {
@@ -1801,6 +1809,7 @@ fn handle_inbound(
             let _ = event_tx.send(NetworkEvent::StreamTrackReady {
                 requested_path: state.requested_path,
                 local_temp_path: ready_path,
+                format: stream_track_format(state.payload_format),
             });
         }
         Inbound::Disconnected { peer_id } => {
@@ -2363,9 +2372,10 @@ where
     let mut payload_bytes_written: u64 = u64::try_from(header.len()).unwrap_or(u64::MAX);
 
     let mut channel_buffer = Vec::with_capacity(source_channels);
-    let mut accumulator: u64 = 0;
-    let source_rate_u64 = u64::from(source_rate);
-    let target_rate_u64 = u64::from(BALANCED_STREAM_SAMPLE_RATE);
+    let resample_step = f64::from(source_rate) / f64::from(BALANCED_STREAM_SAMPLE_RATE);
+    let mut next_output_src_pos = 0.0_f64;
+    let mut prev_frame: Option<(f32, f32)> = None;
+    let mut input_frame_index: u64 = 0;
     let frame_samples =
         usize::try_from((BALANCED_STREAM_SAMPLE_RATE * BALANCED_OPUS_FRAME_MS) / 1_000)
             .unwrap_or(960)
@@ -2393,28 +2403,37 @@ where
             (channel_buffer[0], channel_buffer[1])
         };
         channel_buffer.clear();
+        let current = (left, right);
 
-        accumulator = accumulator.saturating_add(target_rate_u64);
-        while accumulator >= source_rate_u64 {
-            let pcm_left = (left.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-            let pcm_right = (right.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-            pcm_frame.push(pcm_left);
-            pcm_frame.push(pcm_right);
-            if pcm_frame.len()
-                == frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS))
-            {
-                emit_balanced_opus_packet(
-                    &mut encoder,
-                    &pcm_frame,
-                    &mut packet_buf,
-                    &mut wire_packet,
-                    &mut payload_bytes_written,
-                    &mut send_chunk,
-                )?;
-                pcm_frame.clear();
+        if let Some((prev_left, prev_right)) = prev_frame {
+            while next_output_src_pos <= input_frame_index as f64 {
+                let segment_start = (input_frame_index.saturating_sub(1)) as f64;
+                let frac = ((next_output_src_pos - segment_start).clamp(0.0, 1.0)) as f32;
+                let mixed_left = prev_left + (current.0 - prev_left) * frac;
+                let mixed_right = prev_right + (current.1 - prev_right) * frac;
+                let pcm_left = (mixed_left.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                let pcm_right = (mixed_right.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                pcm_frame.push(pcm_left);
+                pcm_frame.push(pcm_right);
+                if pcm_frame.len()
+                    == frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS))
+                {
+                    emit_balanced_opus_packet(
+                        &mut encoder,
+                        &pcm_frame,
+                        &mut packet_buf,
+                        &mut wire_packet,
+                        &mut payload_bytes_written,
+                        &mut send_chunk,
+                    )?;
+                    pcm_frame.clear();
+                }
+                next_output_src_pos += resample_step;
             }
-            accumulator -= source_rate_u64;
         }
+
+        prev_frame = Some(current);
+        input_frame_index = input_frame_index.saturating_add(1);
     }
 
     if !pcm_frame.is_empty() {
@@ -2790,6 +2809,13 @@ fn stream_size_matches(expected: u64, received: u64, payload_format: StreamPaylo
     match payload_format {
         StreamPayloadFormat::OriginalFile => expected == received,
         StreamPayloadFormat::BalancedOpus160kVbr => expected == 0 || expected == received,
+    }
+}
+
+fn stream_track_format(payload_format: StreamPayloadFormat) -> StreamTrackFormat {
+    match payload_format {
+        StreamPayloadFormat::OriginalFile => StreamTrackFormat::LosslessOriginal,
+        StreamPayloadFormat::BalancedOpus160kVbr => StreamTrackFormat::BalancedOpus160kVbrStereo,
     }
 }
 
