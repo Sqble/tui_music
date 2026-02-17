@@ -2,11 +2,12 @@ use crate::online::{OnlineSession, SharedQueueItem, StreamQuality, TransportEnve
 use anyhow::Context;
 use base64::Engine;
 use rand::Rng;
+use rodio::{Decoder, Source};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Shutdown as NetShutdown, SocketAddr, TcpListener, TcpStream, UdpSocket,
 };
@@ -30,6 +31,9 @@ const STUN_ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const STUN_ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const STREAM_CHUNK_BYTES: usize = 24 * 1024;
 const MAX_STREAM_FILE_BYTES: u64 = 1_073_741_824;
+const BALANCED_STREAM_SAMPLE_RATE: u32 = 24_000;
+const BALANCED_STREAM_CHANNELS: u16 = 1;
+const BALANCED_STREAM_BITS_PER_SAMPLE: u16 = 16;
 const PING_INTERVAL: Duration = Duration::from_millis(1_500);
 const PING_TIMEOUT: Duration = Duration::from_millis(5_000);
 const HOME_ROOM_EMPTY_GRACE_PERIOD: Duration = Duration::from_secs(3);
@@ -1032,10 +1036,12 @@ fn client_loop(
         local_nickname,
         allowed_paths: HashSet::new(),
     }));
+    let stream_quality = Arc::new(Mutex::new(StreamQuality::Lossless));
 
     let read_event_tx = event_tx.clone();
     let read_writer = Arc::clone(&writer);
     let read_upload_guard = Arc::clone(&upload_guard);
+    let read_stream_quality = Arc::clone(&stream_quality);
     thread::spawn(move || {
         let mut reader = BufReader::new(&mut read_stream);
         let mut line = String::new();
@@ -1067,6 +1073,9 @@ fn client_loop(
                                     .collect();
                                 guard.allowed_paths = allowed_paths;
                             }
+                            if let Ok(mut quality) = read_stream_quality.lock() {
+                                *quality = session.quality;
+                            }
                             let _ = read_event_tx.send(NetworkEvent::SessionSync(session));
                         }
                         Ok(WireServerMessage::Ping { nonce }) => {
@@ -1094,10 +1103,14 @@ fn client_loop(
                                 );
                                 continue;
                             }
+                            let quality = read_stream_quality
+                                .lock()
+                                .map(|value| *value)
+                                .unwrap_or(StreamQuality::Lossless);
                             let stream_writer = Arc::clone(&read_writer);
                             thread::spawn(move || {
                                 if let Err(err) =
-                                    stream_file_to_host(&stream_writer, &path, request_id)
+                                    stream_file_to_host(&stream_writer, &path, request_id, quality)
                                 {
                                     let _ = send_json_line_shared(
                                         &stream_writer,
@@ -1115,16 +1128,19 @@ fn client_loop(
                             request_id,
                             path,
                             total_bytes,
-                        }) => match InboundStreamDownload::new(&path, total_bytes) {
-                            Ok(state) => {
-                                inbound_streams.insert(request_id, state);
+                            payload_format,
+                        }) => {
+                            match InboundStreamDownload::new(&path, total_bytes, payload_format) {
+                                Ok(state) => {
+                                    inbound_streams.insert(request_id, state);
+                                }
+                                Err(err) => {
+                                    let _ = read_event_tx.send(NetworkEvent::Status(format!(
+                                        "Stream start failed: {err}"
+                                    )));
+                                }
                             }
-                            Err(err) => {
-                                let _ = read_event_tx.send(NetworkEvent::Status(format!(
-                                    "Stream start failed: {err}"
-                                )));
-                            }
-                        },
+                        }
                         Ok(WireServerMessage::StreamChunk {
                             request_id,
                             data_base64,
@@ -1605,8 +1621,9 @@ fn handle_inbound(
         } => {
             if let Some(peer) = peers.get(&peer_id) {
                 let writer = Arc::clone(&peer.writer);
+                let quality = session.quality;
                 thread::spawn(move || {
-                    if let Err(err) = stream_file_to_client(&writer, &path, request_id) {
+                    if let Err(err) = stream_file_to_client(&writer, &path, request_id, quality) {
                         let _ = send_json_line_shared(
                             &writer,
                             &WireServerMessage::StreamEnd {
@@ -1625,6 +1642,7 @@ fn handle_inbound(
             request_id,
             path,
             total_bytes,
+            payload_format,
         } => {
             let key = (peer_id, request_id);
             let expected_path = pending_pull_requests.get(&key);
@@ -1636,7 +1654,7 @@ fn handle_inbound(
                 inbound_streams.remove(&key);
                 return;
             }
-            match InboundStreamDownload::new(&path, total_bytes) {
+            match InboundStreamDownload::new(&path, total_bytes, payload_format) {
                 Ok(state) => {
                     inbound_streams.insert(key, state);
                 }
@@ -2049,12 +2067,14 @@ fn host_peer_reader(peer_id: u32, stream: TcpStream, inbound_tx: Sender<Inbound>
                         request_id,
                         path,
                         total_bytes,
+                        payload_format,
                     }) => {
                         let _ = inbound_tx.send(Inbound::StreamStart {
                             peer_id,
                             request_id,
                             path,
                             total_bytes,
+                            payload_format,
                         });
                     }
                     Ok(WireClientMessage::StreamChunk {
@@ -2123,22 +2143,25 @@ fn stream_file_to_client(
     writer: &Arc<Mutex<TcpStream>>,
     path: &Path,
     request_id: u64,
+    quality: StreamQuality,
 ) -> anyhow::Result<()> {
-    validate_stream_source(path)?;
-    let file_size = fs::metadata(path)
-        .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
-        .len();
+    let stream_source = prepare_stream_source(path, quality)?;
     send_json_line_shared(
         writer,
         &WireServerMessage::StreamStart {
             request_id,
             path: path.to_path_buf(),
-            total_bytes: file_size,
+            total_bytes: stream_source.total_bytes,
+            payload_format: stream_source.payload_format,
         },
     )?;
 
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open stream source {}", path.display()))?;
+    let mut file = File::open(&stream_source.path).with_context(|| {
+        format!(
+            "failed to open stream source {}",
+            stream_source.path.display()
+        )
+    })?;
     let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
     loop {
         let read = file.read(&mut buffer)?;
@@ -2153,6 +2176,10 @@ fn stream_file_to_client(
                 data_base64: encoded,
             },
         )?;
+    }
+    drop(file);
+    if stream_source.payload_format == StreamPayloadFormat::BalancedWavMono24k {
+        let _ = fs::remove_file(&stream_source.path);
     }
 
     send_json_line_shared(
@@ -2170,22 +2197,25 @@ fn stream_file_to_host(
     writer: &Arc<Mutex<TcpStream>>,
     path: &Path,
     request_id: u64,
+    quality: StreamQuality,
 ) -> anyhow::Result<()> {
-    validate_stream_source(path)?;
-    let file_size = fs::metadata(path)
-        .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
-        .len();
+    let stream_source = prepare_stream_source(path, quality)?;
     send_json_line_shared(
         writer,
         &WireClientMessage::StreamStart {
             request_id,
             path: path.to_path_buf(),
-            total_bytes: file_size,
+            total_bytes: stream_source.total_bytes,
+            payload_format: stream_source.payload_format,
         },
     )?;
 
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open stream source {}", path.display()))?;
+    let mut file = File::open(&stream_source.path).with_context(|| {
+        format!(
+            "failed to open stream source {}",
+            stream_source.path.display()
+        )
+    })?;
     let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
     loop {
         let read = file.read(&mut buffer)?;
@@ -2201,6 +2231,10 @@ fn stream_file_to_host(
             },
         )?;
     }
+    drop(file);
+    if stream_source.payload_format == StreamPayloadFormat::BalancedWavMono24k {
+        let _ = fs::remove_file(&stream_source.path);
+    }
 
     send_json_line_shared(
         writer,
@@ -2211,6 +2245,147 @@ fn stream_file_to_host(
             error: None,
         },
     )
+}
+
+#[derive(Debug)]
+struct PreparedStreamSource {
+    path: PathBuf,
+    total_bytes: u64,
+    payload_format: StreamPayloadFormat,
+}
+
+fn prepare_stream_source(
+    path: &Path,
+    quality: StreamQuality,
+) -> anyhow::Result<PreparedStreamSource> {
+    validate_stream_source(path)?;
+    match quality {
+        StreamQuality::Lossless => {
+            let total_bytes = fs::metadata(path)
+                .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
+                .len();
+            Ok(PreparedStreamSource {
+                path: path.to_path_buf(),
+                total_bytes,
+                payload_format: StreamPayloadFormat::OriginalFile,
+            })
+        }
+        StreamQuality::Balanced => {
+            let transcoded_path = transcode_balanced_stream_to_wav(path)?;
+            let total_bytes = fs::metadata(&transcoded_path)
+                .with_context(|| {
+                    format!(
+                        "failed to read balanced stream metadata for {}",
+                        transcoded_path.display()
+                    )
+                })?
+                .len();
+            if total_bytes > MAX_STREAM_FILE_BYTES {
+                let _ = fs::remove_file(&transcoded_path);
+                anyhow::bail!("balanced stream source exceeds size limit");
+            }
+            Ok(PreparedStreamSource {
+                path: transcoded_path,
+                total_bytes,
+                payload_format: StreamPayloadFormat::BalancedWavMono24k,
+            })
+        }
+    }
+}
+
+fn transcode_balanced_stream_to_wav(source_path: &Path) -> anyhow::Result<PathBuf> {
+    let mut output_path = std::env::temp_dir();
+    output_path.push("tunetui_stream_cache");
+    fs::create_dir_all(&output_path).with_context(|| {
+        format!(
+            "failed to create stream cache dir {}",
+            output_path.display()
+        )
+    })?;
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    output_path.push(format!("balanced_{}.wav", micros));
+
+    let mut output = File::create(&output_path)
+        .with_context(|| format!("failed to create balanced stream {}", output_path.display()))?;
+    write_wav_header_placeholder(&mut output)?;
+
+    let source_file = File::open(source_path)
+        .with_context(|| format!("failed to open stream source {}", source_path.display()))?;
+    let decoder = Decoder::try_from(source_file)
+        .with_context(|| format!("failed to decode {}", source_path.display()))?;
+    let source_rate = decoder.sample_rate().max(1);
+    let source_channels = usize::from(decoder.channels()).max(1);
+
+    let mut channel_buffer = Vec::with_capacity(source_channels);
+    let mut data_bytes_written: u64 = 0;
+    let mut accumulator: u64 = 0;
+    let source_rate_u64 = u64::from(source_rate);
+    let target_rate_u64 = u64::from(BALANCED_STREAM_SAMPLE_RATE);
+
+    for sample in decoder {
+        channel_buffer.push(sample);
+        if channel_buffer.len() < source_channels {
+            continue;
+        }
+        let mixed = channel_buffer.iter().copied().sum::<f32>() / source_channels as f32;
+        channel_buffer.clear();
+
+        accumulator = accumulator.saturating_add(target_rate_u64);
+        while accumulator >= source_rate_u64 {
+            let pcm = (mixed.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+            output.write_all(&pcm.to_le_bytes()).with_context(|| {
+                format!(
+                    "failed writing balanced stream samples to {}",
+                    output_path.display()
+                )
+            })?;
+            data_bytes_written = data_bytes_written.saturating_add(2);
+            if data_bytes_written > MAX_STREAM_FILE_BYTES {
+                let _ = fs::remove_file(&output_path);
+                anyhow::bail!("balanced stream source exceeds size limit");
+            }
+            accumulator -= source_rate_u64;
+        }
+    }
+
+    finalize_wav_header(&mut output, data_bytes_written)?;
+    Ok(output_path)
+}
+
+fn write_wav_header_placeholder(file: &mut File) -> anyhow::Result<()> {
+    file.write_all(b"RIFF")?;
+    file.write_all(&0_u32.to_le_bytes())?;
+    file.write_all(b"WAVE")?;
+    file.write_all(b"fmt ")?;
+    file.write_all(&16_u32.to_le_bytes())?;
+    file.write_all(&1_u16.to_le_bytes())?;
+    file.write_all(&BALANCED_STREAM_CHANNELS.to_le_bytes())?;
+    file.write_all(&BALANCED_STREAM_SAMPLE_RATE.to_le_bytes())?;
+    let bytes_per_sample = u32::from(BALANCED_STREAM_BITS_PER_SAMPLE / 8);
+    let byte_rate = BALANCED_STREAM_SAMPLE_RATE
+        .saturating_mul(u32::from(BALANCED_STREAM_CHANNELS))
+        .saturating_mul(bytes_per_sample);
+    file.write_all(&byte_rate.to_le_bytes())?;
+    let block_align = BALANCED_STREAM_CHANNELS.saturating_mul(BALANCED_STREAM_BITS_PER_SAMPLE / 8);
+    file.write_all(&block_align.to_le_bytes())?;
+    file.write_all(&BALANCED_STREAM_BITS_PER_SAMPLE.to_le_bytes())?;
+    file.write_all(b"data")?;
+    file.write_all(&0_u32.to_le_bytes())?;
+    Ok(())
+}
+
+fn finalize_wav_header(file: &mut File, data_bytes: u64) -> anyhow::Result<()> {
+    let data_bytes_u32 = u32::try_from(data_bytes).context("balanced stream WAV too large")?;
+    let riff_size = 36_u32.saturating_add(data_bytes_u32);
+    file.seek(SeekFrom::Start(4))?;
+    file.write_all(&riff_size.to_le_bytes())?;
+    file.seek(SeekFrom::Start(40))?;
+    file.write_all(&data_bytes_u32.to_le_bytes())?;
+    file.flush()?;
+    Ok(())
 }
 
 fn validate_stream_source(path: &Path) -> anyhow::Result<()> {
@@ -2283,6 +2458,7 @@ enum Inbound {
         request_id: u64,
         path: PathBuf,
         total_bytes: u64,
+        payload_format: StreamPayloadFormat,
     },
     StreamChunk {
         peer_id: u32,
@@ -2305,6 +2481,12 @@ enum Inbound {
     },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum StreamPayloadFormat {
+    OriginalFile,
+    BalancedWavMono24k,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum WireClientMessage {
     Hello {
@@ -2324,6 +2506,7 @@ enum WireClientMessage {
         request_id: u64,
         path: PathBuf,
         total_bytes: u64,
+        payload_format: StreamPayloadFormat,
     },
     StreamChunk {
         request_id: u64,
@@ -2356,6 +2539,7 @@ enum WireServerMessage {
         request_id: u64,
         path: PathBuf,
         total_bytes: u64,
+        payload_format: StreamPayloadFormat,
     },
     StreamChunk {
         request_id: u64,
@@ -2385,8 +2569,12 @@ struct ClientUploadGuard {
 }
 
 impl InboundStreamDownload {
-    fn new(requested_path: &Path, total_bytes: u64) -> anyhow::Result<Self> {
-        let local_temp_path = create_stream_cache_path(requested_path)?;
+    fn new(
+        requested_path: &Path,
+        total_bytes: u64,
+        payload_format: StreamPayloadFormat,
+    ) -> anyhow::Result<Self> {
+        let local_temp_path = create_stream_cache_path(requested_path, payload_format)?;
         let file = File::create(&local_temp_path).with_context(|| {
             format!(
                 "failed to create stream cache {}",
@@ -2403,7 +2591,10 @@ impl InboundStreamDownload {
     }
 }
 
-fn create_stream_cache_path(source: &Path) -> anyhow::Result<PathBuf> {
+fn create_stream_cache_path(
+    source: &Path,
+    payload_format: StreamPayloadFormat,
+) -> anyhow::Result<PathBuf> {
     let mut dir = std::env::temp_dir();
     dir.push("tunetui_stream_cache");
     fs::create_dir_all(&dir)
@@ -2415,12 +2606,15 @@ fn create_stream_cache_path(source: &Path) -> anyhow::Result<PathBuf> {
         .map(sanitize_cache_name)
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| String::from("track"));
-    let ext = source
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(sanitize_cache_name)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| String::from("bin"));
+    let ext = match payload_format {
+        StreamPayloadFormat::OriginalFile => source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(sanitize_cache_name)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| String::from("bin")),
+        StreamPayloadFormat::BalancedWavMono24k => String::from("wav"),
+    };
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2574,6 +2768,42 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[test]
+    fn stream_start_round_trip_preserves_payload_format() {
+        let msg = WireServerMessage::StreamStart {
+            request_id: 7,
+            path: PathBuf::from("track.flac"),
+            total_bytes: 123,
+            payload_format: StreamPayloadFormat::BalancedWavMono24k,
+        };
+        let encoded = serde_json::to_string(&msg).expect("serialize");
+        let decoded: WireServerMessage = serde_json::from_str(&encoded).expect("deserialize");
+        match decoded {
+            WireServerMessage::StreamStart {
+                request_id,
+                path,
+                total_bytes,
+                payload_format,
+            } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(path, PathBuf::from("track.flac"));
+                assert_eq!(total_bytes, 123);
+                assert_eq!(payload_format, StreamPayloadFormat::BalancedWavMono24k);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_cache_path_uses_wav_extension_for_balanced_payload() {
+        let path = create_stream_cache_path(
+            Path::new("artist/song.flac"),
+            StreamPayloadFormat::BalancedWavMono24k,
+        )
+        .expect("cache path");
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("wav"));
     }
 
     #[test]
