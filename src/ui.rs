@@ -969,20 +969,6 @@ fn draw_online_section(
         Style::default().fg(colors.muted),
     )));
 
-    if let Some(local) = session.local_participant() {
-        left_lines.push(Line::from(Span::styled(
-            format!(
-                "You {}  ping {}ms  manual {}ms  effective {}ms  auto {}",
-                local.nickname,
-                local.ping_ms,
-                local.manual_extra_delay_ms,
-                local.effective_delay_ms(),
-                if local.auto_ping_delay { "on" } else { "off" }
-            ),
-            Style::default().fg(colors.text),
-        )));
-    }
-
     left_lines.push(Line::from(""));
     left_lines.push(Line::from(Span::styled(
         "Participants",
@@ -1081,11 +1067,8 @@ fn participant_line(participant: &crate::online::Participant, session: &OnlineSe
         format!(" ({})", parts.join(", "))
     };
     format!(
-        "- {}{}  ping {}ms  delay {}ms",
-        participant.nickname,
-        tags,
-        participant.ping_ms,
-        participant.effective_delay_ms()
+        "- {}{}  ping {}ms",
+        participant.nickname, tags, participant.ping_ms
     )
 }
 
