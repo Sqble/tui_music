@@ -2,11 +2,12 @@ use crate::online::{OnlineSession, SharedQueueItem, StreamQuality, TransportEnve
 use anyhow::Context;
 use base64::Engine;
 use rand::Rng;
+use rodio::{Decoder, Source};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Shutdown as NetShutdown, SocketAddr, TcpListener, TcpStream, UdpSocket,
 };
@@ -15,6 +16,11 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use unsafe_libopus::{
+    OPUS_APPLICATION_AUDIO, OPUS_OK, OPUS_SET_BITRATE_REQUEST, OPUS_SET_VBR_REQUEST,
+    OpusDecoder as RawOpusDecoder, OpusEncoder as RawOpusEncoder, opus_decode, opus_decoder_create,
+    opus_decoder_destroy, opus_encode, opus_encoder_create, opus_encoder_destroy,
+};
 
 const MAX_PEERS: usize = 8;
 const INVITE_PREFIX_SECURE: &str = "T2";
@@ -30,6 +36,14 @@ const STUN_ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const STUN_ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const STREAM_CHUNK_BYTES: usize = 24 * 1024;
 const MAX_STREAM_FILE_BYTES: u64 = 1_073_741_824;
+const BALANCED_STREAM_SAMPLE_RATE: u32 = 48_000;
+const BALANCED_STREAM_CHANNELS: u16 = 2;
+const BALANCED_STREAM_BITS_PER_SAMPLE: u16 = 16;
+const BALANCED_OPUS_FRAME_MS: u32 = 20;
+const BALANCED_OPUS_BITRATE_BPS: i32 = 160_000;
+const BALANCED_OPUS_MAX_PACKET_BYTES: usize = 4_000;
+const BALANCED_PAYLOAD_MAGIC: &[u8; 5] = b"TTOP1";
+const BALANCED_FALLBACK_READY_PCM_BYTES: u64 = 192_000;
 const PING_INTERVAL: Duration = Duration::from_millis(1_500);
 const PING_TIMEOUT: Duration = Duration::from_millis(5_000);
 const HOME_ROOM_EMPTY_GRACE_PERIOD: Duration = Duration::from_secs(3);
@@ -95,14 +109,24 @@ pub enum NetworkEvent {
     StreamTrackReady {
         requested_path: PathBuf,
         local_temp_path: PathBuf,
+        format: StreamTrackFormat,
     },
     Status(String),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum StreamTrackFormat {
+    LosslessOriginal,
+    BalancedOpus160kVbrStereo,
 }
 
 #[derive(Debug, Clone)]
 pub enum LocalAction {
     SetMode(crate::online::OnlineRoomMode),
     SetQuality(StreamQuality),
+    SetNickname {
+        nickname: String,
+    },
     QueueAdd(SharedQueueItem),
     QueueConsume {
         expected_path: Option<PathBuf>,
@@ -1029,10 +1053,12 @@ fn client_loop(
         local_nickname,
         allowed_paths: HashSet::new(),
     }));
+    let stream_quality = Arc::new(Mutex::new(StreamQuality::Lossless));
 
     let read_event_tx = event_tx.clone();
     let read_writer = Arc::clone(&writer);
     let read_upload_guard = Arc::clone(&upload_guard);
+    let read_stream_quality = Arc::clone(&stream_quality);
     thread::spawn(move || {
         let mut reader = BufReader::new(&mut read_stream);
         let mut line = String::new();
@@ -1064,6 +1090,9 @@ fn client_loop(
                                     .collect();
                                 guard.allowed_paths = allowed_paths;
                             }
+                            if let Ok(mut quality) = read_stream_quality.lock() {
+                                *quality = session.quality;
+                            }
                             let _ = read_event_tx.send(NetworkEvent::SessionSync(session));
                         }
                         Ok(WireServerMessage::Ping { nonce }) => {
@@ -1091,10 +1120,14 @@ fn client_loop(
                                 );
                                 continue;
                             }
+                            let quality = read_stream_quality
+                                .lock()
+                                .map(|value| *value)
+                                .unwrap_or(StreamQuality::Lossless);
                             let stream_writer = Arc::clone(&read_writer);
                             thread::spawn(move || {
                                 if let Err(err) =
-                                    stream_file_to_host(&stream_writer, &path, request_id)
+                                    stream_file_to_host(&stream_writer, &path, request_id, quality)
                                 {
                                     let _ = send_json_line_shared(
                                         &stream_writer,
@@ -1112,16 +1145,19 @@ fn client_loop(
                             request_id,
                             path,
                             total_bytes,
-                        }) => match InboundStreamDownload::new(&path, total_bytes) {
-                            Ok(state) => {
-                                inbound_streams.insert(request_id, state);
+                            payload_format,
+                        }) => {
+                            match InboundStreamDownload::new(&path, total_bytes, payload_format) {
+                                Ok(state) => {
+                                    inbound_streams.insert(request_id, state);
+                                }
+                                Err(err) => {
+                                    let _ = read_event_tx.send(NetworkEvent::Status(format!(
+                                        "Stream start failed: {err}"
+                                    )));
+                                }
                             }
-                            Err(err) => {
-                                let _ = read_event_tx.send(NetworkEvent::Status(format!(
-                                    "Stream start failed: {err}"
-                                )));
-                            }
-                        },
+                        }
                         Ok(WireServerMessage::StreamChunk {
                             request_id,
                             data_base64,
@@ -1133,14 +1169,40 @@ fn client_loop(
                                 .decode(data_base64.as_bytes());
                             match decoded {
                                 Ok(bytes) => {
-                                    if let Err(err) = state.file.write_all(&bytes) {
-                                        let _ = read_event_tx.send(NetworkEvent::Status(format!(
-                                            "Stream write failed: {err}"
-                                        )));
-                                        inbound_streams.remove(&request_id);
-                                    } else {
-                                        state.received_bytes =
-                                            state.received_bytes.saturating_add(bytes.len() as u64);
+                                    let ready_now = match state.payload_format {
+                                        StreamPayloadFormat::OriginalFile => {
+                                            if let Err(err) = state.file.write_all(&bytes) {
+                                                let _ = read_event_tx.send(NetworkEvent::Status(
+                                                    format!("Stream write failed: {err}"),
+                                                ));
+                                                inbound_streams.remove(&request_id);
+                                                continue;
+                                            }
+                                            false
+                                        }
+                                        StreamPayloadFormat::BalancedOpus160kVbr => {
+                                            match ingest_balanced_stream_bytes(state, &bytes) {
+                                                Ok(ready) => ready,
+                                                Err(err) => {
+                                                    let _ =
+                                                        read_event_tx.send(NetworkEvent::Status(
+                                                            format!("Stream write failed: {err}"),
+                                                        ));
+                                                    inbound_streams.remove(&request_id);
+                                                    continue;
+                                                }
+                                            }
+                                        }
+                                    };
+                                    state.received_bytes =
+                                        state.received_bytes.saturating_add(bytes.len() as u64);
+                                    if ready_now {
+                                        let _ =
+                                            read_event_tx.send(NetworkEvent::StreamTrackReady {
+                                                requested_path: state.requested_path.clone(),
+                                                local_temp_path: state.local_temp_path.clone(),
+                                                format: stream_track_format(state.payload_format),
+                                            });
                                     }
                                 }
                                 Err(err) => {
@@ -1174,7 +1236,11 @@ fn client_loop(
                                 ));
                                 continue;
                             }
-                            if state.received_bytes != state.total_bytes {
+                            if !stream_size_matches(
+                                state.total_bytes,
+                                state.received_bytes,
+                                state.payload_format,
+                            ) {
                                 let _ = fs::remove_file(&state.local_temp_path);
                                 let _ = read_event_tx.send(NetworkEvent::Status(format!(
                                     "Stream size mismatch: expected {} bytes got {} bytes",
@@ -1182,17 +1248,20 @@ fn client_loop(
                                 )));
                                 continue;
                             }
-                            if let Err(err) = state.file.flush() {
+                            if let Err(err) = finalize_inbound_stream(&mut state) {
                                 let _ = fs::remove_file(&state.local_temp_path);
                                 let _ = read_event_tx.send(NetworkEvent::Status(format!(
                                     "Stream finalize failed: {err}"
                                 )));
                                 continue;
                             }
-                            let _ = read_event_tx.send(NetworkEvent::StreamTrackReady {
-                                requested_path: state.requested_path,
-                                local_temp_path: state.local_temp_path,
-                            });
+                            if !state.ready_emitted {
+                                let _ = read_event_tx.send(NetworkEvent::StreamTrackReady {
+                                    requested_path: state.requested_path,
+                                    local_temp_path: state.local_temp_path,
+                                    format: stream_track_format(state.payload_format),
+                                });
+                            }
                         }
                         Ok(WireServerMessage::Status(message)) => {
                             let _ = read_event_tx.send(NetworkEvent::Status(message));
@@ -1555,7 +1624,21 @@ fn handle_inbound(
                 .get(&peer_id)
                 .map(|peer| peer.nickname.clone())
                 .unwrap_or_else(|| String::from("peer"));
-            apply_action_to_session(session, wire_to_action(action), &origin);
+            let local_action = wire_to_action(action);
+            let requested_nickname = match &local_action {
+                LocalAction::SetNickname { nickname } => Some(nickname.trim().to_string()),
+                _ => None,
+            };
+            apply_action_to_session(session, local_action, &origin);
+            if let Some(updated) = requested_nickname.filter(|name| !name.is_empty())
+                && session
+                    .participants
+                    .iter()
+                    .any(|participant| participant.nickname.eq_ignore_ascii_case(&updated))
+                && let Some(peer) = peers.get_mut(&peer_id)
+            {
+                peer.nickname = updated;
+            }
             broadcast_state(peers, session);
             let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
         }
@@ -1588,8 +1671,9 @@ fn handle_inbound(
         } => {
             if let Some(peer) = peers.get(&peer_id) {
                 let writer = Arc::clone(&peer.writer);
+                let quality = session.quality;
                 thread::spawn(move || {
-                    if let Err(err) = stream_file_to_client(&writer, &path, request_id) {
+                    if let Err(err) = stream_file_to_client(&writer, &path, request_id, quality) {
                         let _ = send_json_line_shared(
                             &writer,
                             &WireServerMessage::StreamEnd {
@@ -1608,6 +1692,7 @@ fn handle_inbound(
             request_id,
             path,
             total_bytes,
+            payload_format,
         } => {
             let key = (peer_id, request_id);
             let expected_path = pending_pull_requests.get(&key);
@@ -1619,7 +1704,7 @@ fn handle_inbound(
                 inbound_streams.remove(&key);
                 return;
             }
-            match InboundStreamDownload::new(&path, total_bytes) {
+            match InboundStreamDownload::new(&path, total_bytes, payload_format) {
                 Ok(state) => {
                     inbound_streams.insert(key, state);
                 }
@@ -1642,15 +1727,39 @@ fn handle_inbound(
             };
             match base64::engine::general_purpose::STANDARD.decode(data_base64.as_bytes()) {
                 Ok(bytes) => {
-                    if let Err(err) = state.file.write_all(&bytes) {
-                        let _ = event_tx.send(NetworkEvent::Status(format!(
-                            "Peer stream write failed: {err}",
-                        )));
-                        inbound_streams.remove(&key);
-                        pending_pull_requests.remove(&key);
-                    } else {
-                        state.received_bytes =
-                            state.received_bytes.saturating_add(bytes.len() as u64);
+                    let ready_now = match state.payload_format {
+                        StreamPayloadFormat::OriginalFile => {
+                            if let Err(err) = state.file.write_all(&bytes) {
+                                let _ = event_tx.send(NetworkEvent::Status(format!(
+                                    "Peer stream write failed: {err}",
+                                )));
+                                inbound_streams.remove(&key);
+                                pending_pull_requests.remove(&key);
+                                return;
+                            }
+                            false
+                        }
+                        StreamPayloadFormat::BalancedOpus160kVbr => {
+                            match ingest_balanced_stream_bytes(state, &bytes) {
+                                Ok(ready) => ready,
+                                Err(err) => {
+                                    let _ = event_tx.send(NetworkEvent::Status(format!(
+                                        "Peer stream write failed: {err}",
+                                    )));
+                                    inbound_streams.remove(&key);
+                                    pending_pull_requests.remove(&key);
+                                    return;
+                                }
+                            }
+                        }
+                    };
+                    state.received_bytes = state.received_bytes.saturating_add(bytes.len() as u64);
+                    if ready_now {
+                        let _ = event_tx.send(NetworkEvent::StreamTrackReady {
+                            requested_path: state.requested_path.clone(),
+                            local_temp_path: state.local_temp_path.clone(),
+                            format: stream_track_format(state.payload_format),
+                        });
                     }
                 }
                 Err(err) => {
@@ -1689,7 +1798,11 @@ fn handle_inbound(
                 ));
                 return;
             }
-            if state.received_bytes != state.total_bytes {
+            if !stream_size_matches(
+                state.total_bytes,
+                state.received_bytes,
+                state.payload_format,
+            ) {
                 let _ = fs::remove_file(&state.local_temp_path);
                 let _ = event_tx.send(NetworkEvent::Status(format!(
                     "Peer stream size mismatch: expected {} bytes got {} bytes",
@@ -1697,17 +1810,20 @@ fn handle_inbound(
                 )));
                 return;
             }
-            if let Err(err) = state.file.flush() {
+            if let Err(err) = finalize_inbound_stream(&mut state) {
                 let _ = fs::remove_file(&state.local_temp_path);
                 let _ = event_tx.send(NetworkEvent::Status(format!(
                     "Peer stream finalize failed: {err}",
                 )));
                 return;
             }
-            let _ = event_tx.send(NetworkEvent::StreamTrackReady {
-                requested_path: state.requested_path,
-                local_temp_path: state.local_temp_path,
-            });
+            if !state.ready_emitted {
+                let _ = event_tx.send(NetworkEvent::StreamTrackReady {
+                    requested_path: state.requested_path,
+                    local_temp_path: state.local_temp_path,
+                    format: stream_track_format(state.payload_format),
+                });
+            }
         }
         Inbound::Disconnected { peer_id } => {
             disconnect_peer(
@@ -1823,6 +1939,43 @@ fn apply_action_to_session(
     match action {
         LocalAction::SetMode(mode) => session.mode = mode,
         LocalAction::SetQuality(quality) => session.quality = quality,
+        LocalAction::SetNickname { nickname } => {
+            let trimmed = nickname.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            let already_used = session.participants.iter().any(|participant| {
+                participant.nickname.eq_ignore_ascii_case(trimmed)
+                    && !participant.nickname.eq_ignore_ascii_case(origin_nickname)
+            });
+            if already_used {
+                return;
+            }
+            if let Some(participant) = session
+                .participants
+                .iter_mut()
+                .find(|participant| participant.nickname.eq_ignore_ascii_case(origin_nickname))
+            {
+                let previous = participant.nickname.clone();
+                participant.nickname = trimmed.to_string();
+                for item in &mut session.shared_queue {
+                    if item
+                        .owner_nickname
+                        .as_deref()
+                        .is_some_and(|owner| owner.eq_ignore_ascii_case(&previous))
+                    {
+                        item.owner_nickname = Some(participant.nickname.clone());
+                    }
+                }
+                if let Some(last_transport) = session.last_transport.as_mut()
+                    && last_transport
+                        .origin_nickname
+                        .eq_ignore_ascii_case(&previous)
+                {
+                    last_transport.origin_nickname = participant.nickname.clone();
+                }
+            }
+        }
         LocalAction::QueueAdd(item) => {
             session.shared_queue.push(item);
             if session.shared_queue.len() > 512 {
@@ -1890,7 +2043,10 @@ fn action_allowed_for_origin(
     if origin_is_host(session, origin_nickname) {
         return true;
     }
-    matches!(action, LocalAction::DelayUpdate { .. })
+    matches!(
+        action,
+        LocalAction::DelayUpdate { .. } | LocalAction::SetNickname { .. }
+    )
 }
 
 fn origin_is_host(session: &OnlineSession, origin_nickname: &str) -> bool {
@@ -1992,12 +2148,14 @@ fn host_peer_reader(peer_id: u32, stream: TcpStream, inbound_tx: Sender<Inbound>
                         request_id,
                         path,
                         total_bytes,
+                        payload_format,
                     }) => {
                         let _ = inbound_tx.send(Inbound::StreamStart {
                             peer_id,
                             request_id,
                             path,
                             total_bytes,
+                            payload_format,
                         });
                     }
                     Ok(WireClientMessage::StreamChunk {
@@ -2066,36 +2224,55 @@ fn stream_file_to_client(
     writer: &Arc<Mutex<TcpStream>>,
     path: &Path,
     request_id: u64,
+    quality: StreamQuality,
 ) -> anyhow::Result<()> {
     validate_stream_source(path)?;
-    let file_size = fs::metadata(path)
-        .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
-        .len();
-    send_json_line_shared(
-        writer,
-        &WireServerMessage::StreamStart {
-            request_id,
-            path: path.to_path_buf(),
-            total_bytes: file_size,
-        },
-    )?;
-
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open stream source {}", path.display()))?;
-    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    match quality {
+        StreamQuality::Lossless => {
+            let file_size = fs::metadata(path)
+                .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
+                .len();
+            send_json_line_shared(
+                writer,
+                &WireServerMessage::StreamStart {
+                    request_id,
+                    path: path.to_path_buf(),
+                    total_bytes: file_size,
+                    payload_format: StreamPayloadFormat::OriginalFile,
+                },
+            )?;
+            stream_lossless_chunks(path, |chunk| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                send_json_line_shared(
+                    writer,
+                    &WireServerMessage::StreamChunk {
+                        request_id,
+                        data_base64: encoded,
+                    },
+                )
+            })?;
         }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&buffer[..read]);
-        send_json_line_shared(
-            writer,
-            &WireServerMessage::StreamChunk {
-                request_id,
-                data_base64: encoded,
-            },
-        )?;
+        StreamQuality::Balanced => {
+            send_json_line_shared(
+                writer,
+                &WireServerMessage::StreamStart {
+                    request_id,
+                    path: path.to_path_buf(),
+                    total_bytes: 0,
+                    payload_format: StreamPayloadFormat::BalancedOpus160kVbr,
+                },
+            )?;
+            stream_balanced_opus_chunks(path, |chunk| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                send_json_line_shared(
+                    writer,
+                    &WireServerMessage::StreamChunk {
+                        request_id,
+                        data_base64: encoded,
+                    },
+                )
+            })?;
+        }
     }
 
     send_json_line_shared(
@@ -2113,36 +2290,55 @@ fn stream_file_to_host(
     writer: &Arc<Mutex<TcpStream>>,
     path: &Path,
     request_id: u64,
+    quality: StreamQuality,
 ) -> anyhow::Result<()> {
     validate_stream_source(path)?;
-    let file_size = fs::metadata(path)
-        .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
-        .len();
-    send_json_line_shared(
-        writer,
-        &WireClientMessage::StreamStart {
-            request_id,
-            path: path.to_path_buf(),
-            total_bytes: file_size,
-        },
-    )?;
-
-    let mut file = File::open(path)
-        .with_context(|| format!("failed to open stream source {}", path.display()))?;
-    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    match quality {
+        StreamQuality::Lossless => {
+            let file_size = fs::metadata(path)
+                .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
+                .len();
+            send_json_line_shared(
+                writer,
+                &WireClientMessage::StreamStart {
+                    request_id,
+                    path: path.to_path_buf(),
+                    total_bytes: file_size,
+                    payload_format: StreamPayloadFormat::OriginalFile,
+                },
+            )?;
+            stream_lossless_chunks(path, |chunk| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                send_json_line_shared(
+                    writer,
+                    &WireClientMessage::StreamChunk {
+                        request_id,
+                        data_base64: encoded,
+                    },
+                )
+            })?;
         }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&buffer[..read]);
-        send_json_line_shared(
-            writer,
-            &WireClientMessage::StreamChunk {
-                request_id,
-                data_base64: encoded,
-            },
-        )?;
+        StreamQuality::Balanced => {
+            send_json_line_shared(
+                writer,
+                &WireClientMessage::StreamStart {
+                    request_id,
+                    path: path.to_path_buf(),
+                    total_bytes: 0,
+                    payload_format: StreamPayloadFormat::BalancedOpus160kVbr,
+                },
+            )?;
+            stream_balanced_opus_chunks(path, |chunk| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                send_json_line_shared(
+                    writer,
+                    &WireClientMessage::StreamChunk {
+                        request_id,
+                        data_base64: encoded,
+                    },
+                )
+            })?;
+        }
     }
 
     send_json_line_shared(
@@ -2156,6 +2352,463 @@ fn stream_file_to_host(
     )
 }
 
+fn stream_lossless_chunks<F>(path: &Path, mut send_chunk: F) -> anyhow::Result<()>
+where
+    F: FnMut(&[u8]) -> anyhow::Result<()>,
+{
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open stream source {}", path.display()))?;
+    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        send_chunk(&buffer[..read])?;
+    }
+    Ok(())
+}
+
+fn stream_balanced_opus_chunks<F>(source_path: &Path, mut send_chunk: F) -> anyhow::Result<()>
+where
+    F: FnMut(&[u8]) -> anyhow::Result<()>,
+{
+    let source_file = File::open(source_path)
+        .with_context(|| format!("failed to open stream source {}", source_path.display()))?;
+    let decoder = Decoder::try_from(source_file)
+        .with_context(|| format!("failed to decode {}", source_path.display()))?;
+    let source_rate = decoder.sample_rate().max(1);
+    let source_channels = usize::from(decoder.channels()).max(1);
+
+    let header = balanced_opus_header_bytes();
+    send_chunk(&header)?;
+    let mut payload_bytes_written: u64 = u64::try_from(header.len()).unwrap_or(u64::MAX);
+
+    let mut channel_buffer = Vec::with_capacity(source_channels);
+    let resample_step = f64::from(source_rate) / f64::from(BALANCED_STREAM_SAMPLE_RATE);
+    let mut next_output_src_pos = 0.0_f64;
+    let mut prev_frame: Option<(f32, f32)> = None;
+    let mut input_frame_index: u64 = 0;
+    let frame_samples =
+        usize::try_from((BALANCED_STREAM_SAMPLE_RATE * BALANCED_OPUS_FRAME_MS) / 1_000)
+            .unwrap_or(960)
+            .max(1);
+    let mut pcm_frame =
+        Vec::with_capacity(frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS)));
+    let mut packet_buf = vec![0_u8; BALANCED_OPUS_MAX_PACKET_BYTES];
+    let mut wire_packet = vec![0_u8; BALANCED_OPUS_MAX_PACKET_BYTES + 2];
+    let mut encoder = ManagedOpusEncoder::new(
+        BALANCED_STREAM_SAMPLE_RATE,
+        i32::from(BALANCED_STREAM_CHANNELS),
+    )?;
+    encoder.set_bitrate(BALANCED_OPUS_BITRATE_BPS)?;
+    encoder.set_vbr(true)?;
+
+    for sample in decoder {
+        channel_buffer.push(sample);
+        if channel_buffer.len() < source_channels {
+            continue;
+        }
+        let (left, right) = if source_channels == 1 {
+            let v = channel_buffer[0];
+            (v, v)
+        } else {
+            (channel_buffer[0], channel_buffer[1])
+        };
+        channel_buffer.clear();
+        let current = (left, right);
+
+        if let Some((prev_left, prev_right)) = prev_frame {
+            while next_output_src_pos <= input_frame_index as f64 {
+                let segment_start = (input_frame_index.saturating_sub(1)) as f64;
+                let frac = ((next_output_src_pos - segment_start).clamp(0.0, 1.0)) as f32;
+                let mixed_left = prev_left + (current.0 - prev_left) * frac;
+                let mixed_right = prev_right + (current.1 - prev_right) * frac;
+                let pcm_left = (mixed_left.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                let pcm_right = (mixed_right.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+                pcm_frame.push(pcm_left);
+                pcm_frame.push(pcm_right);
+                if pcm_frame.len()
+                    == frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS))
+                {
+                    emit_balanced_opus_packet(
+                        &mut encoder,
+                        &pcm_frame,
+                        &mut packet_buf,
+                        &mut wire_packet,
+                        &mut payload_bytes_written,
+                        &mut send_chunk,
+                    )?;
+                    pcm_frame.clear();
+                }
+                next_output_src_pos += resample_step;
+            }
+        }
+
+        prev_frame = Some(current);
+        input_frame_index = input_frame_index.saturating_add(1);
+    }
+
+    if !pcm_frame.is_empty() {
+        pcm_frame.resize(
+            frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS)),
+            0,
+        );
+        emit_balanced_opus_packet(
+            &mut encoder,
+            &pcm_frame,
+            &mut packet_buf,
+            &mut wire_packet,
+            &mut payload_bytes_written,
+            &mut send_chunk,
+        )?;
+    }
+    Ok(())
+}
+
+fn emit_balanced_opus_packet<F>(
+    encoder: &mut ManagedOpusEncoder,
+    pcm_frame: &[i16],
+    packet_buf: &mut [u8],
+    wire_packet: &mut [u8],
+    payload_bytes_written: &mut u64,
+    send_chunk: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&[u8]) -> anyhow::Result<()>,
+{
+    let encoded_size = encoder.encode(pcm_frame, packet_buf)?;
+    let packet_len = u16::try_from(encoded_size).context("opus packet too large")?;
+    wire_packet[..2].copy_from_slice(&packet_len.to_le_bytes());
+    wire_packet[2..(2 + encoded_size)].copy_from_slice(&packet_buf[..encoded_size]);
+    send_chunk(&wire_packet[..(2 + encoded_size)])?;
+    *payload_bytes_written = payload_bytes_written
+        .saturating_add(2)
+        .saturating_add(u64::from(packet_len));
+    if *payload_bytes_written > MAX_STREAM_FILE_BYTES {
+        anyhow::bail!("balanced stream source exceeds size limit");
+    }
+    Ok(())
+}
+
+fn balanced_opus_header_bytes() -> [u8; 13] {
+    let mut header = [0_u8; 13];
+    header[..5].copy_from_slice(BALANCED_PAYLOAD_MAGIC);
+    header[5..9].copy_from_slice(&BALANCED_STREAM_SAMPLE_RATE.to_le_bytes());
+    header[9..11].copy_from_slice(&BALANCED_STREAM_CHANNELS.to_le_bytes());
+    let frame_samples =
+        u16::try_from((BALANCED_STREAM_SAMPLE_RATE * BALANCED_OPUS_FRAME_MS) / 1_000)
+            .unwrap_or(960);
+    header[11..13].copy_from_slice(&frame_samples.to_le_bytes());
+    header
+}
+
+#[cfg(test)]
+fn transcode_balanced_stream_to_opus_payload(source_path: &Path) -> anyhow::Result<PathBuf> {
+    let mut output_path = std::env::temp_dir();
+    output_path.push("tunetui_stream_cache");
+    fs::create_dir_all(&output_path).with_context(|| {
+        format!(
+            "failed to create stream cache dir {}",
+            output_path.display()
+        )
+    })?;
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    output_path.push(format!("balanced_{}.topus", micros));
+
+    let mut output = File::create(&output_path)
+        .with_context(|| format!("failed to create balanced stream {}", output_path.display()))?;
+    stream_balanced_opus_chunks(source_path, |chunk| {
+        output.write_all(chunk).with_context(|| {
+            format!(
+                "failed writing balanced stream chunk to {}",
+                output_path.display()
+            )
+        })
+    })?;
+    output.flush()?;
+    Ok(output_path)
+}
+
+struct ManagedOpusEncoder {
+    raw: *mut RawOpusEncoder,
+    channels: i32,
+}
+
+impl ManagedOpusEncoder {
+    fn new(sample_rate: u32, channels: i32) -> anyhow::Result<Self> {
+        let mut error = 0_i32;
+        let raw = unsafe {
+            opus_encoder_create(
+                i32::try_from(sample_rate).unwrap_or(i32::MAX),
+                channels,
+                OPUS_APPLICATION_AUDIO,
+                &mut error,
+            )
+        };
+        if raw.is_null() || error != OPUS_OK {
+            anyhow::bail!("failed to initialize opus encoder (error code {error})");
+        }
+        Ok(Self { raw, channels })
+    }
+
+    fn set_bitrate(&mut self, bitrate_bps: i32) -> anyhow::Result<()> {
+        let ret = unsafe {
+            unsafe_libopus::opus_encoder_ctl!(self.raw, OPUS_SET_BITRATE_REQUEST, bitrate_bps)
+        };
+        if ret != OPUS_OK {
+            anyhow::bail!("failed to configure opus bitrate (error code {ret})");
+        }
+        Ok(())
+    }
+
+    fn set_vbr(&mut self, enabled: bool) -> anyhow::Result<()> {
+        let value = if enabled { 1 } else { 0 };
+        let ret =
+            unsafe { unsafe_libopus::opus_encoder_ctl!(self.raw, OPUS_SET_VBR_REQUEST, value) };
+        if ret != OPUS_OK {
+            anyhow::bail!("failed to configure opus vbr (error code {ret})");
+        }
+        Ok(())
+    }
+
+    fn encode(&mut self, pcm_frame: &[i16], packet_buf: &mut [u8]) -> anyhow::Result<usize> {
+        if self.channels <= 0 {
+            anyhow::bail!("invalid opus channel configuration");
+        }
+        let channels = usize::try_from(self.channels).unwrap_or(1).max(1);
+        let frame_size_per_channel = pcm_frame.len() / channels;
+        let encoded = unsafe {
+            opus_encode(
+                self.raw,
+                pcm_frame.as_ptr(),
+                i32::try_from(frame_size_per_channel).unwrap_or(i32::MAX),
+                packet_buf.as_mut_ptr(),
+                i32::try_from(packet_buf.len()).unwrap_or(i32::MAX),
+            )
+        };
+        if encoded < 0 {
+            anyhow::bail!("opus encode failed (error code {encoded})");
+        }
+        Ok(usize::try_from(encoded).unwrap_or(0))
+    }
+}
+
+impl Drop for ManagedOpusEncoder {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe {
+                opus_encoder_destroy(self.raw);
+            }
+        }
+    }
+}
+
+struct ManagedOpusDecoder {
+    raw: *mut RawOpusDecoder,
+    channels: i32,
+}
+
+impl ManagedOpusDecoder {
+    fn new(sample_rate: u32, channels: i32) -> anyhow::Result<Self> {
+        let mut error = 0_i32;
+        let raw = unsafe {
+            opus_decoder_create(
+                i32::try_from(sample_rate).unwrap_or(i32::MAX),
+                channels,
+                &mut error,
+            )
+        };
+        if raw.is_null() || error != OPUS_OK {
+            anyhow::bail!("failed to initialize opus decoder (error code {error})");
+        }
+        Ok(Self { raw, channels })
+    }
+
+    fn decode(
+        &mut self,
+        packet: &[u8],
+        pcm_buffer: &mut [i16],
+        decode_fec: bool,
+    ) -> anyhow::Result<usize> {
+        let decoded = unsafe {
+            let channels = usize::try_from(self.channels).unwrap_or(1).max(1);
+            let frame_size_per_channel = pcm_buffer.len() / channels;
+            opus_decode(
+                self.raw,
+                packet.as_ptr(),
+                i32::try_from(packet.len()).unwrap_or(i32::MAX),
+                pcm_buffer.as_mut_ptr(),
+                i32::try_from(frame_size_per_channel).unwrap_or(i32::MAX),
+                if decode_fec { 1 } else { 0 },
+            )
+        };
+        if decoded < 0 {
+            anyhow::bail!("opus decode failed (error code {decoded})");
+        }
+        Ok(usize::try_from(decoded).unwrap_or(0))
+    }
+}
+
+impl Drop for ManagedOpusDecoder {
+    fn drop(&mut self) {
+        if !self.raw.is_null() {
+            unsafe {
+                opus_decoder_destroy(self.raw);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+fn decode_balanced_opus_payload_to_wav(
+    payload_path: &Path,
+    requested_path: &Path,
+) -> anyhow::Result<PathBuf> {
+    let mut payload = File::open(payload_path)
+        .with_context(|| format!("failed to open balanced payload {}", payload_path.display()))?;
+
+    let mut magic = [0_u8; 5];
+    payload
+        .read_exact(&mut magic)
+        .context("invalid balanced payload header")?;
+    if &magic != BALANCED_PAYLOAD_MAGIC {
+        anyhow::bail!("invalid balanced payload magic");
+    }
+
+    let mut sr_bytes = [0_u8; 4];
+    payload
+        .read_exact(&mut sr_bytes)
+        .context("missing balanced payload sample rate")?;
+    let sample_rate = u32::from_le_bytes(sr_bytes);
+
+    let mut channels_bytes = [0_u8; 2];
+    payload
+        .read_exact(&mut channels_bytes)
+        .context("missing balanced payload channels")?;
+    let channels = u16::from_le_bytes(channels_bytes);
+
+    let mut frame_bytes = [0_u8; 2];
+    payload
+        .read_exact(&mut frame_bytes)
+        .context("missing balanced payload frame size")?;
+    let frame_samples = usize::from(u16::from_le_bytes(frame_bytes));
+
+    if sample_rate == 0 || frame_samples == 0 {
+        anyhow::bail!("invalid balanced payload parameters");
+    }
+    if channels != 2 {
+        anyhow::bail!(
+            "unsupported balanced payload channels: {channels} (expected 2; legacy mono payloads are blocked)"
+        );
+    }
+
+    let mut decoder = ManagedOpusDecoder::new(sample_rate, i32::from(channels))?;
+    let wav_path = create_decoded_wav_cache_path(requested_path)?;
+    let mut wav_file = File::create(&wav_path)
+        .with_context(|| format!("failed to create decoded WAV {}", wav_path.display()))?;
+    write_wav_header_placeholder(&mut wav_file, sample_rate, channels)?;
+
+    let channels_usize = usize::from(channels).max(1);
+    let mut pcm_buffer = vec![
+        0_i16;
+        frame_samples
+            .saturating_mul(channels_usize)
+            .saturating_mul(6)
+            .max(frame_samples.saturating_mul(channels_usize))
+    ];
+    let mut packet_len_bytes = [0_u8; 2];
+    let mut wav_data_bytes: u64 = 0;
+
+    loop {
+        match payload.read_exact(&mut packet_len_bytes) {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(err) => return Err(err).context("failed to read balanced packet length"),
+        }
+        let packet_len = usize::from(u16::from_le_bytes(packet_len_bytes));
+        if packet_len == 0 {
+            continue;
+        }
+        let mut packet = vec![0_u8; packet_len];
+        payload
+            .read_exact(&mut packet)
+            .context("failed to read balanced packet")?;
+
+        let decoded_per_channel = decoder.decode(&packet, &mut pcm_buffer, false)?;
+        if decoded_per_channel == 0 {
+            continue;
+        }
+        let sample_count = decoded_per_channel.saturating_mul(channels_usize);
+        let mut bytes = Vec::with_capacity(sample_count.saturating_mul(2));
+        for sample in pcm_buffer.iter().take(sample_count) {
+            bytes.extend_from_slice(&sample.to_le_bytes());
+        }
+        wav_file
+            .write_all(&bytes)
+            .with_context(|| format!("failed writing decoded WAV {}", wav_path.display()))?;
+        wav_data_bytes =
+            wav_data_bytes.saturating_add(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+        if wav_data_bytes > MAX_STREAM_FILE_BYTES {
+            let _ = fs::remove_file(&wav_path);
+            anyhow::bail!("decoded balanced stream exceeds size limit");
+        }
+    }
+
+    finalize_wav_header(&mut wav_file, wav_data_bytes)?;
+    wav_file.flush()?;
+    Ok(wav_path)
+}
+
+#[cfg(test)]
+fn create_decoded_wav_cache_path(requested_path: &Path) -> anyhow::Result<PathBuf> {
+    create_stream_cache_path(requested_path, StreamPayloadFormat::OriginalFile).map(|mut path| {
+        path.set_extension("wav");
+        path
+    })
+}
+
+fn write_wav_header_placeholder(
+    file: &mut File,
+    sample_rate: u32,
+    channels: u16,
+) -> anyhow::Result<()> {
+    let unknown_size = u32::MAX;
+    file.write_all(b"RIFF")?;
+    file.write_all(&unknown_size.to_le_bytes())?;
+    file.write_all(b"WAVE")?;
+    file.write_all(b"fmt ")?;
+    file.write_all(&16_u32.to_le_bytes())?;
+    file.write_all(&1_u16.to_le_bytes())?;
+    file.write_all(&channels.to_le_bytes())?;
+    file.write_all(&sample_rate.to_le_bytes())?;
+    let bytes_per_sample = u32::from(BALANCED_STREAM_BITS_PER_SAMPLE / 8);
+    let byte_rate = sample_rate
+        .saturating_mul(u32::from(channels))
+        .saturating_mul(bytes_per_sample);
+    file.write_all(&byte_rate.to_le_bytes())?;
+    let block_align = channels.saturating_mul(BALANCED_STREAM_BITS_PER_SAMPLE / 8);
+    file.write_all(&block_align.to_le_bytes())?;
+    file.write_all(&BALANCED_STREAM_BITS_PER_SAMPLE.to_le_bytes())?;
+    file.write_all(b"data")?;
+    file.write_all(&unknown_size.to_le_bytes())?;
+    Ok(())
+}
+
+fn finalize_wav_header(file: &mut File, data_bytes: u64) -> anyhow::Result<()> {
+    let data_bytes_u32 = u32::try_from(data_bytes).context("balanced stream WAV too large")?;
+    let riff_size = 36_u32.saturating_add(data_bytes_u32);
+    file.seek(SeekFrom::Start(4))?;
+    file.write_all(&riff_size.to_le_bytes())?;
+    file.seek(SeekFrom::Start(40))?;
+    file.write_all(&data_bytes_u32.to_le_bytes())?;
+    file.flush()?;
+    Ok(())
+}
+
 fn validate_stream_source(path: &Path) -> anyhow::Result<()> {
     let metadata = fs::metadata(path)
         .with_context(|| format!("failed to read stream metadata for {}", path.display()))?;
@@ -2166,6 +2819,20 @@ fn validate_stream_source(path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("stream source exceeds size limit");
     }
     Ok(())
+}
+
+fn stream_size_matches(expected: u64, received: u64, payload_format: StreamPayloadFormat) -> bool {
+    match payload_format {
+        StreamPayloadFormat::OriginalFile => expected == received,
+        StreamPayloadFormat::BalancedOpus160kVbr => expected == 0 || expected == received,
+    }
+}
+
+fn stream_track_format(payload_format: StreamPayloadFormat) -> StreamTrackFormat {
+    match payload_format {
+        StreamPayloadFormat::OriginalFile => StreamTrackFormat::LosslessOriginal,
+        StreamPayloadFormat::BalancedOpus160kVbr => StreamTrackFormat::BalancedOpus160kVbrStereo,
+    }
 }
 
 fn next_request_id() -> u64 {
@@ -2226,6 +2893,7 @@ enum Inbound {
         request_id: u64,
         path: PathBuf,
         total_bytes: u64,
+        payload_format: StreamPayloadFormat,
     },
     StreamChunk {
         peer_id: u32,
@@ -2248,6 +2916,12 @@ enum Inbound {
     },
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+enum StreamPayloadFormat {
+    OriginalFile,
+    BalancedOpus160kVbr,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 enum WireClientMessage {
     Hello {
@@ -2267,6 +2941,7 @@ enum WireClientMessage {
         request_id: u64,
         path: PathBuf,
         total_bytes: u64,
+        payload_format: StreamPayloadFormat,
     },
     StreamChunk {
         request_id: u64,
@@ -2299,6 +2974,7 @@ enum WireServerMessage {
         request_id: u64,
         path: PathBuf,
         total_bytes: u64,
+        payload_format: StreamPayloadFormat,
     },
     StreamChunk {
         request_id: u64,
@@ -2319,6 +2995,13 @@ struct InboundStreamDownload {
     file: File,
     received_bytes: u64,
     total_bytes: u64,
+    payload_format: StreamPayloadFormat,
+    header_parsed: bool,
+    packet_buffer: Vec<u8>,
+    decoder: Option<ManagedOpusDecoder>,
+    pcm_buffer: Vec<i16>,
+    wav_data_bytes: u64,
+    ready_emitted: bool,
 }
 
 #[derive(Debug)]
@@ -2328,25 +3011,152 @@ struct ClientUploadGuard {
 }
 
 impl InboundStreamDownload {
-    fn new(requested_path: &Path, total_bytes: u64) -> anyhow::Result<Self> {
-        let local_temp_path = create_stream_cache_path(requested_path)?;
+    fn new(
+        requested_path: &Path,
+        total_bytes: u64,
+        payload_format: StreamPayloadFormat,
+    ) -> anyhow::Result<Self> {
+        let local_temp_path = create_stream_cache_path(requested_path, payload_format)?;
         let file = File::create(&local_temp_path).with_context(|| {
             format!(
                 "failed to create stream cache {}",
                 local_temp_path.display()
             )
         })?;
-        Ok(Self {
+        let mut state = Self {
             requested_path: requested_path.to_path_buf(),
             local_temp_path,
             file,
             received_bytes: 0,
             total_bytes,
-        })
+            payload_format,
+            header_parsed: false,
+            packet_buffer: Vec::new(),
+            decoder: None,
+            pcm_buffer: Vec::new(),
+            wav_data_bytes: 0,
+            ready_emitted: false,
+        };
+        if payload_format == StreamPayloadFormat::OriginalFile {
+            state.header_parsed = true;
+        }
+        Ok(state)
     }
 }
 
-fn create_stream_cache_path(source: &Path) -> anyhow::Result<PathBuf> {
+fn ingest_balanced_stream_bytes(
+    state: &mut InboundStreamDownload,
+    bytes: &[u8],
+) -> anyhow::Result<bool> {
+    state.packet_buffer.extend_from_slice(bytes);
+
+    if !state.header_parsed {
+        if state.packet_buffer.len() < 13 {
+            return Ok(false);
+        }
+        let mut header = [0_u8; 13];
+        header.copy_from_slice(&state.packet_buffer[..13]);
+        if &header[..5] != BALANCED_PAYLOAD_MAGIC {
+            anyhow::bail!("invalid balanced payload magic");
+        }
+        let sample_rate = u32::from_le_bytes([header[5], header[6], header[7], header[8]]);
+        let channels = u16::from_le_bytes([header[9], header[10]]);
+        let frame_samples = usize::from(u16::from_le_bytes([header[11], header[12]]));
+        if sample_rate == 0 || frame_samples == 0 {
+            anyhow::bail!("invalid balanced payload parameters");
+        }
+        if channels != 2 {
+            anyhow::bail!(
+                "unsupported balanced payload channels: {channels} (expected 2; legacy mono payloads are blocked)"
+            );
+        }
+        write_wav_header_placeholder(&mut state.file, sample_rate, channels)?;
+        state.decoder = Some(ManagedOpusDecoder::new(sample_rate, i32::from(channels))?);
+        state.pcm_buffer = vec![
+            0_i16;
+            frame_samples
+                .saturating_mul(usize::from(channels))
+                .saturating_mul(6)
+        ];
+        state.header_parsed = true;
+        state.packet_buffer.drain(0..13);
+    }
+
+    let mut ready_now = false;
+    let mut consumed = 0_usize;
+    while state.packet_buffer.len().saturating_sub(consumed) >= 2 {
+        let len_off = consumed;
+        let packet_len = usize::from(u16::from_le_bytes([
+            state.packet_buffer[len_off],
+            state.packet_buffer[len_off + 1],
+        ]));
+        if packet_len == 0 {
+            consumed = consumed.saturating_add(2);
+            continue;
+        }
+        let packet_start = len_off.saturating_add(2);
+        let packet_end = packet_start.saturating_add(packet_len);
+        if packet_end > state.packet_buffer.len() {
+            break;
+        }
+        let decoder = state
+            .decoder
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("balanced decoder not initialized"))?;
+        let packet = &state.packet_buffer[packet_start..packet_end];
+        let decoded_per_channel = decoder.decode(packet, &mut state.pcm_buffer, false)?;
+        if decoded_per_channel > 0 {
+            let sample_count = decoded_per_channel.saturating_mul(2);
+            let mut pcm_bytes = Vec::with_capacity(sample_count.saturating_mul(2));
+            for sample in state.pcm_buffer.iter().take(sample_count) {
+                pcm_bytes.extend_from_slice(&sample.to_le_bytes());
+            }
+            state.file.write_all(&pcm_bytes)?;
+            state.wav_data_bytes = state
+                .wav_data_bytes
+                .saturating_add(u64::try_from(pcm_bytes.len()).unwrap_or(u64::MAX));
+            if state.wav_data_bytes > MAX_STREAM_FILE_BYTES {
+                anyhow::bail!("decoded balanced stream exceeds size limit");
+            }
+            if !state.ready_emitted && state.wav_data_bytes >= BALANCED_FALLBACK_READY_PCM_BYTES {
+                state.file.flush()?;
+                state.ready_emitted = true;
+                ready_now = true;
+            }
+        }
+        consumed = packet_end;
+    }
+    if consumed > 0 {
+        state.packet_buffer.drain(0..consumed);
+    }
+    Ok(ready_now)
+}
+
+fn finalize_inbound_stream(state: &mut InboundStreamDownload) -> anyhow::Result<()> {
+    match state.payload_format {
+        StreamPayloadFormat::OriginalFile => {
+            state.file.flush()?;
+            Ok(())
+        }
+        StreamPayloadFormat::BalancedOpus160kVbr => {
+            let _ = ingest_balanced_stream_bytes(state, &[])?;
+            if !state.header_parsed {
+                anyhow::bail!("missing balanced stream header");
+            }
+            if !state.packet_buffer.is_empty() {
+                anyhow::bail!("incomplete balanced stream packet payload");
+            }
+            finalize_wav_header(&mut state.file, state.wav_data_bytes)?;
+            state.file.flush()?;
+            Ok(())
+        }
+    }
+}
+
+fn create_stream_cache_path(
+    source: &Path,
+    payload_format: StreamPayloadFormat,
+) -> anyhow::Result<PathBuf> {
     let mut dir = std::env::temp_dir();
     dir.push("tunetui_stream_cache");
     fs::create_dir_all(&dir)
@@ -2358,12 +3168,15 @@ fn create_stream_cache_path(source: &Path) -> anyhow::Result<PathBuf> {
         .map(sanitize_cache_name)
         .filter(|name| !name.is_empty())
         .unwrap_or_else(|| String::from("track"));
-    let ext = source
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(sanitize_cache_name)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| String::from("bin"));
+    let ext = match payload_format {
+        StreamPayloadFormat::OriginalFile => source
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(sanitize_cache_name)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| String::from("bin")),
+        StreamPayloadFormat::BalancedOpus160kVbr => String::from("wav"),
+    };
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2390,6 +3203,9 @@ fn sanitize_cache_name(input: &str) -> String {
 enum WireAction {
     SetMode(crate::online::OnlineRoomMode),
     SetQuality(StreamQuality),
+    SetNickname {
+        nickname: String,
+    },
     QueueAdd(SharedQueueItem),
     QueueConsume {
         expected_path: Option<PathBuf>,
@@ -2405,6 +3221,7 @@ fn action_to_wire(action: LocalAction) -> WireAction {
     match action {
         LocalAction::SetMode(mode) => WireAction::SetMode(mode),
         LocalAction::SetQuality(quality) => WireAction::SetQuality(quality),
+        LocalAction::SetNickname { nickname } => WireAction::SetNickname { nickname },
         LocalAction::QueueAdd(item) => WireAction::QueueAdd(item),
         LocalAction::QueueConsume { expected_path } => WireAction::QueueConsume { expected_path },
         LocalAction::DelayUpdate {
@@ -2422,6 +3239,7 @@ fn wire_to_action(action: WireAction) -> LocalAction {
     match action {
         WireAction::SetMode(mode) => LocalAction::SetMode(mode),
         WireAction::SetQuality(quality) => LocalAction::SetQuality(quality),
+        WireAction::SetNickname { nickname } => LocalAction::SetNickname { nickname },
         WireAction::QueueAdd(item) => LocalAction::QueueAdd(item),
         WireAction::QueueConsume { expected_path } => LocalAction::QueueConsume { expected_path },
         WireAction::DelayUpdate {
@@ -2438,8 +3256,21 @@ fn wire_to_action(action: WireAction) -> LocalAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{self, File};
+    use std::io::Write;
     use std::net::TcpListener;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_file(name: &str, ext: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros();
+        path.push(format!("tunetui_test_{}_{}.{}", name, micros, ext));
+        path
+    }
 
     #[test]
     fn invite_code_round_trips_with_password_key() {
@@ -2512,6 +3343,120 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[test]
+    fn stream_start_round_trip_preserves_payload_format() {
+        let msg = WireServerMessage::StreamStart {
+            request_id: 7,
+            path: PathBuf::from("track.flac"),
+            total_bytes: 123,
+            payload_format: StreamPayloadFormat::BalancedOpus160kVbr,
+        };
+        let encoded = serde_json::to_string(&msg).expect("serialize");
+        let decoded: WireServerMessage = serde_json::from_str(&encoded).expect("deserialize");
+        match decoded {
+            WireServerMessage::StreamStart {
+                request_id,
+                path,
+                total_bytes,
+                payload_format,
+            } => {
+                assert_eq!(request_id, 7);
+                assert_eq!(path, PathBuf::from("track.flac"));
+                assert_eq!(total_bytes, 123);
+                assert_eq!(payload_format, StreamPayloadFormat::BalancedOpus160kVbr);
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stream_cache_path_uses_wav_extension_for_balanced_payload() {
+        let path = create_stream_cache_path(
+            Path::new("artist/song.flac"),
+            StreamPayloadFormat::BalancedOpus160kVbr,
+        )
+        .expect("cache path");
+        assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("wav"));
+    }
+
+    #[test]
+    fn balanced_opus_encode_decode_round_trip_accepts_stereo_payload() {
+        let source_path = unique_temp_file("balanced_source", "wav");
+        let mut source_file = File::create(&source_path).expect("create source wav");
+        write_wav_header_placeholder(&mut source_file, BALANCED_STREAM_SAMPLE_RATE, 2)
+            .expect("write source wav header");
+
+        let frames = usize::try_from(BALANCED_STREAM_SAMPLE_RATE / 10).unwrap_or(4_800);
+        let mut data_bytes: u64 = 0;
+        for _ in 0..frames {
+            let left: i16 = 1_024;
+            let right: i16 = -1_024;
+            source_file
+                .write_all(&left.to_le_bytes())
+                .expect("write left sample");
+            source_file
+                .write_all(&right.to_le_bytes())
+                .expect("write right sample");
+            data_bytes = data_bytes.saturating_add(4);
+        }
+        finalize_wav_header(&mut source_file, data_bytes).expect("finalize source wav");
+
+        let payload_path = transcode_balanced_stream_to_opus_payload(&source_path)
+            .expect("encode balanced payload");
+        let decoded_path = decode_balanced_opus_payload_to_wav(&payload_path, &source_path)
+            .expect("decode balanced payload");
+
+        let decoded_size = fs::metadata(&decoded_path).expect("decoded metadata").len();
+        assert!(decoded_size > 44);
+
+        let _ = fs::remove_file(source_path);
+        let _ = fs::remove_file(payload_path);
+        let _ = fs::remove_file(decoded_path);
+    }
+
+    #[test]
+    fn balanced_decoder_rejects_legacy_mono_payload() {
+        let payload_path = unique_temp_file("balanced_payload_mono", "topus");
+        let mut payload = File::create(&payload_path).expect("create payload");
+        payload
+            .write_all(BALANCED_PAYLOAD_MAGIC)
+            .expect("write magic");
+        payload
+            .write_all(&BALANCED_STREAM_SAMPLE_RATE.to_le_bytes())
+            .expect("write sample rate");
+        payload
+            .write_all(&1_u16.to_le_bytes())
+            .expect("write mono channel header");
+        payload
+            .write_all(&960_u16.to_le_bytes())
+            .expect("write frame samples");
+        payload.flush().expect("flush payload");
+
+        let requested = unique_temp_file("requested_track", "mp3");
+        let err = decode_balanced_opus_payload_to_wav(&payload_path, &requested)
+            .expect_err("mono payload should be rejected");
+        assert!(
+            err.to_string().contains("legacy mono payloads are blocked"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_file(payload_path);
+    }
+
+    #[test]
+    fn balanced_stream_size_check_allows_unknown_total_bytes() {
+        assert!(stream_size_matches(
+            0,
+            42,
+            StreamPayloadFormat::BalancedOpus160kVbr
+        ));
+        assert!(!stream_size_matches(
+            12,
+            42,
+            StreamPayloadFormat::OriginalFile
+        ));
     }
 
     #[test]
@@ -2620,6 +3565,60 @@ mod tests {
             .expect("listener participant");
         assert_eq!(listener.manual_extra_delay_ms, 75);
         assert!(!listener.auto_ping_delay);
+    }
+
+    #[test]
+    fn nickname_update_renames_participant_and_owned_queue_items() {
+        let mut session = OnlineSession::host("host");
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("a.flac"),
+            title: String::from("a"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("host")),
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::SetNickname {
+                nickname: String::from("dj"),
+            },
+            "host",
+        );
+
+        assert_eq!(session.participants[0].nickname, "dj");
+        assert_eq!(
+            session.shared_queue[0].owner_nickname.as_deref(),
+            Some("dj")
+        );
+    }
+
+    #[test]
+    fn host_only_allows_listener_nickname_update() {
+        let mut session = OnlineSession::host("host");
+        session.mode = crate::online::OnlineRoomMode::HostOnly;
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("listener"),
+            is_local: false,
+            is_host: false,
+            ping_ms: 12,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::SetNickname {
+                nickname: String::from("listener2"),
+            },
+            "listener",
+        );
+
+        assert!(
+            session
+                .participants
+                .iter()
+                .any(|participant| participant.nickname == "listener2")
+        );
     }
 
     #[test]

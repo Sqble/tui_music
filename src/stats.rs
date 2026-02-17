@@ -11,7 +11,7 @@ use unicode_normalization::UnicodeNormalization;
 const MAX_EVENTS: usize = 20_000;
 const MIN_TRACKED_LISTEN_SECONDS: u32 = 10;
 const MINUTE_TREND_END_ADVANCE_SECONDS: i64 = 20;
-const STATS_SCHEMA_VERSION: u32 = 2;
+const STATS_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatsRange {
@@ -369,6 +369,13 @@ impl StatsStore {
                     play_count: 0,
                     listen_seconds: 0,
                 });
+            if metadata_track_key(event.artist.as_deref(), &event.title).is_some() {
+                row.title = event.title.clone();
+                row.artist = event.artist.clone();
+                if row.album.is_none() {
+                    row.album = event.album.clone();
+                }
+            }
             row.listen_seconds = row
                 .listen_seconds
                 .saturating_add(u64::from(event.listened_seconds));
@@ -417,14 +424,22 @@ impl StatsStore {
         provider_track_id: Option<&str>,
     ) -> String {
         let normalized_provider = normalize_provider_track_id(provider_track_id);
+        let mapped_provider_key = normalized_provider
+            .as_deref()
+            .and_then(|provider| self.provider_track_key_map.get(provider));
+        if let Some(metadata_key) = metadata_track_key(artist, title) {
+            if let Some(mapped) = mapped_provider_key
+                && is_metadata_track_key(mapped)
+            {
+                return mapped.clone();
+            }
+            return metadata_key;
+        }
+
         if let Some(provider) = normalized_provider.as_deref()
             && let Some(mapped) = self.provider_track_key_map.get(provider)
         {
             return mapped.clone();
-        }
-
-        if let Some(metadata_key) = metadata_track_key(artist, title) {
-            return metadata_key;
         }
 
         if let Some(provider) = normalized_provider {
@@ -606,12 +621,33 @@ fn normalize_provider_track_id(value: Option<&str>) -> Option<String> {
 }
 
 fn metadata_track_key(artist: Option<&str>, title: &str) -> Option<String> {
-    let _ = artist;
+    let normalized_artist = normalize_artist_for_match(artist.unwrap_or_default());
     let normalized_title = normalize_text_for_match(title);
-    if normalized_title.is_empty() {
+    if normalized_artist.is_empty() || normalized_title.is_empty() {
         return None;
     }
-    Some(format!("meta-title:{normalized_title}"))
+    Some(format!("meta:{normalized_artist}|{normalized_title}"))
+}
+
+fn is_metadata_track_key(value: &str) -> bool {
+    value
+        .strip_prefix("meta:")
+        .is_some_and(|rest| rest.split_once('|').is_some())
+}
+
+fn normalize_artist_for_match(value: &str) -> String {
+    let normalized = normalize_text_for_match(value);
+    let mut out = String::with_capacity(normalized.len());
+    for token in normalized.split_whitespace() {
+        if matches!(token, "feat" | "featuring" | "ft") {
+            break;
+        }
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(token);
+    }
+    if out.is_empty() { normalized } else { out }
 }
 
 fn normalize_text_for_match(value: &str) -> String {
@@ -713,10 +749,13 @@ fn normalize_existing_track_key(key: &str) -> String {
         return key.to_string();
     }
     if let Some(rest) = key.strip_prefix("meta:")
-        && let Some((_, title)) = rest.split_once('|')
-        && !title.trim().is_empty()
+        && let Some((artist, title)) = rest.split_once('|')
     {
-        return format!("meta-title:{}", title.trim());
+        let normalized_artist = normalize_artist_for_match(artist);
+        let normalized_title = normalize_text_for_match(title);
+        if !normalized_artist.is_empty() && !normalized_title.is_empty() {
+            return format!("meta:{normalized_artist}|{normalized_title}");
+        }
     }
     key.to_string()
 }
@@ -1198,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn title_only_metadata_merges_when_artist_missing() {
+    fn missing_artist_falls_back_to_path_key() {
         let mut store = StatsStore::default();
         store.record_listen(ListenSessionRecord {
             track_path: PathBuf::from("/srv/music/renamed-one.flac"),
@@ -1228,12 +1267,12 @@ mod tests {
         });
 
         let snapshot = store.query(&StatsQuery::default(), 100);
-        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows.len(), 2);
         assert_eq!(snapshot.total_plays, 2);
     }
 
     #[test]
-    fn same_title_merges_even_with_different_artists() {
+    fn same_title_with_different_artists_stays_separate() {
         let mut store = StatsStore::default();
         store.record_listen(ListenSessionRecord {
             track_path: PathBuf::from("/srv/music/server-copy.flac"),
@@ -1263,12 +1302,12 @@ mod tests {
         });
 
         let snapshot = store.query(&StatsQuery::default(), 100);
-        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows.len(), 2);
         assert_eq!(snapshot.total_plays, 2);
     }
 
     #[test]
-    fn migration_collapses_old_artist_title_keys_to_title_key() {
+    fn migration_preserves_artist_title_metadata_keys() {
         let mut store = StatsStore::default();
         store.track_totals.insert(
             String::from("meta:game ost|moon pokemon"),
@@ -1287,14 +1326,17 @@ mod tests {
 
         migrate_store(&mut store);
 
-        let collapsed = store.track_totals.get("meta-title:moon pokemon");
-        assert_eq!(collapsed.map(|entry| entry.play_count), Some(2));
-        assert_eq!(collapsed.map(|entry| entry.listen_seconds), Some(51));
-        assert_eq!(store.track_totals.len(), 1);
+        let first = store.track_totals.get("meta:game ost|moon pokemon");
+        assert_eq!(first.map(|entry| entry.play_count), Some(1));
+        assert_eq!(first.map(|entry| entry.listen_seconds), Some(40));
+        let second = store.track_totals.get("meta:pokemon|moon pokemon");
+        assert_eq!(second.map(|entry| entry.play_count), Some(1));
+        assert_eq!(second.map(|entry| entry.listen_seconds), Some(11));
+        assert_eq!(store.track_totals.len(), 2);
     }
 
     #[test]
-    fn provider_mapping_is_rebound_to_latest_title_key() {
+    fn provider_mapping_is_rebound_to_latest_artist_title_key() {
         let mut store = StatsStore::default();
         store.provider_track_key_map.insert(
             String::from("provider:linux:/music/a.mp3"),
@@ -1320,7 +1362,7 @@ mod tests {
                 .provider_track_key_map
                 .get("provider:linux:/music/a.mp3")
                 .map(String::as_str),
-            Some("meta-title:tung")
+            Some("meta:sahur|tung")
         );
     }
 
@@ -1339,7 +1381,35 @@ mod tests {
                 .provider_track_key_map
                 .get("provider:linux:/music/a.mp3")
                 .map(String::as_str),
-            Some("meta-title:tung")
+            Some("meta:old artist|tung")
         );
+    }
+
+    #[test]
+    fn metadata_key_is_preferred_over_legacy_provider_mapping() {
+        let mut store = StatsStore::default();
+        store.provider_track_key_map.insert(
+            String::from("provider:host:/library/a.flac"),
+            String::from("c:/temp/streamed-file-name.flac"),
+        );
+
+        store.record_listen(ListenSessionRecord {
+            track_path: PathBuf::from("c:/temp/streamed-file-name.flac"),
+            title: "Song".to_string(),
+            artist: Some("Artist".to_string()),
+            album: None,
+            provider_track_id: Some("provider:host:/library/a.flac".to_string()),
+            started_at_epoch_seconds: 10,
+            listened_seconds: 40,
+            completed: false,
+            duration_seconds: Some(180),
+            counted_play_override: None,
+            allow_short_listen: false,
+        });
+
+        let snapshot = store.query(&StatsQuery::default(), 100);
+        assert_eq!(snapshot.rows.len(), 1);
+        assert_eq!(snapshot.rows[0].title, "Song");
+        assert_eq!(snapshot.rows[0].artist.as_deref(), Some("Artist"));
     }
 }

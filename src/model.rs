@@ -108,6 +108,8 @@ pub struct PersistedState {
     pub stats_top_songs_count: u8,
     #[serde(default)]
     pub fallback_cover_template: CoverArtTemplate,
+    #[serde(default)]
+    pub online_nickname: Option<String>,
 }
 
 fn default_stats_enabled() -> bool {
@@ -146,6 +148,7 @@ impl Default for PersistedState {
             online_sync_correction_threshold_ms: default_online_sync_correction_threshold_ms(),
             stats_top_songs_count: default_stats_top_songs_count(),
             fallback_cover_template: CoverArtTemplate::default(),
+            online_nickname: None,
         }
     }
 }

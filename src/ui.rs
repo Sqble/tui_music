@@ -45,6 +45,8 @@ pub struct OnlinePasswordPromptView {
 pub struct JoinPromptModalView {
     pub invite_code: String,
     pub paste_selected: bool,
+    pub room_name_mode: bool,
+    pub nickname_mode: bool,
 }
 
 pub struct OnlineRoomDirectoryModalView {
@@ -642,13 +644,29 @@ fn draw_room_directory_modal(
 fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &ThemePalette) {
     let popup = centered_rect(frame.area(), 68, 34);
     frame.render_widget(Clear, popup);
+    let title = if modal.nickname_mode {
+        "Set Online Nickname"
+    } else if modal.room_name_mode {
+        "Host Online Room"
+    } else {
+        "Connect to Homeserver"
+    };
+    let input_label = if modal.nickname_mode {
+        "Nickname"
+    } else if modal.room_name_mode {
+        "Room name"
+    } else {
+        "Server / Link"
+    };
+    let help_line = if modal.nickname_mode {
+        "Pick a nickname for online rooms. Enter saves and continues."
+    } else if modal.room_name_mode {
+        "Type room name. Enter continues. Tab/arrow selects button. Ctrl+V pastes."
+    } else {
+        "Type homeserver address or room link. Server-only opens room directory; link with /room/<name> auto-joins."
+    };
     frame.render_widget(
-        panel_block(
-            "Join Online Room",
-            colors.popup_bg,
-            colors.text,
-            colors.border,
-        ),
+        panel_block(title, colors.popup_bg, colors.text, colors.border),
         popup,
     );
 
@@ -658,14 +676,14 @@ fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &The
     });
     let lines = vec![
         Line::from(vec![
-            Span::styled("Server / Link", Style::default().fg(colors.muted)),
+            Span::styled(input_label, Style::default().fg(colors.muted)),
             Span::styled(": ", Style::default().fg(colors.muted)),
             Span::styled(modal.invite_code.as_str(), Style::default().fg(colors.text)),
         ]),
         Line::from(""),
         Line::from(vec![
             Span::styled(
-                "[ Join ]",
+                "[ Continue ]",
                 if modal.paste_selected {
                     Style::default().fg(colors.muted)
                 } else {
@@ -690,7 +708,7 @@ fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &The
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Type server address or room link. Tab/arrow selects button. Enter continues. Ctrl+V pastes.",
+            help_line,
             Style::default()
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
@@ -951,20 +969,6 @@ fn draw_online_section(
         Style::default().fg(colors.muted),
     )));
 
-    if let Some(local) = session.local_participant() {
-        left_lines.push(Line::from(Span::styled(
-            format!(
-                "You {}  ping {}ms  manual {}ms  effective {}ms  auto {}",
-                local.nickname,
-                local.ping_ms,
-                local.manual_extra_delay_ms,
-                local.effective_delay_ms(),
-                if local.auto_ping_delay { "on" } else { "off" }
-            ),
-            Style::default().fg(colors.text),
-        )));
-    }
-
     left_lines.push(Line::from(""));
     left_lines.push(Line::from(Span::styled(
         "Participants",
@@ -1063,11 +1067,8 @@ fn participant_line(participant: &crate::online::Participant, session: &OnlineSe
         format!(" ({})", parts.join(", "))
     };
     format!(
-        "- {}{}  ping {}ms  delay {}ms",
-        participant.nickname,
-        tags,
-        participant.ping_ms,
-        participant.effective_delay_ms()
+        "- {}{}  ping {}ms",
+        participant.nickname, tags, participant.ping_ms
     )
 }
 

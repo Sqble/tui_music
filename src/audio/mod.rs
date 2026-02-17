@@ -5,6 +5,7 @@ use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink};
 #[cfg(unix)]
 use std::ffi::CString;
 use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use std::time::Instant;
@@ -150,6 +151,35 @@ impl WasapiAudioEngine {
         Ok((target_rms / rms).clamp(0.5, 1.8) as f32)
     }
 
+    fn streamed_wav_has_unknown_duration(path: &Path) -> bool {
+        if !path
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .contains("tunetui_stream_cache")
+        {
+            return false;
+        }
+        if !path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("wav"))
+        {
+            return false;
+        }
+        let mut file = match File::open(path) {
+            Ok(file) => file,
+            Err(_) => return false,
+        };
+        if file.seek(SeekFrom::Start(40)).is_err() {
+            return false;
+        }
+        let mut data_size = [0_u8; 4];
+        if file.read_exact(&mut data_size).is_err() {
+            return false;
+        }
+        u32::from_le_bytes(data_size) == u32::MAX
+    }
+
     fn open_output_stream(output: Option<&str>) -> Result<(OutputStream, Sink)> {
         let mut stream = with_silenced_stderr(|| {
             let host = rodio::cpal::default_host();
@@ -268,7 +298,11 @@ impl AudioEngine for WasapiAudioEngine {
             File::open(path).with_context(|| format!("failed to open track {}", path.display()))?;
         let source = Decoder::try_from(file)
             .with_context(|| format!("failed to decode {}", path.display()))?;
-        self.track_duration = source.total_duration();
+        self.track_duration = if Self::streamed_wav_has_unknown_duration(path) {
+            None
+        } else {
+            source.total_duration()
+        };
         self.sink.append(source);
 
         self.track_gain = if self.loudness_normalization {
@@ -297,7 +331,11 @@ impl AudioEngine for WasapiAudioEngine {
             File::open(path).with_context(|| format!("failed to open track {}", path.display()))?;
         let source = Decoder::try_from(file)
             .with_context(|| format!("failed to decode {}", path.display()))?;
-        let next_duration = source.total_duration();
+        let next_duration = if Self::streamed_wav_has_unknown_duration(path) {
+            None
+        } else {
+            source.total_duration()
+        };
         next_sink.append(source);
 
         let next_gain = if self.loudness_normalization {

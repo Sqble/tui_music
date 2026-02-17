@@ -13,7 +13,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Single-instance behavior on Windows (new launches focus/restore existing app)
 - Automatic track advance when a song ends, including while minimized to tray (Windows)
 - Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\state.json` on Windows)
-- Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with metadata-keyed listen events/aggregates (normalized title-first merge across local/online sources), automatic migration from legacy path-keyed totals, and provider-ID pinning for stable online mapping
+- Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with metadata-keyed listen events/aggregates (normalized artist+title merge across local/online sources, with filename fallback when metadata is incomplete), automatic migration from legacy path-keyed totals, and provider-ID pinning for stable online mapping
 - Keyboard-driven TUI with actions panel search, recent actions (session-local, last 3), and overflow scrollbar
 - Right-aligned status tabs with `Tab` cycling (Library, Lyrics, Stats, Online)
 - Song Info panel renders now-playing embedded album art as a cached Unicode color raster, with configurable built-in fallback templates for tracks missing embedded art
@@ -33,7 +33,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
 - Add directory from actions panel via typed path or external folder picker (PowerShell on Windows, zenity/kdialog on Linux)
 - Remove directory from actions panel
-- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates (global FIFO consume), shared-queue auto-start when idle, last-player-or-host authority for end-of-song auto-advance, shared queue priority when local queue songs end, stop-at-end when shared queue is exhausted, sub-second periodic playback-state sync (track/position/pause plus metadata/provider ID for stats identity, including ping-compensated target position and a small drift deadzone to avoid micro-seeks, plus null-audio host fallback), periodic measured ping RTT updates, ping-timeout peer cleanup for abrupt disconnects, and lossless bidirectional file streaming fallback (host->listener and host<-listener over the same session socket)
+- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates (global FIFO consume), shared-queue auto-start when idle, last-player-or-host authority for end-of-song auto-advance, shared queue priority when local queue songs end, stop-at-end when shared queue is exhausted, sub-second periodic playback-state sync (track/position/pause plus metadata/provider ID for stats identity, including ping-compensated target position and a small drift deadzone to avoid micro-seeks, plus null-audio host fallback), periodic measured ping RTT updates, ping-timeout peer cleanup for abrupt disconnects, and bidirectional file streaming fallback (host->listener and host<-listener over the same session socket): Lossless streams source bytes directly, while Balanced streams are packetized and frame-streamed as Opus stereo at 160 kbps VBR (decoded to WAV on receipt for playback); in host-only mode, non-host peers are immediately forced into listen-only playback lock (local play/pause/seek/skip/mode changes are blocked)
 - Invite code is password-encrypted with checksum validation (secure `T2` format); host sets password first, joiner enters invite then password
 - Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
 
@@ -74,24 +74,27 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - `Ctrl+t` (Lyrics edit mode): stamp selected line with current playback time
 - `h` / `j` / `l` (Online tab): host room / join room or browse room directory / leave room
 - `o` / `q` (Online tab): toggle room mode / cycle stream quality profile
+- Host-only mode behavior: non-host peers are immediately listen-only (local playback controls and local playlist-start actions are blocked, while tab/navigation UI still works)
 - `Ctrl+s` (Library tab, while in online room): add selected item to shared queue (track, folder, playlist, or all songs in selection order)
-- Join prompt modal: type home-server link/address (supports bare `127.0.0.1:7878/room/name` and `http(s)://...`), `V` paste clipboard, `Enter` continue, `Esc` cancel
-- Host flow: `h` asks for room link (`<server>/room/<name>`) and optional `?max=2..32`, then optional password
-- Join flow: if link includes room, optional password prompt appears before connect; if link has only server, a searchable room directory modal opens (lock/open + current/max)
+- Connect-to-homeserver modal: type home-server link/address (supports bare `127.0.0.1:7878/room/name` and `http(s)://...`), `V` paste clipboard, `Enter` continue, `Esc` cancel
+- First-time online flow: on `h`/`j`, if nickname is not set yet, a nickname prompt appears before host/join flow continues
+- Host flow: if connected to a homeserver, `h` asks for room name then optional password; if not connected, `h` opens the same connect-to-homeserver modal first
+- Join flow: if link includes room, optional password prompt appears before connect; if link has only server, a searchable room directory modal opens (lock/open + current/max); missing rooms from links are not auto-created
+- Edit nickname later: `/` -> `Playback settings` -> `Online nickname`
 - Online delay tuning moved to actions panel: `/` -> `Playback settings` -> `Online sync delay settings` (manual delay, auto-ping, recalibrate, sync correction threshold)
 - Clipboard copy falls back to terminal OSC 52 when native clipboard access is unavailable (useful over SSH, including tmux/screen passthrough; terminal/tmux must allow clipboard escape sequences)
 - `Ctrl+C`: quit
 
 ### Online Networking Defaults
 
-- Home server bind (CLI): `tune --host --ip 0.0.0.0:7878`
-- Headless home server: `tune --host --ip 0.0.0.0:7878`
-- Home server + app in one process: `tune --host --app --ip 0.0.0.0:7878`
-- Fixed room transport port range (recommended for VPS firewalls): `tune --host --ip 0.0.0.0:7878 --room-port-range 9000-9100`
-- App-only targeting a home server: `tune --ip 127.0.0.1:7878`
-- Open firewall for the home server port and the full configured room range
+- Home server bind (CLI): `tune --host --ip 0.0.0.0` (defaults to `:7878` when port is omitted)
+- Headless home server: `tune --host --ip 0.0.0.0`
+- Home server + app in one process: `tune --host --app --ip 0.0.0.0`
+- Default room transport port range in host mode: `9000-9100` (override with `--room-port-range start-end`)
+- App-only targeting a home server: `tune --ip 127.0.0.1` (defaults to `:7878`)
+- Open firewall for the home server port and the active room range (default `9000-9100`)
 - Password for host/join: optional in TUI (lock icon in room directory indicates password required)
-- Nickname: `TUNETUI_ONLINE_NICKNAME` (fallback `USERNAME`/`USER`/`you`)
+- Nickname: saved in app state (`state.json`), set from in-app prompt/settings
 - Reverse stream safety: peer uploads are only served for shared-queue items owned by that peer and are capped at 1 GiB per file
 
 ## Fuzzing

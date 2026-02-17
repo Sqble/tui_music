@@ -3,10 +3,13 @@ use crate::config;
 use crate::core::{BrowserEntryKind, HeaderSection, LyricsMode, StatsFilterFocus, TuneCore};
 use crate::library::{self, MetadataEdit};
 use crate::model::{CoverArtTemplate, PlaybackMode, Theme};
-use crate::online::{OnlineSession, Participant, TransportCommand, TransportEnvelope};
+use crate::online::{
+    OnlineSession, Participant, StreamQuality, TransportCommand, TransportEnvelope,
+};
 use crate::online_net::{
     HomeRoomDirectoryEntry, LocalAction as NetworkLocalAction, NetworkEvent, NetworkRole,
-    OnlineNetwork, create_home_room, list_home_rooms, resolve_home_room, verify_home_server,
+    OnlineNetwork, StreamTrackFormat, create_home_room, list_home_rooms, resolve_home_room,
+    verify_home_server,
 };
 use crate::stats::{self, ListenSessionRecord, StatsStore};
 use anyhow::{Context, Result};
@@ -23,6 +26,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::collections::HashMap;
+use std::fs;
 use std::io::{Write, stdout};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
@@ -49,12 +53,12 @@ const ONLINE_SYNC_CORRECTION_THRESHOLD_OPTIONS_MS: [u16; 8] =
     [100, 150, 200, 300, 400, 500, 750, 1000];
 const MAX_ONLINE_EVENTS_PER_TICK: usize = 128;
 const ONLINE_DEFAULT_HOME_SERVER_ADDR: &str = "127.0.0.1:7878";
-const ONLINE_DEFAULT_ROOM_LINK: &str = "127.0.0.1:7878/room/roomName";
+const HOST_ONLY_LISTENER_LOCKED_STATUS: &str = "Room is host-only. Listener playback locked";
 
 #[derive(Debug, Clone, Default)]
 pub struct AppStartupOptions {
     pub default_home_server_addr: Option<String>,
-    pub home_server_from_cli: bool,
+    pub home_server_connected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,9 +77,11 @@ struct OnlineRuntime {
     network: Option<OnlineNetwork>,
     local_nickname: String,
     home_server_addr: String,
-    home_server_from_cli: bool,
+    home_server_connected: bool,
+    nickname_configured: bool,
     last_transport_seq: u64,
     join_prompt_active: bool,
+    join_prompt_mode: JoinPromptMode,
     join_code_input: String,
     join_prompt_button: JoinPromptButton,
     join_directory_active: bool,
@@ -84,7 +90,6 @@ struct OnlineRuntime {
     join_directory_rooms: Vec<HomeRoomDirectoryEntry>,
     pending_join_server_addr: String,
     pending_join_room_name: Option<String>,
-    host_setup_active: bool,
     host_server_input: String,
     host_room_input: String,
     host_max_connections_input: String,
@@ -129,7 +134,7 @@ impl OnlineRuntime {
         self.join_directory_rooms.clear();
         self.pending_join_server_addr.clear();
         self.pending_join_room_name = None;
-        self.host_setup_active = false;
+        self.join_prompt_mode = JoinPromptMode::Connect;
         self.host_server_input.clear();
         self.host_room_input.clear();
         self.host_max_connections_input.clear();
@@ -159,6 +164,11 @@ impl OnlineRuntime {
         Some(crate::ui::JoinPromptModalView {
             invite_code: self.join_code_input.clone(),
             paste_selected: matches!(self.join_prompt_button, JoinPromptButton::Paste),
+            room_name_mode: matches!(self.join_prompt_mode, JoinPromptMode::HostRoomName),
+            nickname_mode: matches!(
+                self.join_prompt_mode,
+                JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+            ),
         })
     }
 
@@ -237,6 +247,15 @@ enum HostInviteModalButton {
 enum JoinPromptButton {
     Join,
     Paste,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinPromptMode {
+    Connect,
+    ConnectForHost,
+    HostRoomName,
+    NicknameForJoin,
+    NicknameForHost,
 }
 
 impl JoinPromptButton {
@@ -818,6 +837,10 @@ enum ActionPanelState {
     ThemeSettings {
         selected: usize,
     },
+    OnlineNickname {
+        selected: usize,
+        input: String,
+    },
     LyricsImportTxt {
         selected: usize,
         path_input: String,
@@ -998,6 +1021,17 @@ impl ActionPanelState {
                 options: theme_options(core.theme),
                 selected: *selected,
             }),
+            Self::OnlineNickname { selected, input } => Some(crate::ui::ActionPanelView {
+                title: String::from("Online Nickname"),
+                hint: String::from("Type nickname + Enter save  Backspace back"),
+                search_query: None,
+                options: vec![if input.is_empty() {
+                    String::from("Nickname: ")
+                } else {
+                    format!("Nickname: {input}")
+                }],
+                selected: *selected,
+            }),
             Self::LyricsImportTxt {
                 selected,
                 path_input,
@@ -1109,14 +1143,20 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
     let mut stats_enabled_last = core.stats_enabled;
     let mut online_runtime = OnlineRuntime {
         network: None,
-        local_nickname: inferred_online_nickname(),
+        local_nickname: if core.online_nickname.trim().is_empty() {
+            String::from("you")
+        } else {
+            core.online_nickname.clone()
+        },
         home_server_addr: startup
             .default_home_server_addr
             .clone()
             .unwrap_or_else(|| String::from(ONLINE_DEFAULT_HOME_SERVER_ADDR)),
-        home_server_from_cli: startup.home_server_from_cli,
+        home_server_connected: startup.home_server_connected,
+        nickname_configured: !core.online_nickname.trim().is_empty(),
         last_transport_seq: 0,
         join_prompt_active: false,
+        join_prompt_mode: JoinPromptMode::Connect,
         join_code_input: String::new(),
         join_prompt_button: JoinPromptButton::Join,
         join_directory_active: false,
@@ -1125,7 +1165,6 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
         join_directory_rooms: Vec::new(),
         pending_join_server_addr: String::new(),
         pending_join_room_name: None,
-        host_setup_active: false,
         host_server_input: String::new(),
         host_room_input: String::new(),
         host_max_connections_input: String::new(),
@@ -1266,7 +1305,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 &mut *audio,
                 &mut action_panel,
                 &mut recent_root_actions,
-                &online_runtime,
+                &mut online_runtime,
                 mouse,
                 library_rect,
             );
@@ -1287,7 +1326,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 &mut *audio,
                 &mut action_panel,
                 &mut recent_root_actions,
-                Some(&online_runtime),
+                Some(&mut online_runtime),
                 key.code,
             );
             continue;
@@ -1334,6 +1373,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             KeyCode::Down => core.select_next(),
             KeyCode::Up => core.select_prev(),
             KeyCode::Enter => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if let Some(path) = core.activate_selected() {
                     if let Err(err) = audio.play(&path) {
                         core.status = concise_audio_error(&err);
@@ -1344,6 +1388,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             }
             KeyCode::Left | KeyCode::Backspace => core.navigate_back(),
             KeyCode::Char(' ') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if audio.is_paused() {
                     audio.resume();
                     core.status = String::from("Resumed");
@@ -1355,6 +1404,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 core.dirty = true;
             }
             KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'n') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if let Some(path) = core.next_track_path() {
                     if let Err(err) = audio.play(&path) {
                         core.status = concise_audio_error(&err);
@@ -1365,6 +1419,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 }
             }
             KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'b') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if let Some(path) = core.prev_track_path() {
                     if let Err(err) = audio.play(&path) {
                         core.status = concise_audio_error(&err);
@@ -1375,6 +1434,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if let Err(err) = scrub_current_track(&mut *audio, core.scrub_seconds, false) {
                     core.status = format!("Scrub failed: {err}");
                 } else {
@@ -1384,6 +1448,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 core.dirty = true;
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if let Err(err) = scrub_current_track(&mut *audio, core.scrub_seconds, true) {
                     core.status = format!("Scrub failed: {err}");
                 } else {
@@ -1393,6 +1462,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 core.dirty = true;
             }
             KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'m') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 core.cycle_mode();
                 auto_save_state(&mut core, &*audio);
             }
@@ -1948,7 +2022,7 @@ fn handle_lyrics_inline_input(core: &mut TuneCore, audio: &dyn AudioEngine, key:
 
 fn handle_online_inline_input(
     core: &mut TuneCore,
-    _audio: &dyn AudioEngine,
+    audio: &dyn AudioEngine,
     key: KeyEvent,
     online_runtime: &mut OnlineRuntime,
 ) -> bool {
@@ -2067,7 +2141,7 @@ fn handle_online_inline_input(
                 online_runtime.join_prompt_active = false;
                 online_runtime.join_code_input.clear();
                 online_runtime.join_prompt_button = JoinPromptButton::Join;
-                online_runtime.host_setup_active = false;
+                online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                 core.status = String::from("Join cancelled");
                 core.dirty = true;
                 return true;
@@ -2085,8 +2159,16 @@ fn handle_online_inline_input(
             KeyCode::Backspace => {
                 online_runtime.join_code_input.pop();
                 online_runtime.join_prompt_button = JoinPromptButton::Join;
-                core.status = if online_runtime.host_setup_active {
+                core.status = if matches!(
+                    online_runtime.join_prompt_mode,
+                    JoinPromptMode::HostRoomName
+                ) {
                     format!("Enter room name: {}", online_runtime.join_code_input)
+                } else if matches!(
+                    online_runtime.join_prompt_mode,
+                    JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                ) {
+                    format!("Enter nickname: {}", online_runtime.join_code_input)
                 } else {
                     format!("Enter server/link: {}", online_runtime.join_code_input)
                 };
@@ -2125,15 +2207,66 @@ fn handle_online_inline_input(
                     return true;
                 }
                 if online_runtime.join_code_input.trim().is_empty() {
-                    core.status = if online_runtime.host_setup_active {
+                    core.status = if matches!(
+                        online_runtime.join_prompt_mode,
+                        JoinPromptMode::HostRoomName
+                    ) {
                         String::from("Enter room name, then Enter")
+                    } else if matches!(
+                        online_runtime.join_prompt_mode,
+                        JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                    ) {
+                        String::from("Enter nickname, then press Enter")
                     } else {
-                        String::from("Enter server link, then press Enter")
+                        String::from("Enter homeserver/link, then press Enter")
                     };
                     core.dirty = true;
                     return true;
                 }
-                if online_runtime.host_setup_active {
+                if matches!(
+                    online_runtime.join_prompt_mode,
+                    JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                ) {
+                    let nickname = online_runtime.join_code_input.trim().to_string();
+                    online_runtime.join_prompt_active = false;
+                    online_runtime.join_code_input.clear();
+                    online_runtime.join_prompt_button = JoinPromptButton::Join;
+                    let continue_to_host = matches!(
+                        online_runtime.join_prompt_mode,
+                        JoinPromptMode::NicknameForHost
+                    );
+                    online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+                    apply_online_nickname(core, online_runtime, &nickname);
+                    auto_save_state(core, audio);
+                    if continue_to_host {
+                        if online_runtime.home_server_connected {
+                            online_runtime.join_prompt_active = true;
+                            online_runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
+                            core.status = format!(
+                                "Home server {} selected. Enter room name",
+                                online_runtime.home_server_addr
+                            );
+                        } else {
+                            online_runtime.join_prompt_active = true;
+                            online_runtime.join_prompt_mode = JoinPromptMode::ConnectForHost;
+                            core.status = String::from("Connect to homeserver to host a room");
+                        }
+                    } else if online_runtime.home_server_connected {
+                        online_runtime.pending_join_server_addr =
+                            online_runtime.home_server_addr.clone();
+                        load_home_room_directory(core, online_runtime, "Select a room to join");
+                    } else {
+                        online_runtime.join_prompt_active = true;
+                        online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+                        core.status = String::from("Connect to homeserver to browse rooms");
+                    }
+                    core.dirty = true;
+                    return true;
+                }
+                if matches!(
+                    online_runtime.join_prompt_mode,
+                    JoinPromptMode::HostRoomName
+                ) {
                     online_runtime.pending_join_server_addr =
                         online_runtime.home_server_addr.clone();
                     online_runtime.pending_join_room_name =
@@ -2141,6 +2274,7 @@ fn handle_online_inline_input(
                     online_runtime.join_prompt_active = false;
                     online_runtime.join_code_input.clear();
                     online_runtime.join_prompt_button = JoinPromptButton::Join;
+                    online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                     online_runtime.host_max_connections_input = String::from("8");
                     online_runtime.password_prompt_active = true;
                     online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
@@ -2163,19 +2297,30 @@ fn handle_online_inline_input(
                 online_runtime.join_prompt_active = false;
                 online_runtime.join_code_input.clear();
                 online_runtime.join_prompt_button = JoinPromptButton::Join;
+                let prompt_mode = online_runtime.join_prompt_mode;
+                online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+                online_runtime.home_server_addr = online_runtime.pending_join_server_addr.clone();
+                online_runtime.home_server_connected = true;
                 if online_runtime.pending_join_room_name.is_none() {
-                    match list_home_rooms(&online_runtime.pending_join_server_addr, None) {
-                        Ok(rooms) => {
-                            online_runtime.join_directory_rooms = rooms;
-                            online_runtime.join_directory_search.clear();
-                            online_runtime.join_directory_selected = 0;
-                            online_runtime.join_directory_active = true;
-                            core.status = String::from("Select a room to join");
+                    if matches!(prompt_mode, JoinPromptMode::ConnectForHost) {
+                        if let Err(err) =
+                            verify_home_server(&online_runtime.pending_join_server_addr)
+                        {
+                            core.status = format!("Home server unavailable: {err}");
+                            core.dirty = true;
+                            return true;
                         }
-                        Err(err) => {
-                            core.status = format!("Failed to load rooms: {err}");
-                        }
+                        online_runtime.join_prompt_active = true;
+                        online_runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
+                        online_runtime.join_prompt_button = JoinPromptButton::Join;
+                        core.status = format!(
+                            "Home server {} selected. Enter room name",
+                            online_runtime.pending_join_server_addr
+                        );
+                        core.dirty = true;
+                        return true;
                     }
+                    load_home_room_directory(core, online_runtime, "Select a room to join");
                     core.dirty = true;
                     return true;
                 }
@@ -2205,8 +2350,16 @@ fn handle_online_inline_input(
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 append_invite_char(online_runtime, ch);
                 online_runtime.join_prompt_button = JoinPromptButton::Join;
-                core.status = if online_runtime.host_setup_active {
+                core.status = if matches!(
+                    online_runtime.join_prompt_mode,
+                    JoinPromptMode::HostRoomName
+                ) {
                     format!("Enter room name: {}", online_runtime.join_code_input)
+                } else if matches!(
+                    online_runtime.join_prompt_mode,
+                    JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                ) {
+                    format!("Enter nickname: {}", online_runtime.join_code_input)
                 } else {
                     format!("Enter server/link: {}", online_runtime.join_code_input)
                 };
@@ -2228,14 +2381,31 @@ fn handle_online_inline_input(
                 core.dirty = true;
                 return true;
             }
-            online_runtime.host_setup_active = true;
-            online_runtime.join_prompt_active = true;
-            online_runtime.join_code_input.clear();
-            online_runtime.join_prompt_button = JoinPromptButton::Join;
-            core.status = format!(
-                "Home server {} selected. Enter room name",
-                online_runtime.home_server_addr
-            );
+            if !online_runtime.nickname_configured {
+                online_runtime.join_prompt_active = true;
+                online_runtime.join_prompt_mode = JoinPromptMode::NicknameForHost;
+                online_runtime.join_code_input.clear();
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                core.status = String::from("Set your online nickname");
+                core.dirty = true;
+                return true;
+            }
+            if online_runtime.home_server_connected {
+                online_runtime.join_prompt_active = true;
+                online_runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
+                online_runtime.join_code_input.clear();
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                core.status = format!(
+                    "Home server {} selected. Enter room name",
+                    online_runtime.home_server_addr
+                );
+            } else {
+                online_runtime.join_prompt_active = true;
+                online_runtime.join_prompt_mode = JoinPromptMode::ConnectForHost;
+                online_runtime.join_code_input.clear();
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                core.status = String::from("Connect to homeserver to host a room");
+            }
             core.dirty = true;
             true
         }
@@ -2245,28 +2415,26 @@ fn handle_online_inline_input(
                 core.dirty = true;
                 return true;
             }
-            if online_runtime.home_server_from_cli {
+            if !online_runtime.nickname_configured {
+                online_runtime.join_prompt_active = true;
+                online_runtime.join_prompt_mode = JoinPromptMode::NicknameForJoin;
+                online_runtime.join_code_input.clear();
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                core.status = String::from("Set your online nickname");
+                core.dirty = true;
+                return true;
+            }
+            if online_runtime.home_server_connected {
                 online_runtime.pending_join_server_addr = online_runtime.home_server_addr.clone();
-                match list_home_rooms(&online_runtime.pending_join_server_addr, None) {
-                    Ok(rooms) => {
-                        online_runtime.join_directory_rooms = rooms;
-                        online_runtime.join_directory_search.clear();
-                        online_runtime.join_directory_selected = 0;
-                        online_runtime.join_directory_active = true;
-                        core.status = String::from("Select a room to join");
-                    }
-                    Err(err) => {
-                        core.status = format!("Failed to load rooms: {err}");
-                    }
-                }
+                load_home_room_directory(core, online_runtime, "Select a room to join");
                 core.dirty = true;
                 return true;
             }
             online_runtime.join_prompt_active = true;
-            online_runtime.host_setup_active = false;
-            online_runtime.join_code_input = ONLINE_DEFAULT_ROOM_LINK.to_string();
+            online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+            online_runtime.join_code_input.clear();
             online_runtime.join_prompt_button = JoinPromptButton::Join;
-            core.status = String::from("Enter room link or home server address to browse rooms");
+            core.status = String::from("Connect to homeserver to browse rooms");
             core.dirty = true;
             true
         }
@@ -2434,6 +2602,7 @@ fn start_host_with_password(
     ) {
         Ok(room) => {
             online_runtime.home_server_addr = server_addr.clone();
+            online_runtime.home_server_connected = true;
             join_home_room(
                 core,
                 online_runtime,
@@ -2441,7 +2610,6 @@ fn start_host_with_password(
                 &room.room_name,
                 password,
             );
-            online_runtime.host_setup_active = false;
         }
         Err(err) => {
             core.status = format!("Create room failed: {err}");
@@ -2581,13 +2749,38 @@ fn copy_invite_via_osc52(invite_code: &str) -> anyhow::Result<()> {
     std::io::Write::flush(&mut out).context("stdout flush failed")
 }
 
-fn inferred_online_nickname() -> String {
-    std::env::var("TUNETUI_ONLINE_NICKNAME")
-        .ok()
-        .or_else(|| std::env::var("USERNAME").ok())
-        .or_else(|| std::env::var("USER").ok())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| String::from("you"))
+fn apply_online_nickname(core: &mut TuneCore, online_runtime: &mut OnlineRuntime, nickname: &str) {
+    let trimmed = nickname.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let new_name = trimmed.to_string();
+    let previous = online_runtime.local_nickname.clone();
+    online_runtime.local_nickname = new_name.clone();
+    online_runtime.nickname_configured = true;
+    core.online_nickname = new_name.clone();
+
+    if let Some(session) = core.online.session.as_mut() {
+        if let Some(local) = session.local_participant_mut() {
+            local.nickname = new_name.clone();
+        }
+        for item in &mut session.shared_queue {
+            if item
+                .owner_nickname
+                .as_deref()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(&previous))
+            {
+                item.owner_nickname = Some(new_name.clone());
+            }
+        }
+    }
+
+    if let Some(network) = online_runtime.network.as_ref() {
+        network.send_local_action(NetworkLocalAction::SetNickname {
+            nickname: new_name.clone(),
+        });
+    }
+    core.status = format!("Online nickname: {new_name}");
 }
 
 fn parse_home_link(input: &str) -> Result<ParsedHomeLink> {
@@ -2664,6 +2857,25 @@ fn rewrite_room_server_addr_host(home_server_addr: &str, room_server_addr: &str)
     }
 }
 
+fn load_home_room_directory(
+    core: &mut TuneCore,
+    online_runtime: &mut OnlineRuntime,
+    ok_status: &str,
+) {
+    match list_home_rooms(&online_runtime.pending_join_server_addr, None) {
+        Ok(rooms) => {
+            online_runtime.join_directory_rooms = rooms;
+            online_runtime.join_directory_search.clear();
+            online_runtime.join_directory_selected = 0;
+            online_runtime.join_directory_active = true;
+            core.status = String::from(ok_status);
+        }
+        Err(err) => {
+            core.status = format!("Failed to load rooms: {err}");
+        }
+    }
+}
+
 fn join_home_room(
     core: &mut TuneCore,
     online_runtime: &mut OnlineRuntime,
@@ -2688,6 +2900,9 @@ fn join_home_room(
             return;
         }
     };
+
+    online_runtime.home_server_addr = server_addr.clone();
+    online_runtime.home_server_connected = true;
 
     core.online_join_room(&resolved.room_code, &online_runtime.local_nickname);
     let connect_addr = rewrite_room_server_addr_host(&server_addr, &resolved.room_server_addr)
@@ -2897,6 +3112,7 @@ fn drain_online_network_events(
             NetworkEvent::StreamTrackReady {
                 requested_path,
                 local_temp_path,
+                format,
             } => {
                 online_runtime
                     .streamed_track_cache
@@ -2905,8 +3121,14 @@ fn drain_online_network_events(
                     match audio.play(&local_temp_path) {
                         Ok(()) => {
                             online_runtime.remote_logical_track = Some(requested_path.clone());
+                            let format_label = match format {
+                                StreamTrackFormat::LosslessOriginal => "Lossless original",
+                                StreamTrackFormat::BalancedOpus160kVbrStereo => {
+                                    "Balanced Opus 160k VBR stereo"
+                                }
+                            };
                             core.status = format!(
-                                "Streaming fallback active: {}",
+                                "Streaming fallback active ({format_label}): {}",
                                 requested_path
                                     .file_name()
                                     .and_then(|name| name.to_str())
@@ -2924,6 +3146,12 @@ fn drain_online_network_events(
                 }
             }
             NetworkEvent::SessionSync(mut session) => {
+                let previous_quality = core.online.session.as_ref().map(|entry| entry.quality);
+                let was_listener_locked = core
+                    .online
+                    .session
+                    .as_ref()
+                    .is_some_and(crate::online::OnlineSession::is_local_listener_locked);
                 let role = online_runtime
                     .network
                     .as_ref()
@@ -2935,6 +3163,7 @@ fn drain_online_network_events(
                     &online_runtime.local_nickname,
                     &role,
                 );
+                let is_listener_locked = session.is_local_listener_locked();
                 if let Some(last_transport) = session.last_transport.as_ref()
                     && last_transport.seq > online_runtime.last_transport_seq
                 {
@@ -2953,11 +3182,95 @@ fn drain_online_network_events(
                         );
                     }
                 }
+                if !was_listener_locked && is_listener_locked {
+                    enforce_listener_playback_lockdown(core, audio, online_runtime);
+                }
+                if let Some(previous_quality) = previous_quality
+                    && previous_quality != session.quality
+                {
+                    handle_stream_quality_change(
+                        core,
+                        audio,
+                        online_runtime,
+                        previous_quality,
+                        session.quality,
+                    );
+                }
                 core.online.session = Some(session);
                 core.dirty = true;
             }
         }
     }
+}
+
+fn handle_stream_quality_change(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
+    previous_quality: StreamQuality,
+    new_quality: StreamQuality,
+) {
+    let remote_path = online_runtime.remote_logical_track.clone();
+    let active_streamed = remote_path.as_ref().is_some_and(|logical_path| {
+        audio
+            .current_track()
+            .is_some_and(|current| current != logical_path.as_path())
+    });
+
+    for cached in online_runtime.streamed_track_cache.values() {
+        let _ = fs::remove_file(cached);
+    }
+    online_runtime.streamed_track_cache.clear();
+
+    if active_streamed && let Some(path) = remote_path {
+        audio.stop();
+        online_runtime.pending_stream_path = None;
+        online_runtime.remote_logical_track = None;
+        if let Some(network) = online_runtime.network.as_ref() {
+            let source_nickname =
+                preferred_stream_source(core, online_runtime, network.role(), path.as_path());
+            network.request_track_stream(path.clone(), source_nickname);
+            online_runtime.pending_stream_path = Some(path.clone());
+            online_runtime.remote_logical_track = Some(path);
+            core.status = format!(
+                "Room quality changed ({} -> {}). Re-requesting fallback stream...",
+                stream_quality_label(previous_quality),
+                stream_quality_label(new_quality)
+            );
+            core.dirty = true;
+        }
+    }
+}
+
+fn stream_quality_label(quality: StreamQuality) -> &'static str {
+    match quality {
+        StreamQuality::Lossless => "Lossless",
+        StreamQuality::Balanced => "Balanced Opus 160k",
+    }
+}
+
+fn local_playback_locked_by_host_only(core: &TuneCore) -> bool {
+    core.online
+        .session
+        .as_ref()
+        .is_some_and(crate::online::OnlineSession::is_local_listener_locked)
+}
+
+fn enforce_listener_playback_lockdown(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
+) {
+    audio.stop();
+    online_runtime.pending_stream_path = None;
+    online_runtime.remote_logical_track = None;
+    online_runtime.remote_track_title = None;
+    online_runtime.remote_track_artist = None;
+    online_runtime.remote_track_album = None;
+    online_runtime.remote_provider_track_id = None;
+    online_runtime.online_playback_source = OnlinePlaybackSource::LocalQueue;
+    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+    core.dirty = true;
 }
 
 fn is_online_disconnect_status(message: &str) -> bool {
@@ -3029,14 +3342,15 @@ fn apply_remote_transport(
             album,
             provider_track_id,
         } => {
+            online_runtime.remote_logical_track = Some(path.clone());
+            online_runtime.remote_track_title = title.clone();
+            online_runtime.remote_track_artist = artist.clone();
+            online_runtime.remote_track_album = album.clone();
+            online_runtime.remote_provider_track_id = provider_track_id
+                .clone()
+                .or_else(|| Some(provider_track_id_for_path(path)));
             if ensure_remote_track(core, audio, online_runtime, path) {
                 online_runtime.online_playback_source = OnlinePlaybackSource::LocalQueue;
-                online_runtime.remote_track_title = title.clone();
-                online_runtime.remote_track_artist = artist.clone();
-                online_runtime.remote_track_album = album.clone();
-                online_runtime.remote_provider_track_id = provider_track_id
-                    .clone()
-                    .or_else(|| Some(provider_track_id_for_path(path)));
                 core.current_queue_index = core.queue_position_for_path(path);
                 core.status = String::from("Remote switched track");
             }
@@ -3051,6 +3365,13 @@ fn apply_remote_transport(
             position_ms,
             paused,
         } => {
+            online_runtime.remote_logical_track = Some(path.clone());
+            online_runtime.remote_track_title = title.clone();
+            online_runtime.remote_track_artist = artist.clone();
+            online_runtime.remote_track_album = album.clone();
+            online_runtime.remote_provider_track_id = provider_track_id
+                .clone()
+                .or_else(|| Some(provider_track_id_for_path(path)));
             if !ensure_remote_track(core, audio, online_runtime, path) {
                 core.dirty = true;
                 return;
@@ -3088,13 +3409,6 @@ fn apply_remote_transport(
                 audio.resume();
             }
 
-            online_runtime.remote_logical_track = Some(path.clone());
-            online_runtime.remote_track_title = title.clone();
-            online_runtime.remote_track_artist = artist.clone();
-            online_runtime.remote_track_album = album.clone();
-            online_runtime.remote_provider_track_id = provider_track_id
-                .clone()
-                .or_else(|| Some(provider_track_id_for_path(path)));
             core.current_queue_index = core.queue_position_for_path(path);
             if let Some(session) = core.online.session.as_mut() {
                 session.last_sync_drift_ms = drift_ms.min(i64::from(i32::MAX)) as i32;
@@ -3440,7 +3754,7 @@ fn handle_mouse_with_panel(
     audio: &mut dyn AudioEngine,
     panel: &mut ActionPanelState,
     recent_root_actions: &mut Vec<RootActionId>,
-    online_runtime: &OnlineRuntime,
+    online_runtime: &mut OnlineRuntime,
     mouse: MouseEvent,
     library_rect: ratatui::prelude::Rect,
 ) {
@@ -3620,6 +3934,11 @@ fn audio_output_options(audio: &dyn AudioEngine) -> Vec<String> {
 }
 
 fn playback_settings_options(core: &TuneCore) -> Vec<String> {
+    let nickname = if core.online_nickname.trim().is_empty() {
+        String::from("(not set)")
+    } else {
+        core.online_nickname.clone()
+    };
     vec![
         format!(
             "Loudness normalization: {}",
@@ -3644,6 +3963,7 @@ fn playback_settings_options(core: &TuneCore) -> Vec<String> {
             cover_template_label(core.fallback_cover_template)
         ),
         String::from("Online sync delay settings"),
+        format!("Online nickname: {nickname}"),
         String::from("Back"),
     ]
 }
@@ -3812,6 +4132,7 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
         | ActionPanelState::PlaybackSettings { selected }
         | ActionPanelState::OnlineDelaySettings { selected }
         | ActionPanelState::ThemeSettings { selected }
+        | ActionPanelState::OnlineNickname { selected, .. }
         | ActionPanelState::LyricsImportTxt { selected, .. }
         | ActionPanelState::MetadataEditor { selected, .. }
         | ActionPanelState::AddDirectory { selected, .. }
@@ -3836,7 +4157,7 @@ fn handle_action_panel_input_with_recent(
     audio: &mut dyn AudioEngine,
     panel: &mut ActionPanelState,
     recent_root_actions: &mut Vec<RootActionId>,
-    online_runtime: Option<&OnlineRuntime>,
+    mut online_runtime: Option<&mut OnlineRuntime>,
     key: KeyCode,
 ) {
     if let ActionPanelState::Root { selected, query } = panel {
@@ -3874,6 +4195,22 @@ fn handle_action_panel_input_with_recent(
     }
 
     if let ActionPanelState::PlaylistCreate { selected, input } = panel {
+        match key {
+            KeyCode::Char(ch) if *selected == 0 => {
+                input.push(ch);
+                core.dirty = true;
+                return;
+            }
+            KeyCode::Backspace if *selected == 0 && !input.is_empty() => {
+                input.pop();
+                core.dirty = true;
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if let ActionPanelState::OnlineNickname { selected, input } = panel {
         match key {
             KeyCode::Char(ch) if *selected == 0 => {
                 input.push(ch);
@@ -3959,9 +4296,10 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::PlaylistCreate { .. } => 1,
         ActionPanelState::AudioSettings { .. } => 3,
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
-        ActionPanelState::PlaybackSettings { .. } => 8,
+        ActionPanelState::PlaybackSettings { .. } => 9,
         ActionPanelState::OnlineDelaySettings { .. } => 6,
         ActionPanelState::ThemeSettings { .. } => 6,
+        ActionPanelState::OnlineNickname { .. } => 1,
         ActionPanelState::LyricsImportTxt { .. } => 3,
         ActionPanelState::MetadataEditor { state, .. } => state.options().len(),
         ActionPanelState::AddDirectory { .. } => 2,
@@ -4064,6 +4402,9 @@ fn handle_action_panel_input_with_recent(
                     selected: root_selected_for_action(RootActionId::Theme, recent_root_actions),
                     query: String::new(),
                 },
+                ActionPanelState::OnlineNickname { .. } => {
+                    ActionPanelState::PlaybackSettings { selected: 7 }
+                }
                 ActionPanelState::LyricsImportTxt { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
                         RootActionId::ImportTxtToLyrics,
@@ -4235,6 +4576,12 @@ fn handle_action_panel_input_with_recent(
                 }
             }
             ActionPanelState::Mode { selected } => {
+                if local_playback_locked_by_host_only(core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    panel.close();
+                    return;
+                }
                 core.playback_mode = match selected {
                     0 => PlaybackMode::Normal,
                     1 => PlaybackMode::Shuffle,
@@ -4247,6 +4594,12 @@ fn handle_action_panel_input_with_recent(
                 panel.close();
             }
             ActionPanelState::PlaylistPlay { selected } => {
+                if local_playback_locked_by_host_only(core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    panel.close();
+                    return;
+                }
                 let playlists = sorted_playlist_names(core);
                 if let Some(name) = playlists.get(selected) {
                     core.load_playlist_queue(name);
@@ -4435,6 +4788,17 @@ fn handle_action_panel_input_with_recent(
                     *panel = ActionPanelState::OnlineDelaySettings { selected: 0 };
                     core.dirty = true;
                 }
+                7 => {
+                    *panel = ActionPanelState::OnlineNickname {
+                        selected: 0,
+                        input: online_runtime
+                            .as_deref()
+                            .map(|runtime| runtime.local_nickname.clone())
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| core.online_nickname.clone()),
+                    };
+                    core.dirty = true;
+                }
                 _ => {
                     *panel = ActionPanelState::Root {
                         selected: root_selected_for_action(
@@ -4446,22 +4810,40 @@ fn handle_action_panel_input_with_recent(
                     core.dirty = true;
                 }
             },
+            ActionPanelState::OnlineNickname { input, .. } => {
+                let nickname = input.trim();
+                if nickname.is_empty() {
+                    core.status = String::from("Enter an online nickname");
+                    core.dirty = true;
+                    return;
+                }
+                if let Some(runtime) = online_runtime.as_deref_mut() {
+                    apply_online_nickname(core, runtime, nickname);
+                    auto_save_state(core, &*audio);
+                } else {
+                    core.online_nickname = nickname.to_string();
+                    core.status = format!("Online nickname: {}", core.online_nickname);
+                    core.dirty = true;
+                }
+                *panel = ActionPanelState::PlaybackSettings { selected: 7 };
+                core.dirty = true;
+            }
             ActionPanelState::OnlineDelaySettings { selected } => match selected {
                 0 => {
                     core.online_adjust_manual_delay(-10);
-                    publish_online_delay_update(core, online_runtime);
+                    publish_online_delay_update(core, online_runtime.as_deref());
                 }
                 1 => {
                     core.online_adjust_manual_delay(10);
-                    publish_online_delay_update(core, online_runtime);
+                    publish_online_delay_update(core, online_runtime.as_deref());
                 }
                 2 => {
                     core.online_toggle_auto_delay();
-                    publish_online_delay_update(core, online_runtime);
+                    publish_online_delay_update(core, online_runtime.as_deref());
                 }
                 3 => {
                     core.online_recalibrate_ping();
-                    publish_online_delay_update(core, online_runtime);
+                    publish_online_delay_update(core, online_runtime.as_deref());
                 }
                 4 => {
                     core.online_sync_correction_threshold_ms =
@@ -5147,6 +5529,7 @@ mod tests {
         loudness_normalization: bool,
         crossfade_seconds: u16,
         volume: f32,
+        fail_play: bool,
     }
 
     impl TestAudioEngine {
@@ -5166,6 +5549,7 @@ mod tests {
                 loudness_normalization: false,
                 crossfade_seconds: 0,
                 volume: 1.0,
+                fail_play: false,
             }
         }
 
@@ -5185,6 +5569,7 @@ mod tests {
                 loudness_normalization: false,
                 crossfade_seconds: 0,
                 volume: 1.0,
+                fail_play: false,
             }
         }
     }
@@ -5194,9 +5579,11 @@ mod tests {
             network: None,
             local_nickname: String::from("listener"),
             home_server_addr: String::from("127.0.0.1:7878"),
-            home_server_from_cli: false,
+            home_server_connected: false,
+            nickname_configured: true,
             last_transport_seq: 0,
             join_prompt_active: false,
+            join_prompt_mode: JoinPromptMode::Connect,
             join_code_input: String::new(),
             join_prompt_button: JoinPromptButton::Join,
             join_directory_active: false,
@@ -5205,7 +5592,6 @@ mod tests {
             join_directory_rooms: Vec::new(),
             pending_join_server_addr: String::new(),
             pending_join_room_name: None,
-            host_setup_active: false,
             host_server_input: String::new(),
             host_room_input: String::new(),
             host_max_connections_input: String::new(),
@@ -5230,8 +5616,25 @@ mod tests {
         }
     }
 
+    fn host_only_listener_session() -> crate::online::OnlineSession {
+        let mut session = crate::online::OnlineSession::join("ROOM22", "listener");
+        session.mode = crate::online::OnlineRoomMode::HostOnly;
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("host"),
+            is_local: false,
+            is_host: true,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        session
+    }
+
     impl AudioEngine for TestAudioEngine {
         fn play(&mut self, path: &Path) -> Result<()> {
+            if self.fail_play {
+                return Err(anyhow::anyhow!("playback failed"));
+            }
             self.current = Some(path.to_path_buf());
             self.queued = None;
             self.finished = false;
@@ -5385,6 +5788,78 @@ mod tests {
 
         assert_eq!(core.playback_mode, crate::model::PlaybackMode::Shuffle);
         assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn host_only_listener_detection_is_true_for_non_host_local_participant() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(host_only_listener_session());
+        assert!(local_playback_locked_by_host_only(&core));
+    }
+
+    #[test]
+    fn action_panel_mode_selection_is_blocked_for_host_only_listener() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(host_only_listener_session());
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Mode { selected: 1 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert_eq!(core.playback_mode, crate::model::PlaybackMode::Normal);
+        assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn action_panel_playlist_play_is_blocked_for_host_only_listener() {
+        let mut state = PersistedState::default();
+        state.playlists.insert(
+            String::from("mix"),
+            crate::model::Playlist {
+                tracks: vec![PathBuf::from("song.mp3")],
+            },
+        );
+        let mut core = TuneCore::from_persisted(state);
+        core.online.session = Some(host_only_listener_session());
+        let mut audio = TestAudioEngine::new();
+        let mut panel = ActionPanelState::PlaylistPlay { selected: 0 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert!(audio.played.is_empty());
+        assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn enforce_listener_playback_lockdown_stops_audio_and_clears_remote_state() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut runtime = test_online_runtime();
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("local.mp3"));
+        runtime.pending_stream_path = Some(PathBuf::from("shared.mp3"));
+        runtime.remote_logical_track = Some(PathBuf::from("shared.mp3"));
+        runtime.remote_track_title = Some(String::from("shared"));
+        runtime.remote_track_artist = Some(String::from("artist"));
+        runtime.remote_track_album = Some(String::from("album"));
+        runtime.remote_provider_track_id = Some(String::from("provider-id"));
+        runtime.online_playback_source = OnlinePlaybackSource::SharedQueue;
+
+        enforce_listener_playback_lockdown(&mut core, &mut audio, &mut runtime);
+
+        assert!(audio.stopped);
+        assert!(runtime.pending_stream_path.is_none());
+        assert!(runtime.remote_logical_track.is_none());
+        assert!(runtime.remote_track_title.is_none());
+        assert!(runtime.remote_track_artist.is_none());
+        assert!(runtime.remote_track_album.is_none());
+        assert!(runtime.remote_provider_track_id.is_none());
+        assert_eq!(
+            runtime.online_playback_source,
+            OnlinePlaybackSource::LocalQueue
+        );
+        assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
     }
 
     #[test]
@@ -5937,14 +6412,14 @@ mod tests {
             query: String::new(),
         };
         let mut recent_root_actions = Vec::new();
-        let online_runtime = test_online_runtime();
+        let mut online_runtime = test_online_runtime();
 
         handle_mouse_with_panel(
             &mut core,
             &mut audio,
             &mut panel,
             &mut recent_root_actions,
-            &online_runtime,
+            &mut online_runtime,
             MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 column: 2,
@@ -6198,6 +6673,39 @@ mod tests {
         assert_eq!(hint.title.as_deref(), Some("Song"));
         assert_eq!(hint.artist.as_deref(), Some("Artist"));
         assert_eq!(hint.provider_track_id.as_deref(), Some("provider:host:42"));
+    }
+
+    #[test]
+    fn remote_sync_preserves_metadata_when_stream_fallback_is_pending() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut runtime = test_online_runtime();
+        let mut audio = TestAudioEngine::new();
+        audio.fail_play = true;
+        let path = PathBuf::from("a.mp3");
+
+        apply_remote_transport(
+            &mut core,
+            &mut audio,
+            &mut runtime,
+            &TransportCommand::SetPlaybackState {
+                path: path.clone(),
+                title: Some(String::from("Meta Song")),
+                artist: Some(String::from("Meta Artist")),
+                album: Some(String::from("Meta Album")),
+                provider_track_id: Some(String::from("provider:host:1")),
+                position_ms: 0,
+                paused: false,
+            },
+        );
+
+        assert_eq!(runtime.remote_logical_track, Some(path));
+        assert_eq!(runtime.remote_track_title.as_deref(), Some("Meta Song"));
+        assert_eq!(runtime.remote_track_artist.as_deref(), Some("Meta Artist"));
+        assert_eq!(runtime.remote_track_album.as_deref(), Some("Meta Album"));
+        assert_eq!(
+            runtime.remote_provider_track_id.as_deref(),
+            Some("provider:host:1")
+        );
     }
 
     #[test]
@@ -7116,6 +7624,108 @@ mod tests {
             &mut runtime,
         ));
         assert_eq!(runtime.join_code_input, "ABv");
+    }
+
+    #[test]
+    fn online_tab_h_without_connected_home_server_opens_connect_prompt() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.home_server_connected = false;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(runtime.join_prompt_active);
+        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::ConnectForHost);
+    }
+
+    #[test]
+    fn online_tab_h_with_connected_home_server_opens_room_name_prompt() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.home_server_connected = true;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(runtime.join_prompt_active);
+        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::HostRoomName);
+    }
+
+    #[test]
+    fn online_tab_j_without_connected_home_server_opens_connect_prompt() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.home_server_connected = false;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(runtime.join_prompt_active);
+        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
+        assert!(runtime.join_code_input.is_empty());
+    }
+
+    #[test]
+    fn online_tab_j_without_nickname_prompts_for_nickname_first() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("you");
+        runtime.nickname_configured = false;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(runtime.join_prompt_active);
+        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::NicknameForJoin);
+    }
+
+    #[test]
+    fn nickname_prompt_sets_name_and_continues_join_flow() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("you");
+        runtime.nickname_configured = false;
+        runtime.join_prompt_active = true;
+        runtime.join_prompt_mode = JoinPromptMode::NicknameForJoin;
+        runtime.join_code_input = String::from("dj");
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.local_nickname, "dj");
+        assert!(runtime.nickname_configured);
+        assert_eq!(core.online_nickname, "dj");
+        assert!(runtime.join_prompt_active);
+        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
     }
 
     #[test]

@@ -1,3 +1,6 @@
+const DEFAULT_HOME_SERVER_PORT: u16 = 7878;
+const DEFAULT_ROOM_PORT_RANGE: (u16, u16) = (9000, 9100);
+
 #[derive(Debug, Default)]
 struct CliArgs {
     host: bool,
@@ -15,27 +18,29 @@ fn main() -> anyhow::Result<()> {
     let home_addr = args
         .ip
         .clone()
-        .unwrap_or_else(|| String::from("0.0.0.0:7878"));
+        .unwrap_or_else(|| format!("0.0.0.0:{DEFAULT_HOME_SERVER_PORT}"));
+    let room_port_range = if args.host {
+        Some(args.room_port_range.unwrap_or(DEFAULT_ROOM_PORT_RANGE))
+    } else {
+        None
+    };
 
     if args.host && !args.app {
-        return tune::online_net::run_home_server_forever_with_ports(
-            &home_addr,
-            args.room_port_range,
-        );
+        return tune::online_net::run_home_server_forever_with_ports(&home_addr, room_port_range);
     }
 
     if args.host && args.app {
-        let _server = tune::online_net::start_home_server(&home_addr, args.room_port_range)?;
+        let _server = tune::online_net::start_home_server(&home_addr, room_port_range)?;
         let app_target = local_home_target_from_bind_addr(&home_addr);
         return tune::app::run_with_startup(tune::app::AppStartupOptions {
             default_home_server_addr: Some(app_target),
-            home_server_from_cli: ip_provided,
+            home_server_connected: true,
         });
     }
 
     tune::app::run_with_startup(tune::app::AppStartupOptions {
         default_home_server_addr: args.ip,
-        home_server_from_cli: ip_provided,
+        home_server_connected: ip_provided,
     })
 }
 
@@ -61,12 +66,12 @@ fn parse_args(args: Vec<String>) -> anyhow::Result<CliArgs> {
             "--ip" => {
                 index += 1;
                 let Some(value) = args.get(index) else {
-                    anyhow::bail!("--ip requires host:port value");
+                    anyhow::bail!("--ip requires host or host:port value");
                 };
                 if value.trim().is_empty() {
                     anyhow::bail!("--ip cannot be empty");
                 }
-                out.ip = Some(value.trim().to_string());
+                out.ip = Some(normalize_home_server_addr(value.trim()));
             }
             "--room-port-range" => {
                 index += 1;
@@ -90,8 +95,40 @@ fn print_help() {
     println!("TuneTUI");
     println!("  --host            Run home server mode");
     println!("  --app             With --host, also run TUI app");
-    println!("  --ip host:port    Home server bind/target address");
-    println!("  --room-port-range start-end   Fixed room port range for host mode");
+    println!(
+        "  --ip host[:port]  Home server bind/target address (default port {})",
+        DEFAULT_HOME_SERVER_PORT
+    );
+    println!(
+        "  --room-port-range start-end   Room port range for host mode (default {}-{})",
+        DEFAULT_ROOM_PORT_RANGE.0, DEFAULT_ROOM_PORT_RANGE.1
+    );
+}
+
+fn normalize_home_server_addr(raw: &str) -> String {
+    if raw.parse::<std::net::SocketAddr>().is_ok() {
+        return raw.to_string();
+    }
+    if let Ok(ip) = raw.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(_) => format!("{raw}:{DEFAULT_HOME_SERVER_PORT}"),
+            std::net::IpAddr::V6(_) => format!("[{raw}]:{DEFAULT_HOME_SERVER_PORT}"),
+        };
+    }
+    if raw.starts_with('[') {
+        return if raw.contains("]:") {
+            raw.to_string()
+        } else {
+            format!("{raw}:{DEFAULT_HOME_SERVER_PORT}")
+        };
+    }
+
+    match raw.rsplit_once(':') {
+        Some((_host, port)) if !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) => {
+            raw.to_string()
+        }
+        _ => format!("{raw}:{DEFAULT_HOME_SERVER_PORT}"),
+    }
 }
 
 fn parse_port_range(raw: &str) -> anyhow::Result<(u16, u16)> {
@@ -118,7 +155,7 @@ fn parse_port_range(raw: &str) -> anyhow::Result<(u16, u16)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{local_home_target_from_bind_addr, parse_port_range};
+    use super::{local_home_target_from_bind_addr, normalize_home_server_addr, parse_port_range};
 
     #[test]
     fn local_home_target_maps_unspecified_v4_to_loopback() {
@@ -146,5 +183,25 @@ mod tests {
         assert!(parse_port_range("9100-9000").is_err());
         assert!(parse_port_range("abc-def").is_err());
         assert!(parse_port_range("0-10").is_err());
+    }
+
+    #[test]
+    fn normalize_home_server_addr_adds_default_port() {
+        assert_eq!(
+            normalize_home_server_addr("198.51.100.42"),
+            "198.51.100.42:7878"
+        );
+        assert_eq!(
+            normalize_home_server_addr("example.com"),
+            "example.com:7878"
+        );
+    }
+
+    #[test]
+    fn normalize_home_server_addr_keeps_explicit_port() {
+        assert_eq!(
+            normalize_home_server_addr("198.51.100.42:9000"),
+            "198.51.100.42:9000"
+        );
     }
 }
