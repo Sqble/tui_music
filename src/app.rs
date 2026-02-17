@@ -2692,17 +2692,40 @@ fn join_home_room(
     core.online_join_room(&resolved.room_code, &online_runtime.local_nickname);
     let connect_addr = rewrite_room_server_addr_host(&server_addr, &resolved.room_server_addr)
         .unwrap_or_else(|| resolved.room_server_addr.clone());
-    match OnlineNetwork::start_client(
-        &connect_addr,
-        &resolved.room_code,
-        &online_runtime.local_nickname,
-        if password.trim().is_empty() {
-            None
-        } else {
-            Some(password.to_string())
-        },
-    ) {
-        Ok(network) => {
+    let join_password = if password.trim().is_empty() {
+        None
+    } else {
+        Some(password.to_string())
+    };
+    let mut attempts = vec![connect_addr.clone()];
+    if !resolved
+        .room_server_addr
+        .eq_ignore_ascii_case(&connect_addr)
+    {
+        attempts.push(resolved.room_server_addr.clone());
+    }
+
+    let mut joined_network = None;
+    let mut last_error = String::new();
+    for addr in attempts {
+        match OnlineNetwork::start_client(
+            &addr,
+            &resolved.room_code,
+            &online_runtime.local_nickname,
+            join_password.clone(),
+        ) {
+            Ok(network) => {
+                joined_network = Some(network);
+                break;
+            }
+            Err(err) => {
+                last_error = format!("{addr}: {err}");
+            }
+        }
+    }
+
+    match joined_network {
+        Some(network) => {
             online_runtime.network = Some(network);
             core.status = format!(
                 "Connected {} ({}/{})",
@@ -2710,9 +2733,9 @@ fn join_home_room(
             );
             core.dirty = true;
         }
-        Err(err) => {
-            core.online_leave_room();
-            core.status = format!("Online join failed: {err}");
+        None => {
+            core.online.leave_room();
+            core.status = format!("Online join failed: {last_error}");
             core.dirty = true;
         }
     }

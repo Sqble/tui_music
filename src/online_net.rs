@@ -1532,8 +1532,6 @@ fn handle_inbound(
                     .find(|entry| entry.nickname.eq_ignore_ascii_case(&peer.nickname))
             {
                 participant.ping_ms = smooth_ping(participant.ping_ms, rtt_ms);
-                broadcast_state(peers, session);
-                let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
             }
         }
         Inbound::StreamRequest {
@@ -2755,5 +2753,25 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Host left room. New host: alpha"))
         );
+    }
+
+    #[test]
+    fn home_server_created_room_accepts_local_client_join() {
+        let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe port");
+        let port = probe.local_addr().expect("probe addr").port();
+        drop(probe);
+
+        let home_addr = format!("127.0.0.1:{port}");
+        let handle = start_home_server(&home_addr, None).expect("start home server");
+
+        verify_home_server(&home_addr).expect("verify home server");
+        let room =
+            create_home_room(&home_addr, "roomname", "hoster", None, 8).expect("create room");
+        let client =
+            OnlineNetwork::start_client(&room.room_server_addr, &room.room_code, "hoster", None)
+                .expect("join created room");
+
+        client.shutdown();
+        handle.shutdown();
     }
 }
