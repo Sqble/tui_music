@@ -49,6 +49,7 @@ const ONLINE_SYNC_CORRECTION_THRESHOLD_OPTIONS_MS: [u16; 8] =
     [100, 150, 200, 300, 400, 500, 750, 1000];
 const MAX_ONLINE_EVENTS_PER_TICK: usize = 128;
 const ONLINE_DEFAULT_HOME_SERVER_ADDR: &str = "127.0.0.1:7878";
+const HOST_ONLY_LISTENER_LOCKED_STATUS: &str = "Room is host-only. Listener playback locked";
 
 #[derive(Debug, Clone, Default)]
 pub struct AppStartupOptions {
@@ -1368,6 +1369,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             KeyCode::Down => core.select_next(),
             KeyCode::Up => core.select_prev(),
             KeyCode::Enter => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if let Some(path) = core.activate_selected() {
                     if let Err(err) = audio.play(&path) {
                         core.status = concise_audio_error(&err);
@@ -1378,6 +1384,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             }
             KeyCode::Left | KeyCode::Backspace => core.navigate_back(),
             KeyCode::Char(' ') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if audio.is_paused() {
                     audio.resume();
                     core.status = String::from("Resumed");
@@ -1389,6 +1400,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 core.dirty = true;
             }
             KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'n') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if let Some(path) = core.next_track_path() {
                     if let Err(err) = audio.play(&path) {
                         core.status = concise_audio_error(&err);
@@ -1399,6 +1415,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 }
             }
             KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'b') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if let Some(path) = core.prev_track_path() {
                     if let Err(err) = audio.play(&path) {
                         core.status = concise_audio_error(&err);
@@ -1409,6 +1430,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 }
             }
             KeyCode::Char('a') | KeyCode::Char('A') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if let Err(err) = scrub_current_track(&mut *audio, core.scrub_seconds, false) {
                     core.status = format!("Scrub failed: {err}");
                 } else {
@@ -1418,6 +1444,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 core.dirty = true;
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 if let Err(err) = scrub_current_track(&mut *audio, core.scrub_seconds, true) {
                     core.status = format!("Scrub failed: {err}");
                 } else {
@@ -1427,6 +1458,11 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 core.dirty = true;
             }
             KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'m') => {
+                if local_playback_locked_by_host_only(&core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    continue;
+                }
                 core.cycle_mode();
                 auto_save_state(&mut core, &*audio);
             }
@@ -3099,6 +3135,11 @@ fn drain_online_network_events(
                 }
             }
             NetworkEvent::SessionSync(mut session) => {
+                let was_listener_locked = core
+                    .online
+                    .session
+                    .as_ref()
+                    .is_some_and(crate::online::OnlineSession::is_local_listener_locked);
                 let role = online_runtime
                     .network
                     .as_ref()
@@ -3110,6 +3151,7 @@ fn drain_online_network_events(
                     &online_runtime.local_nickname,
                     &role,
                 );
+                let is_listener_locked = session.is_local_listener_locked();
                 if let Some(last_transport) = session.last_transport.as_ref()
                     && last_transport.seq > online_runtime.last_transport_seq
                 {
@@ -3128,11 +3170,38 @@ fn drain_online_network_events(
                         );
                     }
                 }
+                if !was_listener_locked && is_listener_locked {
+                    enforce_listener_playback_lockdown(core, audio, online_runtime);
+                }
                 core.online.session = Some(session);
                 core.dirty = true;
             }
         }
     }
+}
+
+fn local_playback_locked_by_host_only(core: &TuneCore) -> bool {
+    core.online
+        .session
+        .as_ref()
+        .is_some_and(crate::online::OnlineSession::is_local_listener_locked)
+}
+
+fn enforce_listener_playback_lockdown(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
+) {
+    audio.stop();
+    online_runtime.pending_stream_path = None;
+    online_runtime.remote_logical_track = None;
+    online_runtime.remote_track_title = None;
+    online_runtime.remote_track_artist = None;
+    online_runtime.remote_track_album = None;
+    online_runtime.remote_provider_track_id = None;
+    online_runtime.online_playback_source = OnlinePlaybackSource::LocalQueue;
+    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+    core.dirty = true;
 }
 
 fn is_online_disconnect_status(message: &str) -> bool {
@@ -4437,6 +4506,12 @@ fn handle_action_panel_input_with_recent(
                 }
             }
             ActionPanelState::Mode { selected } => {
+                if local_playback_locked_by_host_only(core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    panel.close();
+                    return;
+                }
                 core.playback_mode = match selected {
                     0 => PlaybackMode::Normal,
                     1 => PlaybackMode::Shuffle,
@@ -4449,6 +4524,12 @@ fn handle_action_panel_input_with_recent(
                 panel.close();
             }
             ActionPanelState::PlaylistPlay { selected } => {
+                if local_playback_locked_by_host_only(core) {
+                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                    core.dirty = true;
+                    panel.close();
+                    return;
+                }
                 let playlists = sorted_playlist_names(core);
                 if let Some(name) = playlists.get(selected) {
                     core.load_playlist_queue(name);
@@ -5462,6 +5543,20 @@ mod tests {
         }
     }
 
+    fn host_only_listener_session() -> crate::online::OnlineSession {
+        let mut session = crate::online::OnlineSession::join("ROOM22", "listener");
+        session.mode = crate::online::OnlineRoomMode::HostOnly;
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("host"),
+            is_local: false,
+            is_host: true,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        session
+    }
+
     impl AudioEngine for TestAudioEngine {
         fn play(&mut self, path: &Path) -> Result<()> {
             self.current = Some(path.to_path_buf());
@@ -5617,6 +5712,78 @@ mod tests {
 
         assert_eq!(core.playback_mode, crate::model::PlaybackMode::Shuffle);
         assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn host_only_listener_detection_is_true_for_non_host_local_participant() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(host_only_listener_session());
+        assert!(local_playback_locked_by_host_only(&core));
+    }
+
+    #[test]
+    fn action_panel_mode_selection_is_blocked_for_host_only_listener() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(host_only_listener_session());
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Mode { selected: 1 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert_eq!(core.playback_mode, crate::model::PlaybackMode::Normal);
+        assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn action_panel_playlist_play_is_blocked_for_host_only_listener() {
+        let mut state = PersistedState::default();
+        state.playlists.insert(
+            String::from("mix"),
+            crate::model::Playlist {
+                tracks: vec![PathBuf::from("song.mp3")],
+            },
+        );
+        let mut core = TuneCore::from_persisted(state);
+        core.online.session = Some(host_only_listener_session());
+        let mut audio = TestAudioEngine::new();
+        let mut panel = ActionPanelState::PlaylistPlay { selected: 0 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert!(audio.played.is_empty());
+        assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn enforce_listener_playback_lockdown_stops_audio_and_clears_remote_state() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut runtime = test_online_runtime();
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("local.mp3"));
+        runtime.pending_stream_path = Some(PathBuf::from("shared.mp3"));
+        runtime.remote_logical_track = Some(PathBuf::from("shared.mp3"));
+        runtime.remote_track_title = Some(String::from("shared"));
+        runtime.remote_track_artist = Some(String::from("artist"));
+        runtime.remote_track_album = Some(String::from("album"));
+        runtime.remote_provider_track_id = Some(String::from("provider-id"));
+        runtime.online_playback_source = OnlinePlaybackSource::SharedQueue;
+
+        enforce_listener_playback_lockdown(&mut core, &mut audio, &mut runtime);
+
+        assert!(audio.stopped);
+        assert!(runtime.pending_stream_path.is_none());
+        assert!(runtime.remote_logical_track.is_none());
+        assert!(runtime.remote_track_title.is_none());
+        assert!(runtime.remote_track_artist.is_none());
+        assert!(runtime.remote_track_album.is_none());
+        assert!(runtime.remote_provider_track_id.is_none());
+        assert_eq!(
+            runtime.online_playback_source,
+            OnlinePlaybackSource::LocalQueue
+        );
+        assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
     }
 
     #[test]

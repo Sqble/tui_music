@@ -33,7 +33,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
 - Add directory from actions panel via typed path or external folder picker (PowerShell on Windows, zenity/kdialog on Linux)
 - Remove directory from actions panel
-- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates (global FIFO consume), shared-queue auto-start when idle, last-player-or-host authority for end-of-song auto-advance, shared queue priority when local queue songs end, stop-at-end when shared queue is exhausted, sub-second periodic playback-state sync (track/position/pause plus metadata/provider ID for stats identity, including ping-compensated target position and a small drift deadzone to avoid micro-seeks, plus null-audio host fallback), periodic measured ping RTT updates, ping-timeout peer cleanup for abrupt disconnects, and lossless bidirectional file streaming fallback (host->listener and host<-listener over the same session socket)
+- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates (global FIFO consume), shared-queue auto-start when idle, last-player-or-host authority for end-of-song auto-advance, shared queue priority when local queue songs end, stop-at-end when shared queue is exhausted, sub-second periodic playback-state sync (track/position/pause plus metadata/provider ID for stats identity, including ping-compensated target position and a small drift deadzone to avoid micro-seeks, plus null-audio host fallback), periodic measured ping RTT updates, ping-timeout peer cleanup for abrupt disconnects, and lossless bidirectional file streaming fallback (host->listener and host<-listener over the same session socket); in host-only mode, non-host peers are immediately forced into listen-only playback lock (local play/pause/seek/skip/mode changes are blocked)
 - Invite code is password-encrypted with checksum validation (secure `T2` format); host sets password first, joiner enters invite then password
 - Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
 
@@ -74,6 +74,7 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - `Ctrl+t` (Lyrics edit mode): stamp selected line with current playback time
 - `h` / `j` / `l` (Online tab): host room / join room or browse room directory / leave room
 - `o` / `q` (Online tab): toggle room mode / cycle stream quality profile
+- Host-only mode behavior: non-host peers are immediately listen-only (local playback controls and local playlist-start actions are blocked, while tab/navigation UI still works)
 - `Ctrl+s` (Library tab, while in online room): add selected item to shared queue (track, folder, playlist, or all songs in selection order)
 - Connect-to-homeserver modal: type home-server link/address (supports bare `127.0.0.1:7878/room/name` and `http(s)://...`), `V` paste clipboard, `Enter` continue, `Esc` cancel
 - First-time online flow: on `h`/`j`, if nickname is not set yet, a nickname prompt appears before host/join flow continues

@@ -195,8 +195,12 @@ impl OnlineSession {
     }
 
     pub fn can_local_control_playback(&self) -> bool {
-        self.local_participant()
-            .is_some_and(|local| self.mode == OnlineRoomMode::Collaborative || local.is_host)
+        !self.is_local_listener_locked()
+    }
+
+    pub fn is_local_listener_locked(&self) -> bool {
+        self.mode == OnlineRoomMode::HostOnly
+            && self.local_participant().is_some_and(|local| !local.is_host)
     }
 
     pub fn toggle_mode(&mut self) {
@@ -315,6 +319,7 @@ mod tests {
         let mut session = OnlineSession::join("ROOM22", "listener");
         session.mode = OnlineRoomMode::HostOnly;
         assert!(!session.can_local_control_playback());
+        assert!(session.is_local_listener_locked());
     }
 
     #[test]
