@@ -3,7 +3,9 @@ use crate::config;
 use crate::core::{BrowserEntryKind, HeaderSection, LyricsMode, StatsFilterFocus, TuneCore};
 use crate::library::{self, MetadataEdit};
 use crate::model::{CoverArtTemplate, PlaybackMode, Theme};
-use crate::online::{OnlineSession, Participant, TransportCommand, TransportEnvelope};
+use crate::online::{
+    OnlineSession, Participant, StreamQuality, TransportCommand, TransportEnvelope,
+};
 use crate::online_net::{
     HomeRoomDirectoryEntry, LocalAction as NetworkLocalAction, NetworkEvent, NetworkRole,
     OnlineNetwork, StreamTrackFormat, create_home_room, list_home_rooms, resolve_home_room,
@@ -24,6 +26,7 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::collections::HashMap;
+use std::fs;
 use std::io::{Write, stdout};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
@@ -3143,6 +3146,7 @@ fn drain_online_network_events(
                 }
             }
             NetworkEvent::SessionSync(mut session) => {
+                let previous_quality = core.online.session.as_ref().map(|entry| entry.quality);
                 let was_listener_locked = core
                     .online
                     .session
@@ -3181,10 +3185,72 @@ fn drain_online_network_events(
                 if !was_listener_locked && is_listener_locked {
                     enforce_listener_playback_lockdown(core, audio, online_runtime);
                 }
+                if let Some(previous_quality) = previous_quality
+                    && previous_quality != session.quality
+                {
+                    handle_stream_quality_change(
+                        core,
+                        audio,
+                        online_runtime,
+                        previous_quality,
+                        session.quality,
+                    );
+                }
                 core.online.session = Some(session);
                 core.dirty = true;
             }
         }
+    }
+}
+
+fn handle_stream_quality_change(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
+    previous_quality: StreamQuality,
+    new_quality: StreamQuality,
+) {
+    let remote_path = online_runtime.remote_logical_track.clone();
+    let active_streamed = remote_path.as_ref().is_some_and(|path| {
+        online_runtime
+            .streamed_track_cache
+            .get(path)
+            .is_some_and(|cached| {
+                audio
+                    .current_track()
+                    .is_some_and(|current| current == cached)
+            })
+    });
+
+    for cached in online_runtime.streamed_track_cache.values() {
+        let _ = fs::remove_file(cached);
+    }
+    online_runtime.streamed_track_cache.clear();
+
+    if active_streamed && let Some(path) = remote_path {
+        audio.stop();
+        online_runtime.pending_stream_path = None;
+        online_runtime.remote_logical_track = None;
+        if let Some(network) = online_runtime.network.as_ref() {
+            let source_nickname =
+                preferred_stream_source(core, online_runtime, network.role(), path.as_path());
+            network.request_track_stream(path.clone(), source_nickname);
+            online_runtime.pending_stream_path = Some(path.clone());
+            online_runtime.remote_logical_track = Some(path);
+            core.status = format!(
+                "Room quality changed ({} -> {}). Re-requesting fallback stream...",
+                stream_quality_label(previous_quality),
+                stream_quality_label(new_quality)
+            );
+            core.dirty = true;
+        }
+    }
+}
+
+fn stream_quality_label(quality: StreamQuality) -> &'static str {
+    match quality {
+        StreamQuality::Lossless => "Lossless",
+        StreamQuality::Balanced => "Balanced Opus 160k",
     }
 }
 
