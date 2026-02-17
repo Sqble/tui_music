@@ -2331,30 +2331,30 @@ fn start_host_with_password(
     online_runtime: &mut OnlineRuntime,
     password: &str,
 ) {
+    let server_addr = online_runtime.pending_join_server_addr.trim().to_string();
+    let room_name = online_runtime.pending_join_room_name.clone();
+    let max_connections_input = online_runtime.host_max_connections_input.trim().to_string();
     online_runtime.shutdown();
     online_runtime.last_transport_seq = 0;
-    let server_addr = online_runtime.pending_join_server_addr.trim();
-    let Some(room_name) = online_runtime.pending_join_room_name.clone() else {
+    let Some(room_name) = room_name else {
         core.status = String::from("Host room missing in link");
         core.dirty = true;
         return;
     };
-    let max_connections = online_runtime
-        .host_max_connections_input
-        .trim()
+    let max_connections = max_connections_input
         .parse::<u16>()
         .ok()
         .filter(|value| (2..=32).contains(value))
         .unwrap_or(8);
 
-    if let Err(err) = verify_home_server(server_addr) {
+    if let Err(err) = verify_home_server(&server_addr) {
         core.status = format!("Home server unavailable: {err}");
         core.dirty = true;
         return;
     }
 
     match create_home_room(
-        server_addr,
+        &server_addr,
         &room_name,
         &online_runtime.local_nickname,
         if password.trim().is_empty() {
@@ -2365,7 +2365,7 @@ fn start_host_with_password(
         max_connections,
     ) {
         Ok(room) => {
-            online_runtime.home_server_addr = server_addr.to_string();
+            online_runtime.home_server_addr = server_addr;
             join_home_room(core, online_runtime, &room.room_name, password);
             online_runtime.host_setup_active = false;
         }
@@ -2601,10 +2601,11 @@ fn join_home_room(
     room_name: &str,
     password: &str,
 ) {
+    let server_addr = online_runtime.pending_join_server_addr.trim().to_string();
     online_runtime.shutdown();
     online_runtime.last_transport_seq = 0;
 
-    let resolved = match resolve_home_room(&online_runtime.pending_join_server_addr, room_name) {
+    let resolved = match resolve_home_room(&server_addr, room_name) {
         Ok(room) => room,
         Err(err) => {
             core.status = format!("Resolve room failed: {err}");
