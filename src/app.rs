@@ -2034,7 +2034,14 @@ fn handle_online_inline_input(
                             online_runtime.password_input.clear();
                             core.status = String::from("Enter room password, then Enter");
                         } else {
-                            join_home_room(core, online_runtime, &selected_room.room_name, "");
+                            let server_addr = online_runtime.pending_join_server_addr.clone();
+                            join_home_room(
+                                core,
+                                online_runtime,
+                                &server_addr,
+                                &selected_room.room_name,
+                                "",
+                            );
                         }
                     }
                     Err(err) => {
@@ -2184,7 +2191,14 @@ fn handle_online_inline_input(
                             online_runtime.password_input.clear();
                             core.status = String::from("Enter room password, then press Enter");
                         } else {
-                            join_home_room(core, online_runtime, &room_name, "");
+                            let server_addr = online_runtime.pending_join_server_addr.clone();
+                            join_home_room(
+                                core,
+                                online_runtime,
+                                &server_addr,
+                                &room_name,
+                                "",
+                            );
                         }
                     }
                     Err(err) => {
@@ -2361,7 +2375,14 @@ fn handle_online_password_prompt_input(
                     online_runtime.password_prompt_active = false;
                     online_runtime.password_input.clear();
                     online_runtime.pending_join_invite_code.clear();
-                    join_home_room(core, online_runtime, &room_name, password.as_str());
+                    let server_addr = online_runtime.pending_join_server_addr.clone();
+                    join_home_room(
+                        core,
+                        online_runtime,
+                        &server_addr,
+                        &room_name,
+                        password.as_str(),
+                    );
                 }
             }
             true
@@ -2418,8 +2439,8 @@ fn start_host_with_password(
         max_connections,
     ) {
         Ok(room) => {
-            online_runtime.home_server_addr = server_addr;
-            join_home_room(core, online_runtime, &room.room_name, password);
+            online_runtime.home_server_addr = server_addr.clone();
+            join_home_room(core, online_runtime, &server_addr, &room.room_name, password);
             online_runtime.host_setup_active = false;
         }
         Err(err) => {
@@ -2633,10 +2654,16 @@ fn filtered_room_entries(
 fn join_home_room(
     core: &mut TuneCore,
     online_runtime: &mut OnlineRuntime,
+    server_addr: &str,
     room_name: &str,
     password: &str,
 ) {
-    let server_addr = online_runtime.pending_join_server_addr.trim().to_string();
+    let server_addr = server_addr.trim().to_string();
+    if server_addr.is_empty() {
+        core.status = String::from("Home server missing");
+        core.dirty = true;
+        return;
+    }
     online_runtime.shutdown();
     online_runtime.last_transport_seq = 0;
 
