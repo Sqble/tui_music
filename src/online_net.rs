@@ -32,6 +32,50 @@ const STREAM_CHUNK_BYTES: usize = 24 * 1024;
 const MAX_STREAM_FILE_BYTES: u64 = 1_073_741_824;
 const PING_INTERVAL: Duration = Duration::from_millis(1_500);
 const PING_TIMEOUT: Duration = Duration::from_millis(5_000);
+const HOME_ROOM_MAX_CONNECTIONS_MIN: u16 = 2;
+const HOME_ROOM_MAX_CONNECTIONS_MAX: u16 = 32;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HomeRoomDirectoryEntry {
+    pub room_name: String,
+    pub room_code: String,
+    pub locked: bool,
+    pub current_connections: u16,
+    pub max_connections: u16,
+}
+
+#[derive(Debug, Clone)]
+pub struct HomeRoomResolved {
+    pub room_name: String,
+    pub room_code: String,
+    pub room_server_addr: String,
+    pub locked: bool,
+    pub current_connections: u16,
+    pub max_connections: u16,
+}
+
+pub struct HomeServerHandle {
+    shutdown_tx: Sender<()>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+impl HomeServerHandle {
+    pub fn shutdown(mut self) {
+        let _ = self.shutdown_tx.send(());
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+impl Drop for HomeServerHandle {
+    fn drop(&mut self) {
+        let _ = self.shutdown_tx.send(());
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 pub struct DecodedInvite {
     pub server_addr: String,
@@ -81,6 +125,7 @@ enum NetworkCommand {
 
 pub struct OnlineNetwork {
     role: NetworkRole,
+    bind_addr: Option<String>,
     cmd_tx: Sender<NetworkCommand>,
     event_rx: Receiver<NetworkEvent>,
 }
@@ -90,13 +135,29 @@ impl OnlineNetwork {
         &self.role
     }
 
+    pub fn bind_addr(&self) -> Option<&str> {
+        self.bind_addr.as_deref()
+    }
+
     pub fn start_host(
+        bind_addr: &str,
+        session: OnlineSession,
+        expected_password: Option<String>,
+    ) -> anyhow::Result<Self> {
+        Self::start_host_with_max(bind_addr, session, expected_password, MAX_PEERS)
+    }
+
+    pub fn start_host_with_max(
         bind_addr: &str,
         mut session: OnlineSession,
         expected_password: Option<String>,
+        max_peers: usize,
     ) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(bind_addr)
             .with_context(|| format!("failed to bind online host at {bind_addr}"))?;
+        let bound_addr = listener
+            .local_addr()
+            .context("failed to read host listener addr")?;
         listener
             .set_nonblocking(true)
             .context("failed to set nonblocking listener")?;
@@ -105,11 +166,19 @@ impl OnlineNetwork {
         let (event_tx, event_rx) = mpsc::channel();
 
         thread::spawn(move || {
-            host_loop(listener, &mut session, expected_password, cmd_rx, event_tx)
+            host_loop(
+                listener,
+                &mut session,
+                expected_password,
+                max_peers,
+                cmd_rx,
+                event_tx,
+            )
         });
 
         Ok(Self {
             role: NetworkRole::Host,
+            bind_addr: Some(bound_addr.to_string()),
             cmd_tx,
             event_rx,
         })
@@ -175,6 +244,7 @@ impl OnlineNetwork {
 
         Ok(Self {
             role: NetworkRole::Client,
+            bind_addr: None,
             cmd_tx,
             event_rx,
         })
@@ -198,6 +268,345 @@ impl OnlineNetwork {
     pub fn shutdown(&self) {
         let _ = self.cmd_tx.send(NetworkCommand::Shutdown);
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum HomeRequest {
+    Verify,
+    ListRooms {
+        query: Option<String>,
+    },
+    CreateRoom {
+        room_name: String,
+        owner_nickname: String,
+        password: Option<String>,
+        max_connections: u16,
+    },
+    ResolveRoom {
+        room_name: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+enum HomeResponse {
+    Ok,
+    Rooms { rooms: Vec<HomeRoomDirectoryEntry> },
+    RoomResolved { room: HomeRoomResolvedWire },
+    Error { message: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct HomeRoomResolvedWire {
+    room_name: String,
+    room_code: String,
+    room_server_addr: String,
+    locked: bool,
+    current_connections: u16,
+    max_connections: u16,
+}
+
+struct HostedRoom {
+    room_name: String,
+    room_code: String,
+    room_server_addr: String,
+    network: OnlineNetwork,
+    max_connections: u16,
+    locked: bool,
+    current_connections: u16,
+}
+
+pub fn start_home_server(bind_addr: &str) -> anyhow::Result<HomeServerHandle> {
+    let listener = TcpListener::bind(bind_addr)
+        .with_context(|| format!("failed to bind home server at {bind_addr}"))?;
+    listener
+        .set_nonblocking(true)
+        .context("failed to set nonblocking home listener")?;
+    let (shutdown_tx, shutdown_rx) = mpsc::channel::<()>();
+    let bind = listener
+        .local_addr()
+        .context("failed to get local home addr")?;
+    let advertised_host = match bind.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => Ipv4Addr::new(127, 0, 0, 1),
+        IpAddr::V4(ip) => ip,
+        IpAddr::V6(_) => Ipv4Addr::new(127, 0, 0, 1),
+    };
+    let join_handle = thread::spawn(move || {
+        let mut rooms: HashMap<String, HostedRoom> = HashMap::new();
+        loop {
+            if shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+
+            for room in rooms.values_mut() {
+                while let Some(event) = room.network.try_recv_event() {
+                    if let NetworkEvent::SessionSync(session) = event {
+                        room.current_connections = session.participants.len() as u16;
+                    }
+                }
+            }
+
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut reader = BufReader::new(match stream.try_clone() {
+                        Ok(clone) => clone,
+                        Err(_) => continue,
+                    });
+                    let mut line = String::new();
+                    let read = reader.read_line(&mut line).unwrap_or_default();
+                    if read == 0 {
+                        continue;
+                    }
+                    let request = serde_json::from_str::<HomeRequest>(line.trim_end());
+                    let response = match request {
+                        Ok(HomeRequest::Verify) => HomeResponse::Ok,
+                        Ok(HomeRequest::ListRooms { query }) => {
+                            let query = query.unwrap_or_default().to_ascii_lowercase();
+                            let mut items: Vec<HomeRoomDirectoryEntry> = rooms
+                                .values()
+                                .filter(|room| {
+                                    query.is_empty()
+                                        || room.room_name.to_ascii_lowercase().contains(&query)
+                                })
+                                .map(|room| HomeRoomDirectoryEntry {
+                                    room_name: room.room_name.clone(),
+                                    room_code: room.room_code.clone(),
+                                    locked: room.locked,
+                                    current_connections: room.current_connections,
+                                    max_connections: room.max_connections,
+                                })
+                                .collect();
+                            items.sort_by(|a, b| a.room_name.cmp(&b.room_name));
+                            HomeResponse::Rooms { rooms: items }
+                        }
+                        Ok(HomeRequest::ResolveRoom { room_name }) => {
+                            match room_by_name(&rooms, &room_name) {
+                                Some(room) => HomeResponse::RoomResolved {
+                                    room: HomeRoomResolvedWire {
+                                        room_name: room.room_name.clone(),
+                                        room_code: room.room_code.clone(),
+                                        room_server_addr: room.room_server_addr.clone(),
+                                        locked: room.locked,
+                                        current_connections: room.current_connections,
+                                        max_connections: room.max_connections,
+                                    },
+                                },
+                                None => HomeResponse::Error {
+                                    message: String::from("room not found"),
+                                },
+                            }
+                        }
+                        Ok(HomeRequest::CreateRoom {
+                            room_name,
+                            owner_nickname,
+                            password,
+                            max_connections,
+                        }) => {
+                            let name = room_name.trim();
+                            if name.is_empty() {
+                                HomeResponse::Error {
+                                    message: String::from("room name is required"),
+                                }
+                            } else if !(HOME_ROOM_MAX_CONNECTIONS_MIN
+                                ..=HOME_ROOM_MAX_CONNECTIONS_MAX)
+                                .contains(&max_connections)
+                            {
+                                HomeResponse::Error {
+                                    message: format!(
+                                        "max connections must be {}..={} ",
+                                        HOME_ROOM_MAX_CONNECTIONS_MIN,
+                                        HOME_ROOM_MAX_CONNECTIONS_MAX
+                                    ),
+                                }
+                            } else if room_by_name(&rooms, name).is_some() {
+                                HomeResponse::Error {
+                                    message: String::from("room already exists"),
+                                }
+                            } else {
+                                let mut session = OnlineSession::host(&owner_nickname);
+                                session.room_code = name.to_ascii_uppercase();
+                                if let Some(host) = session.local_participant_mut() {
+                                    host.is_local = false;
+                                }
+                                let room_bind = format!("{}:0", advertised_host);
+                                match OnlineNetwork::start_host_with_max(
+                                    &room_bind,
+                                    session,
+                                    password
+                                        .as_deref()
+                                        .map(str::trim)
+                                        .filter(|value| !value.is_empty())
+                                        .map(str::to_string),
+                                    usize::from(max_connections),
+                                ) {
+                                    Ok(network) => {
+                                        let room_addr = network
+                                            .bind_addr()
+                                            .and_then(|addr| addr.parse::<SocketAddr>().ok())
+                                            .map(|addr| {
+                                                format!("{}:{}", advertised_host, addr.port())
+                                            })
+                                            .unwrap_or_else(|| {
+                                                format!("{}:{}", advertised_host, bind.port())
+                                            });
+                                        rooms.insert(
+                                            name.to_ascii_lowercase(),
+                                            HostedRoom {
+                                                room_name: name.to_string(),
+                                                room_code: name.to_ascii_uppercase(),
+                                                room_server_addr: room_addr.clone(),
+                                                network,
+                                                max_connections,
+                                                locked: password
+                                                    .as_deref()
+                                                    .is_some_and(|value| !value.trim().is_empty()),
+                                                current_connections: 1,
+                                            },
+                                        );
+                                        match room_by_name(&rooms, name) {
+                                            Some(room) => HomeResponse::RoomResolved {
+                                                room: HomeRoomResolvedWire {
+                                                    room_name: room.room_name.clone(),
+                                                    room_code: room.room_code.clone(),
+                                                    room_server_addr: room.room_server_addr.clone(),
+                                                    locked: room.locked,
+                                                    current_connections: room.current_connections,
+                                                    max_connections: room.max_connections,
+                                                },
+                                            },
+                                            None => HomeResponse::Error {
+                                                message: String::from(
+                                                    "room created but could not be loaded",
+                                                ),
+                                            },
+                                        }
+                                    }
+                                    Err(err) => HomeResponse::Error {
+                                        message: format!("failed to create room host: {err}"),
+                                    },
+                                }
+                            }
+                        }
+                        Err(err) => HomeResponse::Error {
+                            message: format!("invalid request: {err}"),
+                        },
+                    };
+                    let _ = send_json_line(&mut stream, &response);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(16));
+                }
+                Err(_) => {
+                    thread::sleep(Duration::from_millis(30));
+                }
+            }
+        }
+        for (_, room) in rooms {
+            room.network.shutdown();
+        }
+    });
+
+    Ok(HomeServerHandle {
+        shutdown_tx,
+        join_handle: Some(join_handle),
+    })
+}
+
+pub fn run_home_server_forever(bind_addr: &str) -> anyhow::Result<()> {
+    let _handle = start_home_server(bind_addr)?;
+    loop {
+        thread::sleep(Duration::from_millis(1000));
+    }
+}
+
+pub fn verify_home_server(server_addr: &str) -> anyhow::Result<()> {
+    match send_home_request(server_addr, &HomeRequest::Verify)? {
+        HomeResponse::Ok => Ok(()),
+        HomeResponse::Error { message } => anyhow::bail!(message),
+        _ => anyhow::bail!("unexpected response from home server"),
+    }
+}
+
+pub fn list_home_rooms(
+    server_addr: &str,
+    query: Option<&str>,
+) -> anyhow::Result<Vec<HomeRoomDirectoryEntry>> {
+    match send_home_request(
+        server_addr,
+        &HomeRequest::ListRooms {
+            query: query.map(str::to_string),
+        },
+    )? {
+        HomeResponse::Rooms { rooms } => Ok(rooms),
+        HomeResponse::Error { message } => anyhow::bail!(message),
+        _ => anyhow::bail!("unexpected response from home server"),
+    }
+}
+
+pub fn create_home_room(
+    server_addr: &str,
+    room_name: &str,
+    owner_nickname: &str,
+    password: Option<&str>,
+    max_connections: u16,
+) -> anyhow::Result<HomeRoomResolved> {
+    resolve_from_response(send_home_request(
+        server_addr,
+        &HomeRequest::CreateRoom {
+            room_name: room_name.trim().to_string(),
+            owner_nickname: owner_nickname.trim().to_string(),
+            password: password
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            max_connections,
+        },
+    )?)
+}
+
+pub fn resolve_home_room(server_addr: &str, room_name: &str) -> anyhow::Result<HomeRoomResolved> {
+    resolve_from_response(send_home_request(
+        server_addr,
+        &HomeRequest::ResolveRoom {
+            room_name: room_name.trim().to_string(),
+        },
+    )?)
+}
+
+fn resolve_from_response(response: HomeResponse) -> anyhow::Result<HomeRoomResolved> {
+    match response {
+        HomeResponse::RoomResolved { room } => Ok(HomeRoomResolved {
+            room_name: room.room_name,
+            room_code: room.room_code,
+            room_server_addr: room.room_server_addr,
+            locked: room.locked,
+            current_connections: room.current_connections,
+            max_connections: room.max_connections,
+        }),
+        HomeResponse::Error { message } => anyhow::bail!(message),
+        _ => anyhow::bail!("unexpected response from home server"),
+    }
+}
+
+fn send_home_request(server_addr: &str, request: &HomeRequest) -> anyhow::Result<HomeResponse> {
+    let mut stream = TcpStream::connect(server_addr)
+        .with_context(|| format!("failed to connect to home server {server_addr}"))?;
+    send_json_line(&mut stream, request).context("failed to send home request")?;
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    let read = reader
+        .read_line(&mut line)
+        .context("failed to read home response")?;
+    if read == 0 {
+        anyhow::bail!("home server closed connection");
+    }
+    serde_json::from_str::<HomeResponse>(line.trim_end()).context("failed to parse home response")
+}
+
+fn room_by_name<'a>(
+    rooms: &'a HashMap<String, HostedRoom>,
+    room_name: &str,
+) -> Option<&'a HostedRoom> {
+    rooms.get(&room_name.trim().to_ascii_lowercase())
 }
 
 pub fn resolve_advertise_addr(bind_addr: &str) -> anyhow::Result<String> {
@@ -777,6 +1186,7 @@ fn host_loop(
     listener: TcpListener,
     session: &mut OnlineSession,
     expected_password: Option<String>,
+    max_peers: usize,
     cmd_rx: Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
 ) {
@@ -813,6 +1223,7 @@ fn host_loop(
                     inbound,
                     session,
                     expected_password.as_deref(),
+                    max_peers,
                     InboundState {
                         peers: &mut peers,
                         pending_pull_requests: &mut pending_pull_requests,
@@ -933,6 +1344,7 @@ fn handle_inbound(
     inbound: Inbound,
     session: &mut OnlineSession,
     expected_password: Option<&str>,
+    max_peers: usize,
     state: InboundState<'_>,
     event_tx: &Sender<NetworkEvent>,
 ) {
@@ -963,7 +1375,7 @@ fn handle_inbound(
                 return;
             }
 
-            if peers.len().saturating_add(1) > MAX_PEERS {
+            if peers.len().saturating_add(1) > max_peers {
                 let mut stream = stream;
                 let _ = send_json_line(
                     &mut stream,
@@ -1005,10 +1417,16 @@ fn handle_inbound(
                 return;
             }
 
+            let is_host = session.participants.iter().any(|participant| {
+                participant.is_host && participant.nickname.eq_ignore_ascii_case(&nickname)
+            });
+            session
+                .participants
+                .retain(|participant| !participant.nickname.eq_ignore_ascii_case(&nickname));
             session.participants.push(crate::online::Participant {
                 nickname: nickname.clone(),
                 is_local: false,
-                is_host: false,
+                is_host,
                 ping_ms: 35,
                 manual_extra_delay_ms: 0,
                 auto_ping_delay: true,

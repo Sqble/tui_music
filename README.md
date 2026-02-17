@@ -72,23 +72,23 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - `Up/Down` (Lyrics tab): move selected lyric line
 - `Enter` (Lyrics edit mode): insert line after selection
 - `Ctrl+t` (Lyrics edit mode): stamp selected line with current playback time
-- `h` / `j` / `l` (Online tab): host room / join demo room / leave room
+- `h` / `j` / `l` (Online tab): host room / join room or browse room directory / leave room
 - `o` / `q` (Online tab): toggle room mode / cycle stream quality profile
 - `Ctrl+s` (Library tab, while in online room): add selected item to shared queue (track, folder, playlist, or all songs in selection order)
-- Join prompt modal: type invite, `V` paste clipboard, `Enter` join, `Esc` cancel (persists across tabs)
-- Host flow: `h` prompts for room password first, then opens invite modal with code centered and `Copy to clipboard` / `OK` buttons (`Tab`/arrow to select, `Enter` activate, `C` quick-copy)
-- Join flow: after invite entry, password prompt appears before connection/decryption
+- Join prompt modal: type home-server link/address (supports bare `127.0.0.1:7878/room/name` and `http(s)://...`), `V` paste clipboard, `Enter` continue, `Esc` cancel
+- Host flow: `h` asks for room link (`<server>/room/<name>`) and optional `?max=2..32`, then optional password
+- Join flow: if link includes room, optional password prompt appears before connect; if link has only server, a searchable room directory modal opens (lock/open + current/max)
 - Online delay tuning moved to actions panel: `/` -> `Playback settings` -> `Online sync delay settings` (manual delay, auto-ping, recalibrate, sync correction threshold)
 - Clipboard copy falls back to terminal OSC 52 when native clipboard access is unavailable (useful over SSH, including tmux/screen passthrough; terminal/tmux must allow clipboard escape sequences)
 - `Ctrl+C`: quit
 
 ### Online Networking Defaults
 
-- Host bind: `TUNETUI_ONLINE_BIND_ADDR` (default `0.0.0.0:7878`)
-- Host advertise address for invite generation: `TUNETUI_ONLINE_ADVERTISE_ADDR` (optional override; auto-detected from bind when omitted)
-- Auto-detect prefers public NAT address via STUN (Google STUN) and falls back to local adapter IP when STUN is unavailable
-- Room code for join: `TUNETUI_ONLINE_ROOM_CODE` (required; use host invite code)
-- Password for host/join: prompted interactively in TUI (required for secure invite decryption/handshake)
+- Home server bind (CLI): `tune --host --ip 0.0.0.0:7878`
+- Headless home server: `tune --host --ip 0.0.0.0:7878`
+- Home server + app in one process: `tune --host --app --ip 0.0.0.0:7878`
+- App-only targeting a home server: `tune --ip 127.0.0.1:7878`
+- Password for host/join: optional in TUI (lock icon in room directory indicates password required)
 - Nickname: `TUNETUI_ONLINE_NICKNAME` (fallback `USERNAME`/`USER`/`you`)
 - Reverse stream safety: peer uploads are only served for shared-queue items owned by that peer and are capped at 1 GiB per file
 

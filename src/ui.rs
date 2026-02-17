@@ -47,8 +47,16 @@ pub struct JoinPromptModalView {
     pub paste_selected: bool,
 }
 
+pub struct OnlineRoomDirectoryModalView {
+    pub server_addr: String,
+    pub search: String,
+    pub selected: usize,
+    pub rooms: Vec<String>,
+}
+
 pub struct OverlayViews<'a> {
     pub join_prompt_modal: Option<&'a JoinPromptModalView>,
+    pub room_directory_modal: Option<&'a OnlineRoomDirectoryModalView>,
     pub online_password_prompt: Option<&'a OnlinePasswordPromptView>,
     pub host_invite_modal: Option<&'a HostInviteModalView>,
     pub room_code_revealed: bool,
@@ -540,7 +548,7 @@ pub fn draw(
     } else if core.header_section == HeaderSection::Lyrics {
         "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: h host, j join, l leave, o mode, q quality, t hide/show code, 2 copy code, Ctrl+s queue (Library), / actions"
+        "Keys: h host room, j join/browse rooms, l leave, o mode, q quality, t hide/show code, 2 copy code"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -563,12 +571,72 @@ pub fn draw(
     if let Some(join_prompt_modal) = overlays.join_prompt_modal {
         draw_join_prompt(frame, join_prompt_modal, &colors);
     }
+    if let Some(room_directory_modal) = overlays.room_directory_modal {
+        draw_room_directory_modal(frame, room_directory_modal, &colors);
+    }
     if let Some(password_prompt) = overlays.online_password_prompt {
         draw_online_password_prompt(frame, password_prompt, &colors);
     }
     if let Some(host_invite_modal) = overlays.host_invite_modal {
         draw_host_invite_modal(frame, host_invite_modal, &colors);
     }
+}
+
+fn draw_room_directory_modal(
+    frame: &mut Frame,
+    modal: &OnlineRoomDirectoryModalView,
+    colors: &ThemePalette,
+) {
+    let popup = centered_rect(frame.area(), 76, 58);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        panel_block(
+            "Room Directory",
+            colors.popup_bg,
+            colors.text,
+            colors.border,
+        ),
+        popup,
+    );
+    let inner = popup.inner(Margin {
+        vertical: 1,
+        horizontal: 2,
+    });
+    let mut lines = vec![
+        Line::from(Span::styled(
+            format!("Server {}", modal.server_addr),
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            format!("Search: {}", modal.search),
+            Style::default().fg(colors.accent),
+        )),
+        Line::from(""),
+    ];
+    if modal.rooms.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(no rooms)",
+            Style::default().fg(colors.muted),
+        )));
+    } else {
+        for (index, room_line) in modal.rooms.iter().enumerate().take(14) {
+            let style = if index == modal.selected {
+                Style::default()
+                    .fg(colors.text)
+                    .bg(colors.popup_selected_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(colors.text)
+            };
+            lines.push(Line::from(Span::styled(room_line.as_str(), style)));
+        }
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Type to search. Up/Down select. Enter join. Esc cancel.",
+        Style::default().fg(colors.muted),
+    )));
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &ThemePalette) {
@@ -590,7 +658,7 @@ fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &The
     });
     let lines = vec![
         Line::from(vec![
-            Span::styled("Invite code", Style::default().fg(colors.muted)),
+            Span::styled("Server / Link", Style::default().fg(colors.muted)),
             Span::styled(": ", Style::default().fg(colors.muted)),
             Span::styled(modal.invite_code.as_str(), Style::default().fg(colors.text)),
         ]),
@@ -622,7 +690,7 @@ fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &The
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            "Type invite code directly. Tab/arrow selects button. Enter activates. Ctrl+V pastes.",
+            "Type server address or room link. Tab/arrow selects button. Enter continues. Ctrl+V pastes.",
             Style::default()
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
