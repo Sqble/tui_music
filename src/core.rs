@@ -120,6 +120,7 @@ pub struct TuneCore {
     pub stats_focus: StatsFilterFocus,
     pub stats_scroll: u16,
     pub clear_stats_requested: bool,
+    pub online_nickname: String,
     pub lyrics: Option<LyricsDocument>,
     pub lyrics_track_path: Option<PathBuf>,
     pub lyrics_mode: LyricsMode,
@@ -173,6 +174,7 @@ impl TuneCore {
             stats_focus: StatsFilterFocus::Range(0),
             stats_scroll: 0,
             clear_stats_requested: false,
+            online_nickname: state.online_nickname.unwrap_or_default(),
             lyrics: None,
             lyrics_track_path: None,
             lyrics_mode: LyricsMode::View,
@@ -206,6 +208,11 @@ impl TuneCore {
             online_sync_correction_threshold_ms: self.online_sync_correction_threshold_ms,
             stats_top_songs_count: self.stats_top_songs_count,
             fallback_cover_template: self.fallback_cover_template,
+            online_nickname: if self.online_nickname.trim().is_empty() {
+                None
+            } else {
+                Some(self.online_nickname.clone())
+            },
         }
     }
 

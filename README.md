@@ -76,22 +76,24 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - `o` / `q` (Online tab): toggle room mode / cycle stream quality profile
 - `Ctrl+s` (Library tab, while in online room): add selected item to shared queue (track, folder, playlist, or all songs in selection order)
 - Connect-to-homeserver modal: type home-server link/address (supports bare `127.0.0.1:7878/room/name` and `http(s)://...`), `V` paste clipboard, `Enter` continue, `Esc` cancel
+- First-time online flow: on `h`/`j`, if nickname is not set yet, a nickname prompt appears before host/join flow continues
 - Host flow: if connected to a homeserver, `h` asks for room name then optional password; if not connected, `h` opens the same connect-to-homeserver modal first
 - Join flow: if link includes room, optional password prompt appears before connect; if link has only server, a searchable room directory modal opens (lock/open + current/max); missing rooms from links are not auto-created
+- Edit nickname later: `/` -> `Playback settings` -> `Online nickname`
 - Online delay tuning moved to actions panel: `/` -> `Playback settings` -> `Online sync delay settings` (manual delay, auto-ping, recalibrate, sync correction threshold)
 - Clipboard copy falls back to terminal OSC 52 when native clipboard access is unavailable (useful over SSH, including tmux/screen passthrough; terminal/tmux must allow clipboard escape sequences)
 - `Ctrl+C`: quit
 
 ### Online Networking Defaults
 
-- Home server bind (CLI): `tune --host --ip 0.0.0.0:7878`
-- Headless home server: `tune --host --ip 0.0.0.0:7878`
-- Home server + app in one process: `tune --host --app --ip 0.0.0.0:7878`
-- Fixed room transport port range (recommended for VPS firewalls): `tune --host --ip 0.0.0.0:7878 --room-port-range 9000-9100`
-- App-only targeting a home server: `tune --ip 127.0.0.1:7878`
-- Open firewall for the home server port and the full configured room range
+- Home server bind (CLI): `tune --host --ip 0.0.0.0` (defaults to `:7878` when port is omitted)
+- Headless home server: `tune --host --ip 0.0.0.0`
+- Home server + app in one process: `tune --host --app --ip 0.0.0.0`
+- Default room transport port range in host mode: `9000-9100` (override with `--room-port-range start-end`)
+- App-only targeting a home server: `tune --ip 127.0.0.1` (defaults to `:7878`)
+- Open firewall for the home server port and the active room range (default `9000-9100`)
 - Password for host/join: optional in TUI (lock icon in room directory indicates password required)
-- Nickname: `TUNETUI_ONLINE_NICKNAME` (fallback `USERNAME`/`USER`/`you`)
+- Nickname: saved in app state (`state.json`), set from in-app prompt/settings
 - Reverse stream safety: peer uploads are only served for shared-queue items owned by that peer and are capped at 1 GiB per file
 
 ## Fuzzing

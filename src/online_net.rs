@@ -103,6 +103,9 @@ pub enum NetworkEvent {
 pub enum LocalAction {
     SetMode(crate::online::OnlineRoomMode),
     SetQuality(StreamQuality),
+    SetNickname {
+        nickname: String,
+    },
     QueueAdd(SharedQueueItem),
     QueueConsume {
         expected_path: Option<PathBuf>,
@@ -1555,7 +1558,21 @@ fn handle_inbound(
                 .get(&peer_id)
                 .map(|peer| peer.nickname.clone())
                 .unwrap_or_else(|| String::from("peer"));
-            apply_action_to_session(session, wire_to_action(action), &origin);
+            let local_action = wire_to_action(action);
+            let requested_nickname = match &local_action {
+                LocalAction::SetNickname { nickname } => Some(nickname.trim().to_string()),
+                _ => None,
+            };
+            apply_action_to_session(session, local_action, &origin);
+            if let Some(updated) = requested_nickname.filter(|name| !name.is_empty())
+                && session
+                    .participants
+                    .iter()
+                    .any(|participant| participant.nickname.eq_ignore_ascii_case(&updated))
+                && let Some(peer) = peers.get_mut(&peer_id)
+            {
+                peer.nickname = updated;
+            }
             broadcast_state(peers, session);
             let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
         }
@@ -1823,6 +1840,43 @@ fn apply_action_to_session(
     match action {
         LocalAction::SetMode(mode) => session.mode = mode,
         LocalAction::SetQuality(quality) => session.quality = quality,
+        LocalAction::SetNickname { nickname } => {
+            let trimmed = nickname.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            let already_used = session.participants.iter().any(|participant| {
+                participant.nickname.eq_ignore_ascii_case(trimmed)
+                    && !participant.nickname.eq_ignore_ascii_case(origin_nickname)
+            });
+            if already_used {
+                return;
+            }
+            if let Some(participant) = session
+                .participants
+                .iter_mut()
+                .find(|participant| participant.nickname.eq_ignore_ascii_case(origin_nickname))
+            {
+                let previous = participant.nickname.clone();
+                participant.nickname = trimmed.to_string();
+                for item in &mut session.shared_queue {
+                    if item
+                        .owner_nickname
+                        .as_deref()
+                        .is_some_and(|owner| owner.eq_ignore_ascii_case(&previous))
+                    {
+                        item.owner_nickname = Some(participant.nickname.clone());
+                    }
+                }
+                if let Some(last_transport) = session.last_transport.as_mut()
+                    && last_transport
+                        .origin_nickname
+                        .eq_ignore_ascii_case(&previous)
+                {
+                    last_transport.origin_nickname = participant.nickname.clone();
+                }
+            }
+        }
         LocalAction::QueueAdd(item) => {
             session.shared_queue.push(item);
             if session.shared_queue.len() > 512 {
@@ -1890,7 +1944,10 @@ fn action_allowed_for_origin(
     if origin_is_host(session, origin_nickname) {
         return true;
     }
-    matches!(action, LocalAction::DelayUpdate { .. })
+    matches!(
+        action,
+        LocalAction::DelayUpdate { .. } | LocalAction::SetNickname { .. }
+    )
 }
 
 fn origin_is_host(session: &OnlineSession, origin_nickname: &str) -> bool {
@@ -2390,6 +2447,9 @@ fn sanitize_cache_name(input: &str) -> String {
 enum WireAction {
     SetMode(crate::online::OnlineRoomMode),
     SetQuality(StreamQuality),
+    SetNickname {
+        nickname: String,
+    },
     QueueAdd(SharedQueueItem),
     QueueConsume {
         expected_path: Option<PathBuf>,
@@ -2405,6 +2465,7 @@ fn action_to_wire(action: LocalAction) -> WireAction {
     match action {
         LocalAction::SetMode(mode) => WireAction::SetMode(mode),
         LocalAction::SetQuality(quality) => WireAction::SetQuality(quality),
+        LocalAction::SetNickname { nickname } => WireAction::SetNickname { nickname },
         LocalAction::QueueAdd(item) => WireAction::QueueAdd(item),
         LocalAction::QueueConsume { expected_path } => WireAction::QueueConsume { expected_path },
         LocalAction::DelayUpdate {
@@ -2422,6 +2483,7 @@ fn wire_to_action(action: WireAction) -> LocalAction {
     match action {
         WireAction::SetMode(mode) => LocalAction::SetMode(mode),
         WireAction::SetQuality(quality) => LocalAction::SetQuality(quality),
+        WireAction::SetNickname { nickname } => LocalAction::SetNickname { nickname },
         WireAction::QueueAdd(item) => LocalAction::QueueAdd(item),
         WireAction::QueueConsume { expected_path } => LocalAction::QueueConsume { expected_path },
         WireAction::DelayUpdate {
@@ -2620,6 +2682,60 @@ mod tests {
             .expect("listener participant");
         assert_eq!(listener.manual_extra_delay_ms, 75);
         assert!(!listener.auto_ping_delay);
+    }
+
+    #[test]
+    fn nickname_update_renames_participant_and_owned_queue_items() {
+        let mut session = OnlineSession::host("host");
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("a.flac"),
+            title: String::from("a"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("host")),
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::SetNickname {
+                nickname: String::from("dj"),
+            },
+            "host",
+        );
+
+        assert_eq!(session.participants[0].nickname, "dj");
+        assert_eq!(
+            session.shared_queue[0].owner_nickname.as_deref(),
+            Some("dj")
+        );
+    }
+
+    #[test]
+    fn host_only_allows_listener_nickname_update() {
+        let mut session = OnlineSession::host("host");
+        session.mode = crate::online::OnlineRoomMode::HostOnly;
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("listener"),
+            is_local: false,
+            is_host: false,
+            ping_ms: 12,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::SetNickname {
+                nickname: String::from("listener2"),
+            },
+            "listener",
+        );
+
+        assert!(
+            session
+                .participants
+                .iter()
+                .any(|participant| participant.nickname == "listener2")
+        );
     }
 
     #[test]

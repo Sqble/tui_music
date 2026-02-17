@@ -46,6 +46,7 @@ pub struct JoinPromptModalView {
     pub invite_code: String,
     pub paste_selected: bool,
     pub room_name_mode: bool,
+    pub nickname_mode: bool,
 }
 
 pub struct OnlineRoomDirectoryModalView {
@@ -643,17 +644,23 @@ fn draw_room_directory_modal(
 fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &ThemePalette) {
     let popup = centered_rect(frame.area(), 68, 34);
     frame.render_widget(Clear, popup);
-    let title = if modal.room_name_mode {
+    let title = if modal.nickname_mode {
+        "Set Online Nickname"
+    } else if modal.room_name_mode {
         "Host Online Room"
     } else {
         "Connect to Homeserver"
     };
-    let input_label = if modal.room_name_mode {
+    let input_label = if modal.nickname_mode {
+        "Nickname"
+    } else if modal.room_name_mode {
         "Room name"
     } else {
         "Server / Link"
     };
-    let help_line = if modal.room_name_mode {
+    let help_line = if modal.nickname_mode {
+        "Pick a nickname for online rooms. Enter saves and continues."
+    } else if modal.room_name_mode {
         "Type room name. Enter continues. Tab/arrow selects button. Ctrl+V pastes."
     } else {
         "Type homeserver address or room link. Server-only opens room directory; link with /room/<name> auto-joins."

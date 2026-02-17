@@ -73,6 +73,7 @@ struct OnlineRuntime {
     local_nickname: String,
     home_server_addr: String,
     home_server_connected: bool,
+    nickname_configured: bool,
     last_transport_seq: u64,
     join_prompt_active: bool,
     join_prompt_mode: JoinPromptMode,
@@ -159,6 +160,10 @@ impl OnlineRuntime {
             invite_code: self.join_code_input.clone(),
             paste_selected: matches!(self.join_prompt_button, JoinPromptButton::Paste),
             room_name_mode: matches!(self.join_prompt_mode, JoinPromptMode::HostRoomName),
+            nickname_mode: matches!(
+                self.join_prompt_mode,
+                JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+            ),
         })
     }
 
@@ -244,6 +249,8 @@ enum JoinPromptMode {
     Connect,
     ConnectForHost,
     HostRoomName,
+    NicknameForJoin,
+    NicknameForHost,
 }
 
 impl JoinPromptButton {
@@ -825,6 +832,10 @@ enum ActionPanelState {
     ThemeSettings {
         selected: usize,
     },
+    OnlineNickname {
+        selected: usize,
+        input: String,
+    },
     LyricsImportTxt {
         selected: usize,
         path_input: String,
@@ -1005,6 +1016,17 @@ impl ActionPanelState {
                 options: theme_options(core.theme),
                 selected: *selected,
             }),
+            Self::OnlineNickname { selected, input } => Some(crate::ui::ActionPanelView {
+                title: String::from("Online Nickname"),
+                hint: String::from("Type nickname + Enter save  Backspace back"),
+                search_query: None,
+                options: vec![if input.is_empty() {
+                    String::from("Nickname: ")
+                } else {
+                    format!("Nickname: {input}")
+                }],
+                selected: *selected,
+            }),
             Self::LyricsImportTxt {
                 selected,
                 path_input,
@@ -1116,12 +1138,17 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
     let mut stats_enabled_last = core.stats_enabled;
     let mut online_runtime = OnlineRuntime {
         network: None,
-        local_nickname: inferred_online_nickname(),
+        local_nickname: if core.online_nickname.trim().is_empty() {
+            String::from("you")
+        } else {
+            core.online_nickname.clone()
+        },
         home_server_addr: startup
             .default_home_server_addr
             .clone()
             .unwrap_or_else(|| String::from(ONLINE_DEFAULT_HOME_SERVER_ADDR)),
         home_server_connected: startup.home_server_connected,
+        nickname_configured: !core.online_nickname.trim().is_empty(),
         last_transport_seq: 0,
         join_prompt_active: false,
         join_prompt_mode: JoinPromptMode::Connect,
@@ -1273,7 +1300,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 &mut *audio,
                 &mut action_panel,
                 &mut recent_root_actions,
-                &online_runtime,
+                &mut online_runtime,
                 mouse,
                 library_rect,
             );
@@ -1294,7 +1321,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 &mut *audio,
                 &mut action_panel,
                 &mut recent_root_actions,
-                Some(&online_runtime),
+                Some(&mut online_runtime),
                 key.code,
             );
             continue;
@@ -1955,7 +1982,7 @@ fn handle_lyrics_inline_input(core: &mut TuneCore, audio: &dyn AudioEngine, key:
 
 fn handle_online_inline_input(
     core: &mut TuneCore,
-    _audio: &dyn AudioEngine,
+    audio: &dyn AudioEngine,
     key: KeyEvent,
     online_runtime: &mut OnlineRuntime,
 ) -> bool {
@@ -2097,6 +2124,11 @@ fn handle_online_inline_input(
                     JoinPromptMode::HostRoomName
                 ) {
                     format!("Enter room name: {}", online_runtime.join_code_input)
+                } else if matches!(
+                    online_runtime.join_prompt_mode,
+                    JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                ) {
+                    format!("Enter nickname: {}", online_runtime.join_code_input)
                 } else {
                     format!("Enter server/link: {}", online_runtime.join_code_input)
                 };
@@ -2140,9 +2172,54 @@ fn handle_online_inline_input(
                         JoinPromptMode::HostRoomName
                     ) {
                         String::from("Enter room name, then Enter")
+                    } else if matches!(
+                        online_runtime.join_prompt_mode,
+                        JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                    ) {
+                        String::from("Enter nickname, then press Enter")
                     } else {
                         String::from("Enter homeserver/link, then press Enter")
                     };
+                    core.dirty = true;
+                    return true;
+                }
+                if matches!(
+                    online_runtime.join_prompt_mode,
+                    JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                ) {
+                    let nickname = online_runtime.join_code_input.trim().to_string();
+                    online_runtime.join_prompt_active = false;
+                    online_runtime.join_code_input.clear();
+                    online_runtime.join_prompt_button = JoinPromptButton::Join;
+                    let continue_to_host = matches!(
+                        online_runtime.join_prompt_mode,
+                        JoinPromptMode::NicknameForHost
+                    );
+                    online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+                    apply_online_nickname(core, online_runtime, &nickname);
+                    auto_save_state(core, audio);
+                    if continue_to_host {
+                        if online_runtime.home_server_connected {
+                            online_runtime.join_prompt_active = true;
+                            online_runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
+                            core.status = format!(
+                                "Home server {} selected. Enter room name",
+                                online_runtime.home_server_addr
+                            );
+                        } else {
+                            online_runtime.join_prompt_active = true;
+                            online_runtime.join_prompt_mode = JoinPromptMode::ConnectForHost;
+                            core.status = String::from("Connect to homeserver to host a room");
+                        }
+                    } else if online_runtime.home_server_connected {
+                        online_runtime.pending_join_server_addr =
+                            online_runtime.home_server_addr.clone();
+                        load_home_room_directory(core, online_runtime, "Select a room to join");
+                    } else {
+                        online_runtime.join_prompt_active = true;
+                        online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+                        core.status = String::from("Connect to homeserver to browse rooms");
+                    }
                     core.dirty = true;
                     return true;
                 }
@@ -2238,6 +2315,11 @@ fn handle_online_inline_input(
                     JoinPromptMode::HostRoomName
                 ) {
                     format!("Enter room name: {}", online_runtime.join_code_input)
+                } else if matches!(
+                    online_runtime.join_prompt_mode,
+                    JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                ) {
+                    format!("Enter nickname: {}", online_runtime.join_code_input)
                 } else {
                     format!("Enter server/link: {}", online_runtime.join_code_input)
                 };
@@ -2256,6 +2338,15 @@ fn handle_online_inline_input(
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'h') => {
             if core.online.session.is_some() {
                 core.status = String::from("Already in online room. Press l to leave first");
+                core.dirty = true;
+                return true;
+            }
+            if !online_runtime.nickname_configured {
+                online_runtime.join_prompt_active = true;
+                online_runtime.join_prompt_mode = JoinPromptMode::NicknameForHost;
+                online_runtime.join_code_input.clear();
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                core.status = String::from("Set your online nickname");
                 core.dirty = true;
                 return true;
             }
@@ -2281,6 +2372,15 @@ fn handle_online_inline_input(
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'j') => {
             if core.online.session.is_some() {
                 core.status = String::from("Already in online room. Press l to leave first");
+                core.dirty = true;
+                return true;
+            }
+            if !online_runtime.nickname_configured {
+                online_runtime.join_prompt_active = true;
+                online_runtime.join_prompt_mode = JoinPromptMode::NicknameForJoin;
+                online_runtime.join_code_input.clear();
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                core.status = String::from("Set your online nickname");
                 core.dirty = true;
                 return true;
             }
@@ -2609,13 +2709,38 @@ fn copy_invite_via_osc52(invite_code: &str) -> anyhow::Result<()> {
     std::io::Write::flush(&mut out).context("stdout flush failed")
 }
 
-fn inferred_online_nickname() -> String {
-    std::env::var("TUNETUI_ONLINE_NICKNAME")
-        .ok()
-        .or_else(|| std::env::var("USERNAME").ok())
-        .or_else(|| std::env::var("USER").ok())
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| String::from("you"))
+fn apply_online_nickname(core: &mut TuneCore, online_runtime: &mut OnlineRuntime, nickname: &str) {
+    let trimmed = nickname.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let new_name = trimmed.to_string();
+    let previous = online_runtime.local_nickname.clone();
+    online_runtime.local_nickname = new_name.clone();
+    online_runtime.nickname_configured = true;
+    core.online_nickname = new_name.clone();
+
+    if let Some(session) = core.online.session.as_mut() {
+        if let Some(local) = session.local_participant_mut() {
+            local.nickname = new_name.clone();
+        }
+        for item in &mut session.shared_queue {
+            if item
+                .owner_nickname
+                .as_deref()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(&previous))
+            {
+                item.owner_nickname = Some(new_name.clone());
+            }
+        }
+    }
+
+    if let Some(network) = online_runtime.network.as_ref() {
+        network.send_local_action(NetworkLocalAction::SetNickname {
+            nickname: new_name.clone(),
+        });
+    }
+    core.status = format!("Online nickname: {new_name}");
 }
 
 fn parse_home_link(input: &str) -> Result<ParsedHomeLink> {
@@ -3490,7 +3615,7 @@ fn handle_mouse_with_panel(
     audio: &mut dyn AudioEngine,
     panel: &mut ActionPanelState,
     recent_root_actions: &mut Vec<RootActionId>,
-    online_runtime: &OnlineRuntime,
+    online_runtime: &mut OnlineRuntime,
     mouse: MouseEvent,
     library_rect: ratatui::prelude::Rect,
 ) {
@@ -3670,6 +3795,11 @@ fn audio_output_options(audio: &dyn AudioEngine) -> Vec<String> {
 }
 
 fn playback_settings_options(core: &TuneCore) -> Vec<String> {
+    let nickname = if core.online_nickname.trim().is_empty() {
+        String::from("(not set)")
+    } else {
+        core.online_nickname.clone()
+    };
     vec![
         format!(
             "Loudness normalization: {}",
@@ -3694,6 +3824,7 @@ fn playback_settings_options(core: &TuneCore) -> Vec<String> {
             cover_template_label(core.fallback_cover_template)
         ),
         String::from("Online sync delay settings"),
+        format!("Online nickname: {nickname}"),
         String::from("Back"),
     ]
 }
@@ -3862,6 +3993,7 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
         | ActionPanelState::PlaybackSettings { selected }
         | ActionPanelState::OnlineDelaySettings { selected }
         | ActionPanelState::ThemeSettings { selected }
+        | ActionPanelState::OnlineNickname { selected, .. }
         | ActionPanelState::LyricsImportTxt { selected, .. }
         | ActionPanelState::MetadataEditor { selected, .. }
         | ActionPanelState::AddDirectory { selected, .. }
@@ -3886,7 +4018,7 @@ fn handle_action_panel_input_with_recent(
     audio: &mut dyn AudioEngine,
     panel: &mut ActionPanelState,
     recent_root_actions: &mut Vec<RootActionId>,
-    online_runtime: Option<&OnlineRuntime>,
+    mut online_runtime: Option<&mut OnlineRuntime>,
     key: KeyCode,
 ) {
     if let ActionPanelState::Root { selected, query } = panel {
@@ -3924,6 +4056,22 @@ fn handle_action_panel_input_with_recent(
     }
 
     if let ActionPanelState::PlaylistCreate { selected, input } = panel {
+        match key {
+            KeyCode::Char(ch) if *selected == 0 => {
+                input.push(ch);
+                core.dirty = true;
+                return;
+            }
+            KeyCode::Backspace if *selected == 0 && !input.is_empty() => {
+                input.pop();
+                core.dirty = true;
+                return;
+            }
+            _ => {}
+        }
+    }
+
+    if let ActionPanelState::OnlineNickname { selected, input } = panel {
         match key {
             KeyCode::Char(ch) if *selected == 0 => {
                 input.push(ch);
@@ -4009,9 +4157,10 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::PlaylistCreate { .. } => 1,
         ActionPanelState::AudioSettings { .. } => 3,
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
-        ActionPanelState::PlaybackSettings { .. } => 8,
+        ActionPanelState::PlaybackSettings { .. } => 9,
         ActionPanelState::OnlineDelaySettings { .. } => 6,
         ActionPanelState::ThemeSettings { .. } => 6,
+        ActionPanelState::OnlineNickname { .. } => 1,
         ActionPanelState::LyricsImportTxt { .. } => 3,
         ActionPanelState::MetadataEditor { state, .. } => state.options().len(),
         ActionPanelState::AddDirectory { .. } => 2,
@@ -4114,6 +4263,9 @@ fn handle_action_panel_input_with_recent(
                     selected: root_selected_for_action(RootActionId::Theme, recent_root_actions),
                     query: String::new(),
                 },
+                ActionPanelState::OnlineNickname { .. } => {
+                    ActionPanelState::PlaybackSettings { selected: 7 }
+                }
                 ActionPanelState::LyricsImportTxt { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
                         RootActionId::ImportTxtToLyrics,
@@ -4485,6 +4637,17 @@ fn handle_action_panel_input_with_recent(
                     *panel = ActionPanelState::OnlineDelaySettings { selected: 0 };
                     core.dirty = true;
                 }
+                7 => {
+                    *panel = ActionPanelState::OnlineNickname {
+                        selected: 0,
+                        input: online_runtime
+                            .as_deref()
+                            .map(|runtime| runtime.local_nickname.clone())
+                            .filter(|value| !value.trim().is_empty())
+                            .unwrap_or_else(|| core.online_nickname.clone()),
+                    };
+                    core.dirty = true;
+                }
                 _ => {
                     *panel = ActionPanelState::Root {
                         selected: root_selected_for_action(
@@ -4496,22 +4659,40 @@ fn handle_action_panel_input_with_recent(
                     core.dirty = true;
                 }
             },
+            ActionPanelState::OnlineNickname { input, .. } => {
+                let nickname = input.trim();
+                if nickname.is_empty() {
+                    core.status = String::from("Enter an online nickname");
+                    core.dirty = true;
+                    return;
+                }
+                if let Some(runtime) = online_runtime.as_deref_mut() {
+                    apply_online_nickname(core, runtime, nickname);
+                    auto_save_state(core, &*audio);
+                } else {
+                    core.online_nickname = nickname.to_string();
+                    core.status = format!("Online nickname: {}", core.online_nickname);
+                    core.dirty = true;
+                }
+                *panel = ActionPanelState::PlaybackSettings { selected: 7 };
+                core.dirty = true;
+            }
             ActionPanelState::OnlineDelaySettings { selected } => match selected {
                 0 => {
                     core.online_adjust_manual_delay(-10);
-                    publish_online_delay_update(core, online_runtime);
+                    publish_online_delay_update(core, online_runtime.as_deref());
                 }
                 1 => {
                     core.online_adjust_manual_delay(10);
-                    publish_online_delay_update(core, online_runtime);
+                    publish_online_delay_update(core, online_runtime.as_deref());
                 }
                 2 => {
                     core.online_toggle_auto_delay();
-                    publish_online_delay_update(core, online_runtime);
+                    publish_online_delay_update(core, online_runtime.as_deref());
                 }
                 3 => {
                     core.online_recalibrate_ping();
-                    publish_online_delay_update(core, online_runtime);
+                    publish_online_delay_update(core, online_runtime.as_deref());
                 }
                 4 => {
                     core.online_sync_correction_threshold_ms =
@@ -5245,6 +5426,7 @@ mod tests {
             local_nickname: String::from("listener"),
             home_server_addr: String::from("127.0.0.1:7878"),
             home_server_connected: false,
+            nickname_configured: true,
             last_transport_seq: 0,
             join_prompt_active: false,
             join_prompt_mode: JoinPromptMode::Connect,
@@ -5987,14 +6169,14 @@ mod tests {
             query: String::new(),
         };
         let mut recent_root_actions = Vec::new();
-        let online_runtime = test_online_runtime();
+        let mut online_runtime = test_online_runtime();
 
         handle_mouse_with_panel(
             &mut core,
             &mut audio,
             &mut panel,
             &mut recent_root_actions,
-            &online_runtime,
+            &mut online_runtime,
             MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 column: 2,
@@ -7224,6 +7406,50 @@ mod tests {
         assert!(runtime.join_prompt_active);
         assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
         assert!(runtime.join_code_input.is_empty());
+    }
+
+    #[test]
+    fn online_tab_j_without_nickname_prompts_for_nickname_first() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("you");
+        runtime.nickname_configured = false;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(runtime.join_prompt_active);
+        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::NicknameForJoin);
+    }
+
+    #[test]
+    fn nickname_prompt_sets_name_and_continues_join_flow() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("you");
+        runtime.nickname_configured = false;
+        runtime.join_prompt_active = true;
+        runtime.join_prompt_mode = JoinPromptMode::NicknameForJoin;
+        runtime.join_code_input = String::from("dj");
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &audio,
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.local_nickname, "dj");
+        assert!(runtime.nickname_configured);
+        assert_eq!(core.online_nickname, "dj");
+        assert!(runtime.join_prompt_active);
+        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
     }
 
     #[test]
