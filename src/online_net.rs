@@ -315,7 +315,10 @@ struct HostedRoom {
     current_connections: u16,
 }
 
-pub fn start_home_server(bind_addr: &str) -> anyhow::Result<HomeServerHandle> {
+pub fn start_home_server(
+    bind_addr: &str,
+    room_port_range: Option<(u16, u16)>,
+) -> anyhow::Result<HomeServerHandle> {
     let listener = TcpListener::bind(bind_addr)
         .with_context(|| format!("failed to bind home server at {bind_addr}"))?;
     listener
@@ -427,9 +430,9 @@ pub fn start_home_server(bind_addr: &str) -> anyhow::Result<HomeServerHandle> {
                                 if let Some(host) = session.local_participant_mut() {
                                     host.is_local = false;
                                 }
-                                let room_bind = SocketAddr::new(bind.ip(), 0).to_string();
-                                match OnlineNetwork::start_host_with_max(
-                                    &room_bind,
+                                match start_room_host_for_home_server(
+                                    bind,
+                                    room_port_range,
                                     session,
                                     password
                                         .as_deref()
@@ -501,7 +504,14 @@ pub fn start_home_server(bind_addr: &str) -> anyhow::Result<HomeServerHandle> {
 }
 
 pub fn run_home_server_forever(bind_addr: &str) -> anyhow::Result<()> {
-    let _handle = start_home_server(bind_addr)?;
+    run_home_server_forever_with_ports(bind_addr, None)
+}
+
+pub fn run_home_server_forever_with_ports(
+    bind_addr: &str,
+    room_port_range: Option<(u16, u16)>,
+) -> anyhow::Result<()> {
+    let _handle = start_home_server(bind_addr, room_port_range)?;
     loop {
         thread::sleep(Duration::from_millis(1000));
     }
@@ -589,6 +599,43 @@ fn send_home_request(server_addr: &str, request: &HomeRequest) -> anyhow::Result
         anyhow::bail!("home server closed connection");
     }
     serde_json::from_str::<HomeResponse>(line.trim_end()).context("failed to parse home response")
+}
+
+fn start_room_host_for_home_server(
+    home_bind_addr: SocketAddr,
+    room_port_range: Option<(u16, u16)>,
+    session: OnlineSession,
+    password: Option<String>,
+    max_connections: usize,
+) -> anyhow::Result<OnlineNetwork> {
+    if let Some((start_port, end_port)) = room_port_range {
+        let mut last_err: Option<anyhow::Error> = None;
+        for port in start_port..=end_port {
+            let room_bind = SocketAddr::new(home_bind_addr.ip(), port).to_string();
+            match OnlineNetwork::start_host_with_max(
+                &room_bind,
+                session.clone(),
+                password.clone(),
+                max_connections,
+            ) {
+                Ok(network) => return Ok(network),
+                Err(err) => {
+                    last_err = Some(err);
+                }
+            }
+        }
+        let detail = last_err
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| String::from("no ports available"));
+        anyhow::bail!(
+            "no available room port in configured range {}-{} ({detail})",
+            start_port,
+            end_port
+        );
+    }
+
+    let room_bind = SocketAddr::new(home_bind_addr.ip(), 0).to_string();
+    OnlineNetwork::start_host_with_max(&room_bind, session, password, max_connections)
 }
 
 fn room_by_name<'a>(

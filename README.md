@@ -87,7 +87,9 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - Home server bind (CLI): `tune --host --ip 0.0.0.0:7878`
 - Headless home server: `tune --host --ip 0.0.0.0:7878`
 - Home server + app in one process: `tune --host --app --ip 0.0.0.0:7878`
+- Fixed room transport port range (recommended for VPS firewalls): `tune --host --ip 0.0.0.0:7878 --room-port-range 9000-9100`
 - App-only targeting a home server: `tune --ip 127.0.0.1:7878`
+- Open firewall for the home server port and the full configured room range
 - Password for host/join: optional in TUI (lock icon in room directory indicates password required)
 - Nickname: `TUNETUI_ONLINE_NICKNAME` (fallback `USERNAME`/`USER`/`you`)
 - Reverse stream safety: peer uploads are only served for shared-queue items owned by that peer and are capped at 1 GiB per file
