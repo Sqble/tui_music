@@ -54,13 +54,13 @@ const ONLINE_DEFAULT_ROOM_LINK: &str = "127.0.0.1:7878/room/roomName";
 #[derive(Debug, Clone, Default)]
 pub struct AppStartupOptions {
     pub default_home_server_addr: Option<String>,
+    pub home_server_from_cli: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedHomeLink {
     server_addr: String,
     room_name: Option<String>,
-    max_connections: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +73,7 @@ struct OnlineRuntime {
     network: Option<OnlineNetwork>,
     local_nickname: String,
     home_server_addr: String,
+    home_server_from_cli: bool,
     last_transport_seq: u64,
     join_prompt_active: bool,
     join_code_input: String,
@@ -1113,6 +1114,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             .default_home_server_addr
             .clone()
             .unwrap_or_else(|| String::from(ONLINE_DEFAULT_HOME_SERVER_ADDR)),
+        home_server_from_cli: startup.home_server_from_cli,
         last_transport_seq: 0,
         join_prompt_active: false,
         join_code_input: String::new(),
@@ -2021,10 +2023,24 @@ fn handle_online_inline_input(
                 };
                 online_runtime.pending_join_room_name = Some(selected_room.room_name.clone());
                 online_runtime.join_directory_active = false;
-                online_runtime.password_prompt_active = true;
-                online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
-                online_runtime.password_input.clear();
-                core.status = String::from("Optional room password, then Enter");
+                match resolve_home_room(
+                    &online_runtime.pending_join_server_addr,
+                    &selected_room.room_name,
+                ) {
+                    Ok(room) => {
+                        if room.locked {
+                            online_runtime.password_prompt_active = true;
+                            online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
+                            online_runtime.password_input.clear();
+                            core.status = String::from("Enter room password, then Enter");
+                        } else {
+                            join_home_room(core, online_runtime, &selected_room.room_name, "");
+                        }
+                    }
+                    Err(err) => {
+                        core.status = format!("Room not found or unavailable: {err}");
+                    }
+                }
                 core.dirty = true;
                 return true;
             }
@@ -2062,7 +2078,11 @@ fn handle_online_inline_input(
             KeyCode::Backspace => {
                 online_runtime.join_code_input.pop();
                 online_runtime.join_prompt_button = JoinPromptButton::Join;
-                core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
+                core.status = if online_runtime.host_setup_active {
+                    format!("Enter room name: {}", online_runtime.join_code_input)
+                } else {
+                    format!("Enter server/link: {}", online_runtime.join_code_input)
+                };
                 core.dirty = true;
                 return true;
             }
@@ -2072,8 +2092,7 @@ fn handle_online_inline_input(
             {
                 match paste_invite_from_clipboard(online_runtime) {
                     Ok(()) => {
-                        core.status =
-                            format!("Pasted invite code: {}", online_runtime.join_code_input);
+                        core.status = format!("Pasted input: {}", online_runtime.join_code_input);
                     }
                     Err(err) => {
                         core.status = format!("Clipboard paste failed: {err}");
@@ -2088,7 +2107,7 @@ fn handle_online_inline_input(
                     match paste_invite_from_clipboard(online_runtime) {
                         Ok(()) => {
                             core.status =
-                                format!("Pasted invite code: {}", online_runtime.join_code_input);
+                                format!("Pasted input: {}", online_runtime.join_code_input);
                         }
                         Err(err) => {
                             core.status = format!("Clipboard paste failed: {err}");
@@ -2100,13 +2119,30 @@ fn handle_online_inline_input(
                 }
                 if online_runtime.join_code_input.trim().is_empty() {
                     core.status = if online_runtime.host_setup_active {
-                        String::from("Enter home server link with room, then Enter")
+                        String::from("Enter room name, then Enter")
                     } else {
                         String::from("Enter server link, then press Enter")
                     };
                     core.dirty = true;
                     return true;
                 }
+                if online_runtime.host_setup_active {
+                    online_runtime.pending_join_server_addr =
+                        online_runtime.home_server_addr.clone();
+                    online_runtime.pending_join_room_name =
+                        Some(online_runtime.join_code_input.trim().to_string());
+                    online_runtime.join_prompt_active = false;
+                    online_runtime.join_code_input.clear();
+                    online_runtime.join_prompt_button = JoinPromptButton::Join;
+                    online_runtime.host_max_connections_input = String::from("8");
+                    online_runtime.password_prompt_active = true;
+                    online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
+                    online_runtime.password_input.clear();
+                    core.status = String::from("Optional room password, then Enter");
+                    core.dirty = true;
+                    return true;
+                }
+
                 let parsed = match parse_home_link(&online_runtime.join_code_input) {
                     Ok(parsed) => parsed,
                     Err(err) => {
@@ -2120,27 +2156,6 @@ fn handle_online_inline_input(
                 online_runtime.join_prompt_active = false;
                 online_runtime.join_code_input.clear();
                 online_runtime.join_prompt_button = JoinPromptButton::Join;
-                if online_runtime.host_setup_active {
-                    if online_runtime.pending_join_room_name.is_none() {
-                        core.status = String::from("Host link must include /room/<name>");
-                        core.dirty = true;
-                        online_runtime.host_setup_active = false;
-                        return true;
-                    }
-                    online_runtime.password_prompt_active = true;
-                    online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
-                    online_runtime.password_input.clear();
-                    if let Some(max_connections) = parsed.max_connections {
-                        online_runtime.host_max_connections_input = max_connections.to_string();
-                    } else {
-                        online_runtime.host_max_connections_input = String::from("8");
-                    }
-                    core.status = String::from(
-                        "Optional room password, then Enter (max from link query max=2..32)",
-                    );
-                    core.dirty = true;
-                    return true;
-                }
                 if online_runtime.pending_join_room_name.is_none() {
                     match list_home_rooms(&online_runtime.pending_join_server_addr, None) {
                         Ok(rooms) => {
@@ -2157,17 +2172,36 @@ fn handle_online_inline_input(
                     core.dirty = true;
                     return true;
                 }
-                online_runtime.password_prompt_active = true;
-                online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
-                online_runtime.password_input.clear();
-                core.status = String::from("Optional room password, then press Enter");
+                let room_name = online_runtime
+                    .pending_join_room_name
+                    .clone()
+                    .unwrap_or_default();
+                match resolve_home_room(&online_runtime.pending_join_server_addr, &room_name) {
+                    Ok(room) => {
+                        if room.locked {
+                            online_runtime.password_prompt_active = true;
+                            online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
+                            online_runtime.password_input.clear();
+                            core.status = String::from("Enter room password, then press Enter");
+                        } else {
+                            join_home_room(core, online_runtime, &room_name, "");
+                        }
+                    }
+                    Err(err) => {
+                        core.status = format!("Room not found or unavailable: {err}");
+                    }
+                }
                 core.dirty = true;
                 return true;
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 append_invite_char(online_runtime, ch);
                 online_runtime.join_prompt_button = JoinPromptButton::Join;
-                core.status = format!("Enter invite code: {}", online_runtime.join_code_input);
+                core.status = if online_runtime.host_setup_active {
+                    format!("Enter room name: {}", online_runtime.join_code_input)
+                } else {
+                    format!("Enter server/link: {}", online_runtime.join_code_input)
+                };
                 core.dirty = true;
                 return true;
             }
@@ -2188,16 +2222,35 @@ fn handle_online_inline_input(
             }
             online_runtime.host_setup_active = true;
             online_runtime.join_prompt_active = true;
-            online_runtime.join_code_input =
-                format!("{}/room/roomName", online_runtime.home_server_addr.trim());
+            online_runtime.join_code_input.clear();
             online_runtime.join_prompt_button = JoinPromptButton::Join;
-            core.status = String::from("Enter home server link with room and optional ?max=8");
+            core.status = format!(
+                "Home server {} selected. Enter room name",
+                online_runtime.home_server_addr
+            );
             core.dirty = true;
             true
         }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'j') => {
             if core.online.session.is_some() {
                 core.status = String::from("Already in online room. Press l to leave first");
+                core.dirty = true;
+                return true;
+            }
+            if online_runtime.home_server_from_cli {
+                online_runtime.pending_join_server_addr = online_runtime.home_server_addr.clone();
+                match list_home_rooms(&online_runtime.pending_join_server_addr, None) {
+                    Ok(rooms) => {
+                        online_runtime.join_directory_rooms = rooms;
+                        online_runtime.join_directory_search.clear();
+                        online_runtime.join_directory_selected = 0;
+                        online_runtime.join_directory_active = true;
+                        core.status = String::from("Select a room to join");
+                    }
+                    Err(err) => {
+                        core.status = format!("Failed to load rooms: {err}");
+                    }
+                }
                 core.dirty = true;
                 return true;
             }
@@ -2555,27 +2608,9 @@ fn parse_home_link(input: &str) -> Result<ParsedHomeLink> {
         }
     }
 
-    let max_connections = trimmed
-        .split_once('?')
-        .map(|(_, query)| query)
-        .and_then(|query| {
-            query.split('&').find_map(|pair| {
-                let mut kv = pair.splitn(2, '=');
-                let key = kv.next()?.trim();
-                let value = kv.next()?.trim();
-                if key.eq_ignore_ascii_case("max") {
-                    value.parse::<u16>().ok()
-                } else {
-                    None
-                }
-            })
-        })
-        .filter(|value| (2..=32).contains(value));
-
     Ok(ParsedHomeLink {
         server_addr: authority,
         room_name,
-        max_connections,
     })
 }
 
@@ -2608,7 +2643,7 @@ fn join_home_room(
     let resolved = match resolve_home_room(&server_addr, room_name) {
         Ok(room) => room,
         Err(err) => {
-            core.status = format!("Resolve room failed: {err}");
+            core.status = format!("Room not found or unavailable: {err}");
             core.dirty = true;
             return;
         }
@@ -5093,6 +5128,7 @@ mod tests {
             network: None,
             local_nickname: String::from("listener"),
             home_server_addr: String::from("127.0.0.1:7878"),
+            home_server_from_cli: false,
             last_transport_seq: 0,
             join_prompt_active: false,
             join_code_input: String::new(),
