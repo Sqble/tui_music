@@ -308,7 +308,7 @@ struct HomeRoomResolvedWire {
 struct HostedRoom {
     room_name: String,
     room_code: String,
-    room_server_addr: String,
+    room_server_port: u16,
     network: OnlineNetwork,
     max_connections: u16,
     locked: bool,
@@ -325,11 +325,6 @@ pub fn start_home_server(bind_addr: &str) -> anyhow::Result<HomeServerHandle> {
     let bind = listener
         .local_addr()
         .context("failed to get local home addr")?;
-    let advertised_host = match bind.ip() {
-        IpAddr::V4(ip) if ip.is_unspecified() => Ipv4Addr::new(127, 0, 0, 1),
-        IpAddr::V4(ip) => ip,
-        IpAddr::V6(_) => Ipv4Addr::new(127, 0, 0, 1),
-    };
     let join_handle = thread::spawn(move || {
         let mut rooms: HashMap<String, HostedRoom> = HashMap::new();
         loop {
@@ -342,6 +337,18 @@ pub fn start_home_server(bind_addr: &str) -> anyhow::Result<HomeServerHandle> {
                     if let NetworkEvent::SessionSync(session) = event {
                         room.current_connections = session.participants.len() as u16;
                     }
+                }
+            }
+
+            let mut rooms_to_close = Vec::new();
+            for (key, room) in &rooms {
+                if room.current_connections == 0 {
+                    rooms_to_close.push(key.clone());
+                }
+            }
+            for key in rooms_to_close {
+                if let Some(room) = rooms.remove(&key) {
+                    room.network.shutdown();
                 }
             }
 
@@ -381,14 +388,7 @@ pub fn start_home_server(bind_addr: &str) -> anyhow::Result<HomeServerHandle> {
                         Ok(HomeRequest::ResolveRoom { room_name }) => {
                             match room_by_name(&rooms, &room_name) {
                                 Some(room) => HomeResponse::RoomResolved {
-                                    room: HomeRoomResolvedWire {
-                                        room_name: room.room_name.clone(),
-                                        room_code: room.room_code.clone(),
-                                        room_server_addr: room.room_server_addr.clone(),
-                                        locked: room.locked,
-                                        current_connections: room.current_connections,
-                                        max_connections: room.max_connections,
-                                    },
+                                    room: home_room_resolved_wire(room, &stream, bind),
                                 },
                                 None => HomeResponse::Error {
                                     message: String::from("room not found"),
@@ -427,7 +427,7 @@ pub fn start_home_server(bind_addr: &str) -> anyhow::Result<HomeServerHandle> {
                                 if let Some(host) = session.local_participant_mut() {
                                     host.is_local = false;
                                 }
-                                let room_bind = format!("{}:0", advertised_host);
+                                let room_bind = SocketAddr::new(bind.ip(), 0).to_string();
                                 match OnlineNetwork::start_host_with_max(
                                     &room_bind,
                                     session,
@@ -439,21 +439,17 @@ pub fn start_home_server(bind_addr: &str) -> anyhow::Result<HomeServerHandle> {
                                     usize::from(max_connections),
                                 ) {
                                     Ok(network) => {
-                                        let room_addr = network
+                                        let room_port = network
                                             .bind_addr()
                                             .and_then(|addr| addr.parse::<SocketAddr>().ok())
-                                            .map(|addr| {
-                                                format!("{}:{}", advertised_host, addr.port())
-                                            })
-                                            .unwrap_or_else(|| {
-                                                format!("{}:{}", advertised_host, bind.port())
-                                            });
+                                            .map(|addr| addr.port())
+                                            .unwrap_or(bind.port());
                                         rooms.insert(
                                             name.to_ascii_lowercase(),
                                             HostedRoom {
                                                 room_name: name.to_string(),
                                                 room_code: name.to_ascii_uppercase(),
-                                                room_server_addr: room_addr.clone(),
+                                                room_server_port: room_port,
                                                 network,
                                                 max_connections,
                                                 locked: password
@@ -464,14 +460,7 @@ pub fn start_home_server(bind_addr: &str) -> anyhow::Result<HomeServerHandle> {
                                         );
                                         match room_by_name(&rooms, name) {
                                             Some(room) => HomeResponse::RoomResolved {
-                                                room: HomeRoomResolvedWire {
-                                                    room_name: room.room_name.clone(),
-                                                    room_code: room.room_code.clone(),
-                                                    room_server_addr: room.room_server_addr.clone(),
-                                                    locked: room.locked,
-                                                    current_connections: room.current_connections,
-                                                    max_connections: room.max_connections,
-                                                },
+                                                room: home_room_resolved_wire(room, &stream, bind),
                                             },
                                             None => HomeResponse::Error {
                                                 message: String::from(
@@ -607,6 +596,31 @@ fn room_by_name<'a>(
     room_name: &str,
 ) -> Option<&'a HostedRoom> {
     rooms.get(&room_name.trim().to_ascii_lowercase())
+}
+
+fn home_room_resolved_wire(
+    room: &HostedRoom,
+    stream: &TcpStream,
+    fallback_bind: SocketAddr,
+) -> HomeRoomResolvedWire {
+    let ip = stream
+        .local_addr()
+        .map(|addr| addr.ip())
+        .unwrap_or(fallback_bind.ip());
+    let safe_ip = match ip {
+        IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+        _ => ip,
+    };
+
+    HomeRoomResolvedWire {
+        room_name: room.room_name.clone(),
+        room_code: room.room_code.clone(),
+        room_server_addr: SocketAddr::new(safe_ip, room.room_server_port).to_string(),
+        locked: room.locked,
+        current_connections: room.current_connections,
+        max_connections: room.max_connections,
+    }
 }
 
 pub fn resolve_advertise_addr(bind_addr: &str) -> anyhow::Result<String> {
@@ -1654,10 +1668,37 @@ fn disconnect_peer(
 
     let changed = if let Some(name) = nickname.as_deref() {
         let before = session.participants.len();
-        session
-            .participants
-            .retain(|participant| !participant.nickname.eq_ignore_ascii_case(name));
-        session.participants.len() != before
+        let mut removed_host = false;
+        session.participants.retain(|participant| {
+            let matches = participant.nickname.eq_ignore_ascii_case(name);
+            if matches && participant.is_host {
+                removed_host = true;
+            }
+            !matches
+        });
+
+        let mut promoted_new_host = false;
+        let mut promoted_nickname = String::new();
+        if removed_host && !session.participants.is_empty() {
+            for (index, participant) in session.participants.iter_mut().enumerate() {
+                if index == 0 {
+                    if !participant.is_host {
+                        participant.is_host = true;
+                        promoted_new_host = true;
+                        promoted_nickname = participant.nickname.clone();
+                    }
+                } else {
+                    participant.is_host = false;
+                }
+            }
+            if promoted_new_host {
+                let _ = event_tx.send(NetworkEvent::Status(format!(
+                    "Host left room. New host: {promoted_nickname}"
+                )));
+            }
+        }
+
+        session.participants.len() != before || promoted_new_host
     } else {
         false
     };
@@ -2594,6 +2635,78 @@ mod tests {
             statuses
                 .iter()
                 .any(|line| line.contains("Peer disconnected: listenera"))
+        );
+    }
+
+    #[test]
+    fn disconnecting_host_promotes_earliest_joined_participant() {
+        let mut session = OnlineSession::host("host");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("alpha"),
+            is_local: false,
+            is_host: false,
+            ping_ms: 20,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("beta"),
+            is_local: false,
+            is_host: false,
+            ping_ms: 22,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let client_stream = TcpStream::connect(addr).expect("connect client stream");
+        let (server_stream, _) = listener.accept().expect("accept server stream");
+
+        let mut peers = HashMap::new();
+        peers.insert(
+            1,
+            PeerConnection {
+                nickname: String::from("HOST"),
+                writer: Arc::new(Mutex::new(server_stream)),
+            },
+        );
+        drop(client_stream);
+
+        let mut pending_pull_requests = HashMap::new();
+        let mut inbound_streams = HashMap::new();
+        let mut pending_pings = HashMap::new();
+        let (event_tx, event_rx) = mpsc::channel();
+
+        disconnect_peer(
+            1,
+            &mut session,
+            &mut InboundState {
+                peers: &mut peers,
+                pending_pull_requests: &mut pending_pull_requests,
+                inbound_streams: &mut inbound_streams,
+                pending_pings: &mut pending_pings,
+            },
+            "Peer disconnected",
+            &event_tx,
+        );
+
+        assert_eq!(session.participants.len(), 2);
+        assert_eq!(session.participants[0].nickname, "alpha");
+        assert!(session.participants[0].is_host);
+        assert!(!session.participants[1].is_host);
+
+        let statuses: Vec<String> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                NetworkEvent::Status(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            statuses
+                .iter()
+                .any(|line| line.contains("Host left room. New host: alpha"))
         );
     }
 }

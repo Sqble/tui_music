@@ -2192,13 +2192,7 @@ fn handle_online_inline_input(
                             core.status = String::from("Enter room password, then press Enter");
                         } else {
                             let server_addr = online_runtime.pending_join_server_addr.clone();
-                            join_home_room(
-                                core,
-                                online_runtime,
-                                &server_addr,
-                                &room_name,
-                                "",
-                            );
+                            join_home_room(core, online_runtime, &server_addr, &room_name, "");
                         }
                     }
                     Err(err) => {
@@ -2440,7 +2434,13 @@ fn start_host_with_password(
     ) {
         Ok(room) => {
             online_runtime.home_server_addr = server_addr.clone();
-            join_home_room(core, online_runtime, &server_addr, &room.room_name, password);
+            join_home_room(
+                core,
+                online_runtime,
+                &server_addr,
+                &room.room_name,
+                password,
+            );
             online_runtime.host_setup_active = false;
         }
         Err(err) => {
@@ -2651,6 +2651,19 @@ fn filtered_room_entries(
     out
 }
 
+fn rewrite_room_server_addr_host(home_server_addr: &str, room_server_addr: &str) -> Option<String> {
+    let home_host = home_server_addr.trim().rsplit_once(':')?.0.trim();
+    let room_port = room_server_addr.trim().rsplit_once(':')?.1.trim();
+    if home_host.is_empty() || room_port.is_empty() {
+        return None;
+    }
+    if home_host.contains(':') && !home_host.starts_with('[') {
+        Some(format!("[{home_host}]:{room_port}"))
+    } else {
+        Some(format!("{home_host}:{room_port}"))
+    }
+}
+
 fn join_home_room(
     core: &mut TuneCore,
     online_runtime: &mut OnlineRuntime,
@@ -2677,8 +2690,10 @@ fn join_home_room(
     };
 
     core.online_join_room(&resolved.room_code, &online_runtime.local_nickname);
+    let connect_addr = rewrite_room_server_addr_host(&server_addr, &resolved.room_server_addr)
+        .unwrap_or_else(|| resolved.room_server_addr.clone());
     match OnlineNetwork::start_client(
-        &resolved.room_server_addr,
+        &connect_addr,
         &resolved.room_code,
         &online_runtime.local_nickname,
         if password.trim().is_empty() {
@@ -7150,5 +7165,18 @@ mod tests {
     fn parse_folder_picker_selection_handles_empty_output() {
         let parsed = parse_folder_picker_selection(b"\n");
         assert_eq!(parsed, None);
+    }
+
+    #[test]
+    fn rewrite_room_server_addr_uses_home_server_host() {
+        let rewritten = rewrite_room_server_addr_host("198.51.100.42:7878", "127.0.0.1:44623")
+            .expect("rewritten address");
+        assert_eq!(rewritten, "198.51.100.42:44623");
+    }
+
+    #[test]
+    fn rewrite_room_server_addr_returns_none_for_invalid_input() {
+        assert!(rewrite_room_server_addr_host("", "127.0.0.1:44623").is_none());
+        assert!(rewrite_room_server_addr_host("198.51.100.42:7878", "bad").is_none());
     }
 }
