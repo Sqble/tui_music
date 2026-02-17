@@ -1202,7 +1202,11 @@ fn client_loop(
                                 ));
                                 continue;
                             }
-                            if state.received_bytes != state.total_bytes {
+                            if !stream_size_matches(
+                                state.total_bytes,
+                                state.received_bytes,
+                                state.payload_format,
+                            ) {
                                 let _ = fs::remove_file(&state.local_temp_path);
                                 let _ = read_event_tx.send(NetworkEvent::Status(format!(
                                     "Stream size mismatch: expected {} bytes got {} bytes",
@@ -1754,7 +1758,11 @@ fn handle_inbound(
                 ));
                 return;
             }
-            if state.received_bytes != state.total_bytes {
+            if !stream_size_matches(
+                state.total_bytes,
+                state.received_bytes,
+                state.payload_format,
+            ) {
                 let _ = fs::remove_file(&state.local_temp_path);
                 let _ = event_tx.send(NetworkEvent::Status(format!(
                     "Peer stream size mismatch: expected {} bytes got {} bytes",
@@ -2196,41 +2204,53 @@ fn stream_file_to_client(
     request_id: u64,
     quality: StreamQuality,
 ) -> anyhow::Result<()> {
-    let stream_source = prepare_stream_source(path, quality)?;
-    send_json_line_shared(
-        writer,
-        &WireServerMessage::StreamStart {
-            request_id,
-            path: path.to_path_buf(),
-            total_bytes: stream_source.total_bytes,
-            payload_format: stream_source.payload_format,
-        },
-    )?;
-
-    let mut file = File::open(&stream_source.path).with_context(|| {
-        format!(
-            "failed to open stream source {}",
-            stream_source.path.display()
-        )
-    })?;
-    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    validate_stream_source(path)?;
+    match quality {
+        StreamQuality::Lossless => {
+            let file_size = fs::metadata(path)
+                .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
+                .len();
+            send_json_line_shared(
+                writer,
+                &WireServerMessage::StreamStart {
+                    request_id,
+                    path: path.to_path_buf(),
+                    total_bytes: file_size,
+                    payload_format: StreamPayloadFormat::OriginalFile,
+                },
+            )?;
+            stream_lossless_chunks(path, |chunk| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                send_json_line_shared(
+                    writer,
+                    &WireServerMessage::StreamChunk {
+                        request_id,
+                        data_base64: encoded,
+                    },
+                )
+            })?;
         }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&buffer[..read]);
-        send_json_line_shared(
-            writer,
-            &WireServerMessage::StreamChunk {
-                request_id,
-                data_base64: encoded,
-            },
-        )?;
-    }
-    drop(file);
-    if stream_source.payload_format == StreamPayloadFormat::BalancedOpus160kVbr {
-        let _ = fs::remove_file(&stream_source.path);
+        StreamQuality::Balanced => {
+            send_json_line_shared(
+                writer,
+                &WireServerMessage::StreamStart {
+                    request_id,
+                    path: path.to_path_buf(),
+                    total_bytes: 0,
+                    payload_format: StreamPayloadFormat::BalancedOpus160kVbr,
+                },
+            )?;
+            stream_balanced_opus_chunks(path, |chunk| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                send_json_line_shared(
+                    writer,
+                    &WireServerMessage::StreamChunk {
+                        request_id,
+                        data_base64: encoded,
+                    },
+                )
+            })?;
+        }
     }
 
     send_json_line_shared(
@@ -2250,41 +2270,53 @@ fn stream_file_to_host(
     request_id: u64,
     quality: StreamQuality,
 ) -> anyhow::Result<()> {
-    let stream_source = prepare_stream_source(path, quality)?;
-    send_json_line_shared(
-        writer,
-        &WireClientMessage::StreamStart {
-            request_id,
-            path: path.to_path_buf(),
-            total_bytes: stream_source.total_bytes,
-            payload_format: stream_source.payload_format,
-        },
-    )?;
-
-    let mut file = File::open(&stream_source.path).with_context(|| {
-        format!(
-            "failed to open stream source {}",
-            stream_source.path.display()
-        )
-    })?;
-    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
+    validate_stream_source(path)?;
+    match quality {
+        StreamQuality::Lossless => {
+            let file_size = fs::metadata(path)
+                .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
+                .len();
+            send_json_line_shared(
+                writer,
+                &WireClientMessage::StreamStart {
+                    request_id,
+                    path: path.to_path_buf(),
+                    total_bytes: file_size,
+                    payload_format: StreamPayloadFormat::OriginalFile,
+                },
+            )?;
+            stream_lossless_chunks(path, |chunk| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                send_json_line_shared(
+                    writer,
+                    &WireClientMessage::StreamChunk {
+                        request_id,
+                        data_base64: encoded,
+                    },
+                )
+            })?;
         }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&buffer[..read]);
-        send_json_line_shared(
-            writer,
-            &WireClientMessage::StreamChunk {
-                request_id,
-                data_base64: encoded,
-            },
-        )?;
-    }
-    drop(file);
-    if stream_source.payload_format == StreamPayloadFormat::BalancedOpus160kVbr {
-        let _ = fs::remove_file(&stream_source.path);
+        StreamQuality::Balanced => {
+            send_json_line_shared(
+                writer,
+                &WireClientMessage::StreamStart {
+                    request_id,
+                    path: path.to_path_buf(),
+                    total_bytes: 0,
+                    payload_format: StreamPayloadFormat::BalancedOpus160kVbr,
+                },
+            )?;
+            stream_balanced_opus_chunks(path, |chunk| {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                send_json_line_shared(
+                    writer,
+                    &WireClientMessage::StreamChunk {
+                        request_id,
+                        data_base64: encoded,
+                    },
+                )
+            })?;
+        }
     }
 
     send_json_line_shared(
@@ -2298,71 +2330,27 @@ fn stream_file_to_host(
     )
 }
 
-#[derive(Debug)]
-struct PreparedStreamSource {
-    path: PathBuf,
-    total_bytes: u64,
-    payload_format: StreamPayloadFormat,
-}
-
-fn prepare_stream_source(
-    path: &Path,
-    quality: StreamQuality,
-) -> anyhow::Result<PreparedStreamSource> {
-    validate_stream_source(path)?;
-    match quality {
-        StreamQuality::Lossless => {
-            let total_bytes = fs::metadata(path)
-                .with_context(|| format!("failed to read stream metadata for {}", path.display()))?
-                .len();
-            Ok(PreparedStreamSource {
-                path: path.to_path_buf(),
-                total_bytes,
-                payload_format: StreamPayloadFormat::OriginalFile,
-            })
+fn stream_lossless_chunks<F>(path: &Path, mut send_chunk: F) -> anyhow::Result<()>
+where
+    F: FnMut(&[u8]) -> anyhow::Result<()>,
+{
+    let mut file = File::open(path)
+        .with_context(|| format!("failed to open stream source {}", path.display()))?;
+    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
         }
-        StreamQuality::Balanced => {
-            let transcoded_path = transcode_balanced_stream_to_opus_payload(path)?;
-            let total_bytes = fs::metadata(&transcoded_path)
-                .with_context(|| {
-                    format!(
-                        "failed to read balanced stream metadata for {}",
-                        transcoded_path.display()
-                    )
-                })?
-                .len();
-            if total_bytes > MAX_STREAM_FILE_BYTES {
-                let _ = fs::remove_file(&transcoded_path);
-                anyhow::bail!("balanced stream source exceeds size limit");
-            }
-            Ok(PreparedStreamSource {
-                path: transcoded_path,
-                total_bytes,
-                payload_format: StreamPayloadFormat::BalancedOpus160kVbr,
-            })
-        }
+        send_chunk(&buffer[..read])?;
     }
+    Ok(())
 }
 
-fn transcode_balanced_stream_to_opus_payload(source_path: &Path) -> anyhow::Result<PathBuf> {
-    let mut output_path = std::env::temp_dir();
-    output_path.push("tunetui_stream_cache");
-    fs::create_dir_all(&output_path).with_context(|| {
-        format!(
-            "failed to create stream cache dir {}",
-            output_path.display()
-        )
-    })?;
-    let micros = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros();
-    output_path.push(format!("balanced_{}.topus", micros));
-
-    let mut output = File::create(&output_path)
-        .with_context(|| format!("failed to create balanced stream {}", output_path.display()))?;
-    write_balanced_opus_header(&mut output)?;
-
+fn stream_balanced_opus_chunks<F>(source_path: &Path, mut send_chunk: F) -> anyhow::Result<()>
+where
+    F: FnMut(&[u8]) -> anyhow::Result<()>,
+{
     let source_file = File::open(source_path)
         .with_context(|| format!("failed to open stream source {}", source_path.display()))?;
     let decoder = Decoder::try_from(source_file)
@@ -2370,9 +2358,11 @@ fn transcode_balanced_stream_to_opus_payload(source_path: &Path) -> anyhow::Resu
     let source_rate = decoder.sample_rate().max(1);
     let source_channels = usize::from(decoder.channels()).max(1);
 
+    let header = balanced_opus_header_bytes();
+    send_chunk(&header)?;
+    let mut payload_bytes_written: u64 = u64::try_from(header.len()).unwrap_or(u64::MAX);
+
     let mut channel_buffer = Vec::with_capacity(source_channels);
-    let mut payload_bytes_written: u64 =
-        u64::try_from(BALANCED_PAYLOAD_MAGIC.len() + 8).unwrap_or(u64::MAX);
     let mut accumulator: u64 = 0;
     let source_rate_u64 = u64::from(source_rate);
     let target_rate_u64 = u64::from(BALANCED_STREAM_SAMPLE_RATE);
@@ -2383,6 +2373,7 @@ fn transcode_balanced_stream_to_opus_payload(source_path: &Path) -> anyhow::Resu
     let mut pcm_frame =
         Vec::with_capacity(frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS)));
     let mut packet_buf = vec![0_u8; BALANCED_OPUS_MAX_PACKET_BYTES];
+    let mut wire_packet = vec![0_u8; BALANCED_OPUS_MAX_PACKET_BYTES + 2];
     let mut encoder = ManagedOpusEncoder::new(
         BALANCED_STREAM_SAMPLE_RATE,
         i32::from(BALANCED_STREAM_CHANNELS),
@@ -2412,13 +2403,13 @@ fn transcode_balanced_stream_to_opus_payload(source_path: &Path) -> anyhow::Resu
             if pcm_frame.len()
                 == frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS))
             {
-                write_opus_packet(
-                    &mut output,
+                emit_balanced_opus_packet(
                     &mut encoder,
                     &pcm_frame,
                     &mut packet_buf,
+                    &mut wire_packet,
                     &mut payload_bytes_written,
-                    &output_path,
+                    &mut send_chunk,
                 )?;
                 pcm_frame.clear();
             }
@@ -2431,65 +2422,83 @@ fn transcode_balanced_stream_to_opus_payload(source_path: &Path) -> anyhow::Resu
             frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS)),
             0,
         );
-        write_opus_packet(
-            &mut output,
+        emit_balanced_opus_packet(
             &mut encoder,
             &pcm_frame,
             &mut packet_buf,
+            &mut wire_packet,
             &mut payload_bytes_written,
-            &output_path,
+            &mut send_chunk,
         )?;
     }
-
-    output.flush()?;
-    Ok(output_path)
+    Ok(())
 }
 
-fn write_opus_packet(
-    output: &mut File,
+fn emit_balanced_opus_packet<F>(
     encoder: &mut ManagedOpusEncoder,
     pcm_frame: &[i16],
     packet_buf: &mut [u8],
+    wire_packet: &mut [u8],
     payload_bytes_written: &mut u64,
-    output_path: &Path,
-) -> anyhow::Result<()> {
+    send_chunk: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&[u8]) -> anyhow::Result<()>,
+{
     let encoded_size = encoder.encode(pcm_frame, packet_buf)?;
     let packet_len = u16::try_from(encoded_size).context("opus packet too large")?;
-    output
-        .write_all(&packet_len.to_le_bytes())
-        .with_context(|| {
-            format!(
-                "failed writing balanced stream packet header to {}",
-                output_path.display()
-            )
-        })?;
-    output
-        .write_all(&packet_buf[..encoded_size])
-        .with_context(|| {
-            format!(
-                "failed writing balanced stream packet to {}",
-                output_path.display()
-            )
-        })?;
+    wire_packet[..2].copy_from_slice(&packet_len.to_le_bytes());
+    wire_packet[2..(2 + encoded_size)].copy_from_slice(&packet_buf[..encoded_size]);
+    send_chunk(&wire_packet[..(2 + encoded_size)])?;
     *payload_bytes_written = payload_bytes_written
         .saturating_add(2)
         .saturating_add(u64::from(packet_len));
     if *payload_bytes_written > MAX_STREAM_FILE_BYTES {
-        let _ = fs::remove_file(output_path);
         anyhow::bail!("balanced stream source exceeds size limit");
     }
     Ok(())
 }
 
-fn write_balanced_opus_header(file: &mut File) -> anyhow::Result<()> {
-    file.write_all(BALANCED_PAYLOAD_MAGIC)?;
-    file.write_all(&BALANCED_STREAM_SAMPLE_RATE.to_le_bytes())?;
-    file.write_all(&BALANCED_STREAM_CHANNELS.to_le_bytes())?;
+fn balanced_opus_header_bytes() -> [u8; 13] {
+    let mut header = [0_u8; 13];
+    header[..5].copy_from_slice(BALANCED_PAYLOAD_MAGIC);
+    header[5..9].copy_from_slice(&BALANCED_STREAM_SAMPLE_RATE.to_le_bytes());
+    header[9..11].copy_from_slice(&BALANCED_STREAM_CHANNELS.to_le_bytes());
     let frame_samples =
         u16::try_from((BALANCED_STREAM_SAMPLE_RATE * BALANCED_OPUS_FRAME_MS) / 1_000)
             .unwrap_or(960);
-    file.write_all(&frame_samples.to_le_bytes())?;
-    Ok(())
+    header[11..13].copy_from_slice(&frame_samples.to_le_bytes());
+    header
+}
+
+#[cfg(test)]
+fn transcode_balanced_stream_to_opus_payload(source_path: &Path) -> anyhow::Result<PathBuf> {
+    let mut output_path = std::env::temp_dir();
+    output_path.push("tunetui_stream_cache");
+    fs::create_dir_all(&output_path).with_context(|| {
+        format!(
+            "failed to create stream cache dir {}",
+            output_path.display()
+        )
+    })?;
+    let micros = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros();
+    output_path.push(format!("balanced_{}.topus", micros));
+
+    let mut output = File::create(&output_path)
+        .with_context(|| format!("failed to create balanced stream {}", output_path.display()))?;
+    stream_balanced_opus_chunks(source_path, |chunk| {
+        output.write_all(chunk).with_context(|| {
+            format!(
+                "failed writing balanced stream chunk to {}",
+                output_path.display()
+            )
+        })
+    })?;
+    output.flush()?;
+    Ok(output_path)
 }
 
 struct ManagedOpusEncoder {
@@ -2655,8 +2664,13 @@ fn decode_balanced_opus_payload_to_wav(
         .context("missing balanced payload frame size")?;
     let frame_samples = usize::from(u16::from_le_bytes(frame_bytes));
 
-    if sample_rate == 0 || !(channels == 1 || channels == 2) || frame_samples == 0 {
+    if sample_rate == 0 || frame_samples == 0 {
         anyhow::bail!("invalid balanced payload parameters");
+    }
+    if channels != 2 {
+        anyhow::bail!(
+            "unsupported balanced payload channels: {channels} (expected 2; legacy mono payloads are blocked)"
+        );
     }
 
     let mut decoder = ManagedOpusDecoder::new(sample_rate, i32::from(channels))?;
@@ -2770,6 +2784,13 @@ fn validate_stream_source(path: &Path) -> anyhow::Result<()> {
         anyhow::bail!("stream source exceeds size limit");
     }
     Ok(())
+}
+
+fn stream_size_matches(expected: u64, received: u64, payload_format: StreamPayloadFormat) -> bool {
+    match payload_format {
+        StreamPayloadFormat::OriginalFile => expected == received,
+        StreamPayloadFormat::BalancedOpus160kVbr => expected == 0 || expected == received,
+    }
 }
 
 fn next_request_id() -> u64 {
@@ -3068,8 +3089,21 @@ fn wire_to_action(action: WireAction) -> LocalAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::{self, File};
+    use std::io::Write;
     use std::net::TcpListener;
     use std::path::Path;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn unique_temp_file(name: &str, ext: &str) -> PathBuf {
+        let mut path = std::env::temp_dir();
+        let micros = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_micros();
+        path.push(format!("tunetui_test_{}_{}.{}", name, micros, ext));
+        path
+    }
 
     #[test]
     fn invite_code_round_trips_with_password_key() {
@@ -3178,6 +3212,84 @@ mod tests {
         )
         .expect("cache path");
         assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("topus"));
+    }
+
+    #[test]
+    fn balanced_opus_encode_decode_round_trip_accepts_stereo_payload() {
+        let source_path = unique_temp_file("balanced_source", "wav");
+        let mut source_file = File::create(&source_path).expect("create source wav");
+        write_wav_header_placeholder(&mut source_file, BALANCED_STREAM_SAMPLE_RATE, 2)
+            .expect("write source wav header");
+
+        let frames = usize::try_from(BALANCED_STREAM_SAMPLE_RATE / 10).unwrap_or(4_800);
+        let mut data_bytes: u64 = 0;
+        for _ in 0..frames {
+            let left: i16 = 1_024;
+            let right: i16 = -1_024;
+            source_file
+                .write_all(&left.to_le_bytes())
+                .expect("write left sample");
+            source_file
+                .write_all(&right.to_le_bytes())
+                .expect("write right sample");
+            data_bytes = data_bytes.saturating_add(4);
+        }
+        finalize_wav_header(&mut source_file, data_bytes).expect("finalize source wav");
+
+        let payload_path = transcode_balanced_stream_to_opus_payload(&source_path)
+            .expect("encode balanced payload");
+        let decoded_path = decode_balanced_opus_payload_to_wav(&payload_path, &source_path)
+            .expect("decode balanced payload");
+
+        let decoded_size = fs::metadata(&decoded_path).expect("decoded metadata").len();
+        assert!(decoded_size > 44);
+
+        let _ = fs::remove_file(source_path);
+        let _ = fs::remove_file(payload_path);
+        let _ = fs::remove_file(decoded_path);
+    }
+
+    #[test]
+    fn balanced_decoder_rejects_legacy_mono_payload() {
+        let payload_path = unique_temp_file("balanced_payload_mono", "topus");
+        let mut payload = File::create(&payload_path).expect("create payload");
+        payload
+            .write_all(BALANCED_PAYLOAD_MAGIC)
+            .expect("write magic");
+        payload
+            .write_all(&BALANCED_STREAM_SAMPLE_RATE.to_le_bytes())
+            .expect("write sample rate");
+        payload
+            .write_all(&1_u16.to_le_bytes())
+            .expect("write mono channel header");
+        payload
+            .write_all(&960_u16.to_le_bytes())
+            .expect("write frame samples");
+        payload.flush().expect("flush payload");
+
+        let requested = unique_temp_file("requested_track", "mp3");
+        let err = decode_balanced_opus_payload_to_wav(&payload_path, &requested)
+            .expect_err("mono payload should be rejected");
+        assert!(
+            err.to_string().contains("legacy mono payloads are blocked"),
+            "unexpected error: {err}"
+        );
+
+        let _ = fs::remove_file(payload_path);
+    }
+
+    #[test]
+    fn balanced_stream_size_check_allows_unknown_total_bytes() {
+        assert!(stream_size_matches(
+            0,
+            42,
+            StreamPayloadFormat::BalancedOpus160kVbr
+        ));
+        assert!(!stream_size_matches(
+            12,
+            42,
+            StreamPayloadFormat::OriginalFile
+        ));
     }
 
     #[test]
