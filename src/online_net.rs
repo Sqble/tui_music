@@ -37,7 +37,7 @@ const STUN_ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const STREAM_CHUNK_BYTES: usize = 24 * 1024;
 const MAX_STREAM_FILE_BYTES: u64 = 1_073_741_824;
 const BALANCED_STREAM_SAMPLE_RATE: u32 = 48_000;
-const BALANCED_STREAM_CHANNELS: u16 = 1;
+const BALANCED_STREAM_CHANNELS: u16 = 2;
 const BALANCED_STREAM_BITS_PER_SAMPLE: u16 = 16;
 const BALANCED_OPUS_FRAME_MS: u32 = 20;
 const BALANCED_OPUS_BITRATE_BPS: i32 = 160_000;
@@ -1219,7 +1219,7 @@ fn client_loop(
                             }
                             let ready_path = match state.payload_format {
                                 StreamPayloadFormat::OriginalFile => state.local_temp_path.clone(),
-                                StreamPayloadFormat::BalancedOpus160kMono => {
+                                StreamPayloadFormat::BalancedOpus160kVbr => {
                                     match decode_balanced_opus_payload_to_wav(
                                         &state.local_temp_path,
                                         &state.requested_path,
@@ -1771,7 +1771,7 @@ fn handle_inbound(
             }
             let ready_path = match state.payload_format {
                 StreamPayloadFormat::OriginalFile => state.local_temp_path.clone(),
-                StreamPayloadFormat::BalancedOpus160kMono => {
+                StreamPayloadFormat::BalancedOpus160kVbr => {
                     match decode_balanced_opus_payload_to_wav(
                         &state.local_temp_path,
                         &state.requested_path,
@@ -2229,7 +2229,7 @@ fn stream_file_to_client(
         )?;
     }
     drop(file);
-    if stream_source.payload_format == StreamPayloadFormat::BalancedOpus160kMono {
+    if stream_source.payload_format == StreamPayloadFormat::BalancedOpus160kVbr {
         let _ = fs::remove_file(&stream_source.path);
     }
 
@@ -2283,7 +2283,7 @@ fn stream_file_to_host(
         )?;
     }
     drop(file);
-    if stream_source.payload_format == StreamPayloadFormat::BalancedOpus160kMono {
+    if stream_source.payload_format == StreamPayloadFormat::BalancedOpus160kVbr {
         let _ = fs::remove_file(&stream_source.path);
     }
 
@@ -2338,7 +2338,7 @@ fn prepare_stream_source(
             Ok(PreparedStreamSource {
                 path: transcoded_path,
                 total_bytes,
-                payload_format: StreamPayloadFormat::BalancedOpus160kMono,
+                payload_format: StreamPayloadFormat::BalancedOpus160kVbr,
             })
         }
     }
@@ -2380,7 +2380,8 @@ fn transcode_balanced_stream_to_opus_payload(source_path: &Path) -> anyhow::Resu
         usize::try_from((BALANCED_STREAM_SAMPLE_RATE * BALANCED_OPUS_FRAME_MS) / 1_000)
             .unwrap_or(960)
             .max(1);
-    let mut pcm_frame = Vec::with_capacity(frame_samples);
+    let mut pcm_frame =
+        Vec::with_capacity(frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS)));
     let mut packet_buf = vec![0_u8; BALANCED_OPUS_MAX_PACKET_BYTES];
     let mut encoder = ManagedOpusEncoder::new(
         BALANCED_STREAM_SAMPLE_RATE,
@@ -2394,14 +2395,23 @@ fn transcode_balanced_stream_to_opus_payload(source_path: &Path) -> anyhow::Resu
         if channel_buffer.len() < source_channels {
             continue;
         }
-        let mixed = channel_buffer.iter().copied().sum::<f32>() / source_channels as f32;
+        let (left, right) = if source_channels == 1 {
+            let v = channel_buffer[0];
+            (v, v)
+        } else {
+            (channel_buffer[0], channel_buffer[1])
+        };
         channel_buffer.clear();
 
         accumulator = accumulator.saturating_add(target_rate_u64);
         while accumulator >= source_rate_u64 {
-            let pcm = (mixed.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
-            pcm_frame.push(pcm);
-            if pcm_frame.len() == frame_samples {
+            let pcm_left = (left.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+            let pcm_right = (right.clamp(-1.0, 1.0) * i16::MAX as f32).round() as i16;
+            pcm_frame.push(pcm_left);
+            pcm_frame.push(pcm_right);
+            if pcm_frame.len()
+                == frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS))
+            {
                 write_opus_packet(
                     &mut output,
                     &mut encoder,
@@ -2417,7 +2427,10 @@ fn transcode_balanced_stream_to_opus_payload(source_path: &Path) -> anyhow::Resu
     }
 
     if !pcm_frame.is_empty() {
-        pcm_frame.resize(frame_samples, 0);
+        pcm_frame.resize(
+            frame_samples.saturating_mul(usize::from(BALANCED_STREAM_CHANNELS)),
+            0,
+        );
         write_opus_packet(
             &mut output,
             &mut encoder,
@@ -2481,6 +2494,7 @@ fn write_balanced_opus_header(file: &mut File) -> anyhow::Result<()> {
 
 struct ManagedOpusEncoder {
     raw: *mut RawOpusEncoder,
+    channels: i32,
 }
 
 impl ManagedOpusEncoder {
@@ -2497,7 +2511,7 @@ impl ManagedOpusEncoder {
         if raw.is_null() || error != OPUS_OK {
             anyhow::bail!("failed to initialize opus encoder (error code {error})");
         }
-        Ok(Self { raw })
+        Ok(Self { raw, channels })
     }
 
     fn set_bitrate(&mut self, bitrate_bps: i32) -> anyhow::Result<()> {
@@ -2521,11 +2535,16 @@ impl ManagedOpusEncoder {
     }
 
     fn encode(&mut self, pcm_frame: &[i16], packet_buf: &mut [u8]) -> anyhow::Result<usize> {
+        if self.channels <= 0 {
+            anyhow::bail!("invalid opus channel configuration");
+        }
+        let channels = usize::try_from(self.channels).unwrap_or(1).max(1);
+        let frame_size_per_channel = pcm_frame.len() / channels;
         let encoded = unsafe {
             opus_encode(
                 self.raw,
                 pcm_frame.as_ptr(),
-                i32::try_from(pcm_frame.len()).unwrap_or(i32::MAX),
+                i32::try_from(frame_size_per_channel).unwrap_or(i32::MAX),
                 packet_buf.as_mut_ptr(),
                 i32::try_from(packet_buf.len()).unwrap_or(i32::MAX),
             )
@@ -2549,6 +2568,7 @@ impl Drop for ManagedOpusEncoder {
 
 struct ManagedOpusDecoder {
     raw: *mut RawOpusDecoder,
+    channels: i32,
 }
 
 impl ManagedOpusDecoder {
@@ -2564,7 +2584,7 @@ impl ManagedOpusDecoder {
         if raw.is_null() || error != OPUS_OK {
             anyhow::bail!("failed to initialize opus decoder (error code {error})");
         }
-        Ok(Self { raw })
+        Ok(Self { raw, channels })
     }
 
     fn decode(
@@ -2574,12 +2594,14 @@ impl ManagedOpusDecoder {
         decode_fec: bool,
     ) -> anyhow::Result<usize> {
         let decoded = unsafe {
+            let channels = usize::try_from(self.channels).unwrap_or(1).max(1);
+            let frame_size_per_channel = pcm_buffer.len() / channels;
             opus_decode(
                 self.raw,
                 packet.as_ptr(),
                 i32::try_from(packet.len()).unwrap_or(i32::MAX),
                 pcm_buffer.as_mut_ptr(),
-                i32::try_from(pcm_buffer.len()).unwrap_or(i32::MAX),
+                i32::try_from(frame_size_per_channel).unwrap_or(i32::MAX),
                 if decode_fec { 1 } else { 0 },
             )
         };
@@ -2643,7 +2665,14 @@ fn decode_balanced_opus_payload_to_wav(
         .with_context(|| format!("failed to create decoded WAV {}", wav_path.display()))?;
     write_wav_header_placeholder(&mut wav_file, sample_rate, channels)?;
 
-    let mut pcm_buffer = vec![0_i16; frame_samples.saturating_mul(6).max(frame_samples)];
+    let channels_usize = usize::from(channels).max(1);
+    let mut pcm_buffer = vec![
+        0_i16;
+        frame_samples
+            .saturating_mul(channels_usize)
+            .saturating_mul(6)
+            .max(frame_samples.saturating_mul(channels_usize))
+    ];
     let mut packet_len_bytes = [0_u8; 2];
     let mut wav_data_bytes: u64 = 0;
 
@@ -2666,7 +2695,7 @@ fn decode_balanced_opus_payload_to_wav(
         if decoded_per_channel == 0 {
             continue;
         }
-        let sample_count = decoded_per_channel.saturating_mul(usize::from(channels));
+        let sample_count = decoded_per_channel.saturating_mul(channels_usize);
         let mut bytes = Vec::with_capacity(sample_count.saturating_mul(2));
         for sample in pcm_buffer.iter().take(sample_count) {
             bytes.extend_from_slice(&sample.to_le_bytes());
@@ -2827,7 +2856,7 @@ enum Inbound {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 enum StreamPayloadFormat {
     OriginalFile,
-    BalancedOpus160kMono,
+    BalancedOpus160kVbr,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2958,7 +2987,7 @@ fn create_stream_cache_path(
             .map(sanitize_cache_name)
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| String::from("bin")),
-        StreamPayloadFormat::BalancedOpus160kMono => String::from("topus"),
+        StreamPayloadFormat::BalancedOpus160kVbr => String::from("topus"),
     };
     let micros = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3121,7 +3150,7 @@ mod tests {
             request_id: 7,
             path: PathBuf::from("track.flac"),
             total_bytes: 123,
-            payload_format: StreamPayloadFormat::BalancedOpus160kMono,
+            payload_format: StreamPayloadFormat::BalancedOpus160kVbr,
         };
         let encoded = serde_json::to_string(&msg).expect("serialize");
         let decoded: WireServerMessage = serde_json::from_str(&encoded).expect("deserialize");
@@ -3135,7 +3164,7 @@ mod tests {
                 assert_eq!(request_id, 7);
                 assert_eq!(path, PathBuf::from("track.flac"));
                 assert_eq!(total_bytes, 123);
-                assert_eq!(payload_format, StreamPayloadFormat::BalancedOpus160kMono);
+                assert_eq!(payload_format, StreamPayloadFormat::BalancedOpus160kVbr);
             }
             other => panic!("unexpected message: {other:?}"),
         }
@@ -3145,7 +3174,7 @@ mod tests {
     fn stream_cache_path_uses_topus_extension_for_balanced_payload() {
         let path = create_stream_cache_path(
             Path::new("artist/song.flac"),
-            StreamPayloadFormat::BalancedOpus160kMono,
+            StreamPayloadFormat::BalancedOpus160kVbr,
         )
         .expect("cache path");
         assert_eq!(path.extension().and_then(|ext| ext.to_str()), Some("topus"));
