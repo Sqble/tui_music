@@ -2655,7 +2655,7 @@ fn decode_balanced_opus_payload_to_wav(
         .context("missing balanced payload frame size")?;
     let frame_samples = usize::from(u16::from_le_bytes(frame_bytes));
 
-    if sample_rate == 0 || channels != 1 || frame_samples == 0 {
+    if sample_rate == 0 || !(channels == 1 || channels == 2) || frame_samples == 0 {
         anyhow::bail!("invalid balanced payload parameters");
     }
 
