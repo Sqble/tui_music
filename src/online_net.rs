@@ -32,6 +32,7 @@ const STREAM_CHUNK_BYTES: usize = 24 * 1024;
 const MAX_STREAM_FILE_BYTES: u64 = 1_073_741_824;
 const PING_INTERVAL: Duration = Duration::from_millis(1_500);
 const PING_TIMEOUT: Duration = Duration::from_millis(5_000);
+const HOME_ROOM_EMPTY_GRACE_PERIOD: Duration = Duration::from_secs(3);
 const HOME_ROOM_MAX_CONNECTIONS_MIN: u16 = 2;
 const HOME_ROOM_MAX_CONNECTIONS_MAX: u16 = 32;
 
@@ -313,6 +314,7 @@ struct HostedRoom {
     max_connections: u16,
     locked: bool,
     current_connections: u16,
+    empty_since: Option<Instant>,
 }
 
 pub fn start_home_server(
@@ -344,9 +346,18 @@ pub fn start_home_server(
             }
 
             let mut rooms_to_close = Vec::new();
-            for (key, room) in &rooms {
+            let now = Instant::now();
+            for (key, room) in &mut rooms {
                 if room.current_connections == 0 {
-                    rooms_to_close.push(key.clone());
+                    if let Some(since) = room.empty_since {
+                        if now.duration_since(since) >= HOME_ROOM_EMPTY_GRACE_PERIOD {
+                            rooms_to_close.push(key.clone());
+                        }
+                    } else {
+                        room.empty_since = Some(now);
+                    }
+                } else {
+                    room.empty_since = None;
                 }
             }
             for key in rooms_to_close {
@@ -357,6 +368,7 @@ pub fn start_home_server(
 
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
                     let mut reader = BufReader::new(match stream.try_clone() {
                         Ok(clone) => clone,
                         Err(_) => continue,
@@ -427,9 +439,7 @@ pub fn start_home_server(
                             } else {
                                 let mut session = OnlineSession::host(&owner_nickname);
                                 session.room_code = name.to_ascii_uppercase();
-                                if let Some(host) = session.local_participant_mut() {
-                                    host.is_local = false;
-                                }
+                                session.participants.clear();
                                 match start_room_host_for_home_server(
                                     bind,
                                     room_port_range,
@@ -458,7 +468,8 @@ pub fn start_home_server(
                                                 locked: password
                                                     .as_deref()
                                                     .is_some_and(|value| !value.trim().is_empty()),
-                                                current_connections: 1,
+                                                current_connections: 0,
+                                                empty_since: None,
                                             },
                                         );
                                         match room_by_name(&rooms, name) {
@@ -1264,6 +1275,13 @@ fn host_loop(
         loop {
             match listener.accept() {
                 Ok((stream, _)) => {
+                    if stream.set_nonblocking(false).is_err() {
+                        let _ = event_tx.send(NetworkEvent::Status(String::from(
+                            "Online stream setup failed",
+                        )));
+                        continue;
+                    }
+                    let _ = stream.set_nodelay(true);
                     let peer_id = next_peer_id;
                     next_peer_id = next_peer_id.saturating_add(1);
                     let inbound_tx_clone = inbound_tx.clone();
@@ -1449,6 +1467,22 @@ fn handle_inbound(
                 return;
             }
 
+            if peers
+                .values()
+                .any(|peer| peer.nickname.eq_ignore_ascii_case(&nickname))
+            {
+                let mut stream = stream;
+                let _ = send_json_line(
+                    &mut stream,
+                    &WireServerMessage::HelloAck {
+                        accepted: false,
+                        reason: Some(String::from("nickname already in use")),
+                        session: None,
+                    },
+                );
+                return;
+            }
+
             if expected_password.map(str::trim).unwrap_or("")
                 != password.as_deref().map(str::trim).unwrap_or("")
             {
@@ -1478,20 +1512,33 @@ fn handle_inbound(
                 return;
             }
 
-            let is_host = session.participants.iter().any(|participant| {
-                participant.is_host && participant.nickname.eq_ignore_ascii_case(&nickname)
-            });
-            session
+            let has_host = session
                 .participants
-                .retain(|participant| !participant.nickname.eq_ignore_ascii_case(&nickname));
-            session.participants.push(crate::online::Participant {
-                nickname: nickname.clone(),
-                is_local: false,
-                is_host,
-                ping_ms: 35,
-                manual_extra_delay_ms: 0,
-                auto_ping_delay: true,
-            });
+                .iter()
+                .any(|participant| participant.is_host);
+            if let Some(existing) = session
+                .participants
+                .iter_mut()
+                .find(|participant| participant.nickname.eq_ignore_ascii_case(&nickname))
+            {
+                if !has_host {
+                    existing.is_host = true;
+                }
+                existing.is_local = false;
+                existing.ping_ms = 35;
+                existing.manual_extra_delay_ms = 0;
+                existing.auto_ping_delay = true;
+            } else {
+                let should_be_host = !has_host;
+                session.participants.push(crate::online::Participant {
+                    nickname: nickname.clone(),
+                    is_local: false,
+                    is_host: should_be_host,
+                    ping_ms: 35,
+                    manual_extra_delay_ms: 0,
+                    auto_ping_delay: true,
+                });
+            }
 
             peers.insert(
                 peer_id,
@@ -2773,5 +2820,68 @@ mod tests {
 
         client.shutdown();
         handle.shutdown();
+    }
+
+    #[test]
+    fn home_server_created_room_client_stays_connected_briefly() {
+        let probe = TcpListener::bind("127.0.0.1:0").expect("bind probe port");
+        let port = probe.local_addr().expect("probe addr").port();
+        drop(probe);
+
+        let home_addr = format!("127.0.0.1:{port}");
+        let handle = start_home_server(&home_addr, None).expect("start home server");
+        verify_home_server(&home_addr).expect("verify home server");
+        let room =
+            create_home_room(&home_addr, "roomname", "hoster", None, 8).expect("create room");
+        let client =
+            OnlineNetwork::start_client(&room.room_server_addr, &room.room_code, "hoster", None)
+                .expect("join created room");
+
+        thread::sleep(Duration::from_millis(200));
+        let statuses: Vec<String> = std::iter::from_fn(|| client.try_recv_event())
+            .filter_map(|event| match event {
+                NetworkEvent::Status(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !statuses
+                .iter()
+                .any(|message| message.contains("Disconnected from online host")),
+            "unexpected disconnect statuses: {statuses:?}"
+        );
+
+        client.shutdown();
+        handle.shutdown();
+    }
+
+    #[test]
+    fn direct_host_client_same_nickname_stays_connected_briefly() {
+        let mut session = OnlineSession::host("hoster");
+        session.room_code = String::from("ROOM");
+        session.participants.clear();
+        let host = OnlineNetwork::start_host_with_max("127.0.0.1:0", session, None, 8)
+            .expect("start direct host");
+        let host_addr = host.bind_addr().expect("host addr").to_string();
+
+        let client = OnlineNetwork::start_client(&host_addr, "ROOM", "hoster", None)
+            .expect("join direct host");
+        thread::sleep(Duration::from_millis(2200));
+
+        let statuses: Vec<String> = std::iter::from_fn(|| client.try_recv_event())
+            .filter_map(|event| match event {
+                NetworkEvent::Status(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !statuses
+                .iter()
+                .any(|message| message.contains("Disconnected from online host")),
+            "unexpected disconnect statuses: {statuses:?}"
+        );
+
+        client.shutdown();
+        host.shutdown();
     }
 }

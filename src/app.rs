@@ -2885,11 +2885,12 @@ fn drain_online_network_events(
         match event {
             NetworkEvent::Status(message) => {
                 let disconnected = is_online_disconnect_status(&message);
-                core.status = message;
+                core.status = message.clone();
                 if disconnected {
                     online_runtime.shutdown();
                     online_runtime.last_transport_seq = 0;
-                    core.online_leave_room();
+                    core.online.leave_room();
+                    core.status = format!("Disconnected from room: {message}");
                 }
                 core.dirty = true;
             }
