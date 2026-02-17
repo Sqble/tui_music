@@ -1,6 +1,7 @@
 use crate::audio::{AudioEngine, NullAudioEngine, WasapiAudioEngine};
 use crate::config;
-use crate::core::{HeaderSection, LyricsMode, StatsFilterFocus, TuneCore};
+use crate::core::{BrowserEntryKind, HeaderSection, LyricsMode, StatsFilterFocus, TuneCore};
+use crate::library::{self, MetadataEdit};
 use crate::model::{CoverArtTemplate, PlaybackMode, Theme};
 use crate::online::{OnlineSession, Participant, TransportCommand, TransportEnvelope};
 use crate::online_net::{
@@ -527,12 +528,13 @@ enum RootActionId {
     Theme,
     SaveState,
     ClearListenHistory,
+    MetadataEditor,
     MinimizeToTray,
     ImportTxtToLyrics,
     ClosePanel,
 }
 
-const ROOT_ACTIONS: [RootActionId; 18] = [
+const ROOT_ACTIONS: [RootActionId; 19] = [
     RootActionId::AddDirectory,
     RootActionId::AddSelectedToPlaylist,
     RootActionId::AddNowPlayingToPlaylist,
@@ -548,6 +550,7 @@ const ROOT_ACTIONS: [RootActionId; 18] = [
     RootActionId::Theme,
     RootActionId::SaveState,
     RootActionId::ClearListenHistory,
+    RootActionId::MetadataEditor,
     RootActionId::MinimizeToTray,
     RootActionId::ImportTxtToLyrics,
     RootActionId::ClosePanel,
@@ -557,6 +560,53 @@ const ROOT_ACTIONS: [RootActionId; 18] = [
 struct RootVisibleAction {
     action: RootActionId,
     label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MetadataEditorState {
+    selected_track_path: Option<PathBuf>,
+    copy_target_label: String,
+    copy_target_paths: Vec<PathBuf>,
+    title_input: String,
+    artist_input: String,
+    album_input: String,
+    confirm_all_songs_cover_copy: bool,
+}
+
+impl MetadataEditorState {
+    fn options(&self) -> Vec<String> {
+        if self.selected_track_path.is_some() {
+            vec![
+                format!("Title: {}", self.title_input),
+                format!("Artist: {}", self.artist_input),
+                format!("Album: {}", self.album_input),
+                String::from("Save embedded tags"),
+                String::from("Clear title/artist/album tags"),
+                format!("Copy now playing cover art to {}", self.copy_target_label),
+                String::from("Back"),
+            ]
+        } else {
+            vec![
+                if self.confirm_all_songs_cover_copy {
+                    format!(
+                        "Confirm: copy now playing cover art to {}",
+                        self.copy_target_label
+                    )
+                } else {
+                    format!("Copy now playing cover art to {}", self.copy_target_label)
+                },
+                String::from("Back"),
+            ]
+        }
+    }
+
+    fn metadata_edit(&self) -> MetadataEdit {
+        MetadataEdit {
+            title: Some(self.title_input.clone()),
+            artist: Some(self.artist_input.clone()),
+            album: Some(self.album_input.clone()),
+        }
+    }
 }
 
 fn root_action_label(action: RootActionId) -> &'static str {
@@ -576,6 +626,7 @@ fn root_action_label(action: RootActionId) -> &'static str {
         RootActionId::Theme => "Theme",
         RootActionId::SaveState => "Save state",
         RootActionId::ClearListenHistory => "Clear listen history (backup)",
+        RootActionId::MetadataEditor => "Edit selected track metadata",
         RootActionId::MinimizeToTray => "Minimize to tray",
         RootActionId::ImportTxtToLyrics => "Import TXT to lyrics",
         RootActionId::ClosePanel => "Close panel",
@@ -699,6 +750,10 @@ enum ActionPanelState {
         selected: usize,
         path_input: String,
         interval_input: String,
+    },
+    MetadataEditor {
+        selected: usize,
+        state: MetadataEditorState,
     },
     AddDirectory {
         selected: usize,
@@ -892,6 +947,13 @@ impl ActionPanelState {
                     },
                     String::from("Import and save sidecar"),
                 ],
+                selected: *selected,
+            }),
+            Self::MetadataEditor { selected, state } => Some(crate::ui::ActionPanelView {
+                title: String::from("Edit Metadata"),
+                hint: String::from("Type fields  Enter save/select  Backspace back"),
+                search_query: None,
+                options: state.options(),
                 selected: *selected,
             }),
             Self::AddDirectory { selected, input } => Some(crate::ui::ActionPanelView {
@@ -3049,6 +3111,106 @@ fn sorted_folder_paths(core: &TuneCore) -> Vec<PathBuf> {
     paths
 }
 
+fn metadata_editor_state_for_selection(core: &TuneCore) -> Option<MetadataEditorState> {
+    let entry = core.selected_browser_entry()?;
+    let target_paths = core.selected_paths_for_browser_selection();
+    if target_paths.is_empty() {
+        return None;
+    }
+
+    match entry.kind {
+        BrowserEntryKind::Track => {
+            let path = entry.path;
+            let metadata = library::metadata_snapshot_for_path(&path);
+            Some(MetadataEditorState {
+                selected_track_path: Some(path),
+                copy_target_label: String::from("selected track"),
+                copy_target_paths: target_paths,
+                title_input: metadata.title.unwrap_or_default(),
+                artist_input: metadata.artist.unwrap_or_default(),
+                album_input: metadata.album.unwrap_or_default(),
+                confirm_all_songs_cover_copy: false,
+            })
+        }
+        BrowserEntryKind::Folder => Some(MetadataEditorState {
+            selected_track_path: None,
+            copy_target_label: String::from("current folder"),
+            copy_target_paths: target_paths,
+            title_input: String::new(),
+            artist_input: String::new(),
+            album_input: String::new(),
+            confirm_all_songs_cover_copy: false,
+        }),
+        BrowserEntryKind::Playlist => Some(MetadataEditorState {
+            selected_track_path: None,
+            copy_target_label: String::from("current playlist"),
+            copy_target_paths: target_paths,
+            title_input: String::new(),
+            artist_input: String::new(),
+            album_input: String::new(),
+            confirm_all_songs_cover_copy: false,
+        }),
+        BrowserEntryKind::AllSongs => Some(MetadataEditorState {
+            selected_track_path: None,
+            copy_target_label: String::from("all songs"),
+            copy_target_paths: target_paths,
+            title_input: String::new(),
+            artist_input: String::new(),
+            album_input: String::new(),
+            confirm_all_songs_cover_copy: true,
+        }),
+        BrowserEntryKind::Back => None,
+    }
+}
+
+fn now_playing_cover_source_path(core: &TuneCore, audio: &dyn AudioEngine) -> Option<PathBuf> {
+    audio
+        .current_track()
+        .map(Path::to_path_buf)
+        .or_else(|| core.current_path().map(Path::to_path_buf))
+}
+
+fn copy_now_playing_cover_to_paths(
+    core: &mut TuneCore,
+    source_path: &Path,
+    targets: &[PathBuf],
+    target_label: &str,
+) {
+    let Some(image_data) = library::embedded_cover_art(source_path) else {
+        core.status = String::from("Now playing track has no embedded cover art");
+        core.dirty = true;
+        return;
+    };
+
+    let mut copied = 0usize;
+    let mut failed = 0usize;
+    let mut first_error = None;
+    for target in targets {
+        match library::write_embedded_cover_art(target, &image_data) {
+            Ok(()) => {
+                core.reload_track_metadata(target);
+                copied += 1;
+            }
+            Err(err) => {
+                failed += 1;
+                if first_error.is_none() {
+                    first_error = Some(err.to_string());
+                }
+            }
+        }
+    }
+
+    core.status = if failed == 0 {
+        format!("Copied cover art to {copied} {target_label}")
+    } else {
+        format!(
+            "Copied cover art to {copied} {target_label} ({failed} failed: {})",
+            first_error.unwrap_or_else(|| String::from("unknown error"))
+        )
+    };
+    core.dirty = true;
+}
+
 fn audio_output_options(audio: &dyn AudioEngine) -> Vec<String> {
     let selected = audio.selected_output_device();
     let outputs = audio.available_outputs();
@@ -3265,6 +3427,7 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
         | ActionPanelState::OnlineDelaySettings { selected }
         | ActionPanelState::ThemeSettings { selected }
         | ActionPanelState::LyricsImportTxt { selected, .. }
+        | ActionPanelState::MetadataEditor { selected, .. }
         | ActionPanelState::AddDirectory { selected, .. }
         | ActionPanelState::RemoveDirectory { selected } => advance(selected),
         ActionPanelState::Closed => {}
@@ -3371,6 +3534,32 @@ fn handle_action_panel_input_with_recent(
         }
     }
 
+    if let ActionPanelState::MetadataEditor { selected, state } = panel
+        && state.selected_track_path.is_some()
+    {
+        let target = match *selected {
+            0 => Some(&mut state.title_input),
+            1 => Some(&mut state.artist_input),
+            2 => Some(&mut state.album_input),
+            _ => None,
+        };
+        if let Some(target) = target {
+            match key {
+                KeyCode::Char(ch) => {
+                    target.push(ch);
+                    core.dirty = true;
+                    return;
+                }
+                KeyCode::Backspace if !target.is_empty() => {
+                    target.pop();
+                    core.dirty = true;
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+
     let option_count = match panel {
         ActionPanelState::Closed => 0,
         ActionPanelState::Root { query, .. } => {
@@ -3388,6 +3577,7 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::OnlineDelaySettings { .. } => 6,
         ActionPanelState::ThemeSettings { .. } => 6,
         ActionPanelState::LyricsImportTxt { .. } => 3,
+        ActionPanelState::MetadataEditor { state, .. } => state.options().len(),
         ActionPanelState::AddDirectory { .. } => 2,
         ActionPanelState::RemoveDirectory { .. } => sorted_folder_paths(core).len().max(1),
     };
@@ -3491,6 +3681,13 @@ fn handle_action_panel_input_with_recent(
                 ActionPanelState::LyricsImportTxt { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
                         RootActionId::ImportTxtToLyrics,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::MetadataEditor { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::MetadataEditor,
                         recent_root_actions,
                     ),
                     query: String::new(),
@@ -3618,6 +3815,18 @@ fn handle_action_panel_input_with_recent(
                         core.status = String::from("Clearing listen history...");
                         core.dirty = true;
                         panel.close();
+                    }
+                    RootActionId::MetadataEditor => {
+                        let Some(state) = metadata_editor_state_for_selection(core) else {
+                            core.status = String::from(
+                                "Select a track, folder, playlist, or [ALL] entry first",
+                            );
+                            core.dirty = true;
+                            panel.close();
+                            return;
+                        };
+                        *panel = ActionPanelState::MetadataEditor { selected: 0, state };
+                        core.dirty = true;
                     }
                     RootActionId::MinimizeToTray => {
                         minimize_to_tray();
@@ -3917,6 +4126,109 @@ fn handle_action_panel_input_with_recent(
                 core.import_txt_to_lyrics(Path::new(trimmed_path), interval);
                 panel.close();
             }
+            ActionPanelState::MetadataEditor { selected, state } => match selected {
+                0 if state.selected_track_path.is_none() => {
+                    if state.confirm_all_songs_cover_copy {
+                        let mut next_state = state.clone();
+                        next_state.confirm_all_songs_cover_copy = false;
+                        *panel = ActionPanelState::MetadataEditor {
+                            selected: 0,
+                            state: next_state,
+                        };
+                        core.status = String::from(
+                            "Press Enter again to confirm copying cover art to all songs",
+                        );
+                        core.dirty = true;
+                        return;
+                    }
+
+                    let Some(source_path) = now_playing_cover_source_path(core, &*audio) else {
+                        core.status = String::from("No track is currently playing");
+                        core.dirty = true;
+                        return;
+                    };
+
+                    copy_now_playing_cover_to_paths(
+                        core,
+                        &source_path,
+                        &state.copy_target_paths,
+                        &state.copy_target_label,
+                    );
+                    panel.close();
+                }
+                1 if state.selected_track_path.is_none() => {
+                    *panel = ActionPanelState::Root {
+                        selected: root_selected_for_action(
+                            RootActionId::MetadataEditor,
+                            recent_root_actions,
+                        ),
+                        query: String::new(),
+                    };
+                    core.dirty = true;
+                }
+                3 => {
+                    let Some(path) = state.selected_track_path.as_ref() else {
+                        return;
+                    };
+                    match library::write_embedded_metadata(path, &state.metadata_edit()) {
+                        Ok(()) => {
+                            core.reload_track_metadata(path);
+                            core.status = String::from("Metadata saved");
+                            core.dirty = true;
+                        }
+                        Err(err) => {
+                            core.status = format!("Metadata save failed: {err:#}");
+                            core.dirty = true;
+                            return;
+                        }
+                    }
+                    panel.close();
+                }
+                4 => {
+                    let Some(path) = state.selected_track_path.as_ref() else {
+                        return;
+                    };
+                    match library::clear_embedded_metadata(path) {
+                        Ok(()) => {
+                            core.reload_track_metadata(path);
+                            core.status = String::from("Metadata cleared");
+                            core.dirty = true;
+                        }
+                        Err(err) => {
+                            core.status = format!("Metadata clear failed: {err:#}");
+                            core.dirty = true;
+                            return;
+                        }
+                    }
+                    panel.close();
+                }
+                5 => {
+                    let Some(source_path) = now_playing_cover_source_path(core, &*audio) else {
+                        core.status = String::from("No track is currently playing");
+                        core.dirty = true;
+                        return;
+                    };
+
+                    copy_now_playing_cover_to_paths(
+                        core,
+                        &source_path,
+                        &state.copy_target_paths,
+                        &state.copy_target_label,
+                    );
+                    panel.close();
+                }
+                6 => {
+                    *panel = ActionPanelState::Root {
+                        selected: root_selected_for_action(
+                            RootActionId::MetadataEditor,
+                            recent_root_actions,
+                        ),
+                        query: String::new(),
+                    };
+                    core.dirty = true;
+                }
+                _ => {}
+            },
             ActionPanelState::AddDirectory { selected, input } => {
                 if selected == 1 {
                     let trimmed = input.trim();
@@ -4742,6 +5054,95 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn metadata_editor_action_requires_selectable_entry() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.browser_entries = vec![crate::core::BrowserEntry {
+            kind: crate::core::BrowserEntryKind::Back,
+            path: PathBuf::new(),
+            label: String::from("[..] Back"),
+        }];
+        core.selected_browser = 0;
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Root {
+            selected: 15,
+            query: String::new(),
+        };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert_eq!(
+            core.status,
+            "Select a track, folder, playlist, or [ALL] entry first"
+        );
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn metadata_editor_action_opens_for_selected_track() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.browser_entries = vec![crate::core::BrowserEntry {
+            kind: crate::core::BrowserEntryKind::Track,
+            path: PathBuf::from("song.mp3"),
+            label: String::from("song"),
+        }];
+        core.selected_browser = 0;
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Root {
+            selected: 15,
+            query: String::new(),
+        };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        match panel {
+            ActionPanelState::MetadataEditor {
+                selected: 0,
+                ref state,
+            } => {
+                let options = state.options();
+                assert_eq!(options.len(), 7);
+                assert_eq!(options[5], "Copy now playing cover art to selected track");
+            }
+            _ => panic!("expected metadata editor"),
+        }
+    }
+
+    #[test]
+    fn metadata_editor_all_songs_copy_requires_confirmation() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::MetadataEditor {
+            selected: 0,
+            state: MetadataEditorState {
+                selected_track_path: None,
+                copy_target_label: String::from("all songs"),
+                copy_target_paths: vec![PathBuf::from("song.mp3")],
+                title_input: String::new(),
+                artist_input: String::new(),
+                album_input: String::new(),
+                confirm_all_songs_cover_copy: true,
+            },
+        };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert_eq!(
+            core.status,
+            "Press Enter again to confirm copying cover art to all songs"
+        );
+        assert!(matches!(
+            panel,
+            ActionPanelState::MetadataEditor {
+                selected: 0,
+                state: MetadataEditorState {
+                    confirm_all_songs_cover_copy: false,
+                    ..
+                }
+            }
+        ));
     }
 
     #[test]

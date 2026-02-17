@@ -22,6 +22,7 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Lyrics sidecars are stored in the config dir lyrics folder (`$XDG_CONFIG_HOME/tunetui/lyrics/` on Linux, `%USERPROFILE%\.config\tunetui\lyrics\` on Windows)
 - Split-pane lyrics editor in TUI (`Ctrl+e` toggle in Lyrics tab) with per-line timestamp stamping
 - `.txt` to `.lrc` import with fixed-interval timestamp seeding from actions panel
+- Metadata editor in actions panel for selected track embedded tags (title/artist/album) with save/clear and cover-art copy flows (selected track, current folder, current playlist, or all songs with confirmation)
 - If no lyrics exist, Lyrics tab prompts before creating a new sidecar `.lrc`
 - Sidecar-first source precedence (`.lrc` wins over embedded tags when both exist)
 - Audio driver recovery and output speaker selection from actions panel
@@ -61,6 +62,7 @@ If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI aut
 - `s`: save state
 - `/`: actions panel
 - `Type/Backspace` (actions panel): filter actions by search
+- `/` -> `Edit selected track metadata`: edit selected track title/artist/album tags and copy now-playing cover art to selected/folder/playlist/all songs
 - `Tab`: cycle header sections (Library/Lyrics/Stats/Online)
 - `Left/Right` (Stats tab): move filter focus
 - `Enter` (Stats tab): cycle focused range/sort filter

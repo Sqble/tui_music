@@ -1,4 +1,11 @@
 use crate::model::Track;
+use anyhow::{Context, Result};
+use lofty::config::WriteOptions;
+use lofty::file::{AudioFile, TaggedFileExt};
+use lofty::picture::{Picture, PictureType};
+use lofty::prelude::ItemKey;
+use lofty::probe::Probe;
+use lofty::tag::{Tag, TagType};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
@@ -17,6 +24,20 @@ struct TrackMetadata {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetadataEdit {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetadataSnapshot {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
 }
 
 pub fn scan_folder(root: &Path) -> Vec<Track> {
@@ -65,6 +86,136 @@ fn metadata_for(path: &Path) -> TrackMetadata {
         return symphonia_meta;
     }
     id3v2_fallback(&stripped)
+}
+
+pub fn metadata_snapshot_for_path(path: &Path) -> MetadataSnapshot {
+    let metadata = metadata_for(path);
+    MetadataSnapshot {
+        title: metadata.title,
+        artist: metadata.artist,
+        album: metadata.album,
+    }
+}
+
+pub fn write_embedded_metadata(path: &Path, edit: &MetadataEdit) -> Result<()> {
+    validate_tag_edit_target(path)?;
+    let stripped = crate::config::strip_windows_verbatim_prefix(path);
+
+    let mut tagged_file = Probe::open(&stripped)
+        .with_context(|| format!("failed to open {}", stripped.display()))?
+        .read()
+        .with_context(|| format!("failed to parse tags for {}", stripped.display()))?;
+
+    let tag_type = preferred_tag_type_for_path(&stripped).unwrap_or(tagged_file.primary_tag_type());
+
+    if tagged_file.tag_mut(tag_type).is_none() {
+        tagged_file.insert_tag(Tag::new(tag_type));
+    }
+
+    let tag = tagged_file
+        .tag_mut(tag_type)
+        .context("failed to access primary tag")?;
+
+    apply_metadata_edit_to_tag(tag, edit);
+
+    tagged_file
+        .save_to_path(&stripped, WriteOptions::default())
+        .with_context(|| format!("failed to write metadata for {}", stripped.display()))
+}
+
+pub fn clear_embedded_metadata(path: &Path) -> Result<()> {
+    write_embedded_metadata(path, &MetadataEdit::default())
+}
+
+pub fn write_embedded_cover_art(path: &Path, image_data: &[u8]) -> Result<()> {
+    validate_tag_edit_target(path)?;
+    let stripped = crate::config::strip_windows_verbatim_prefix(path);
+
+    let mut tagged_file = Probe::open(&stripped)
+        .with_context(|| format!("failed to open {}", stripped.display()))?
+        .read()
+        .with_context(|| format!("failed to parse tags for {}", stripped.display()))?;
+
+    let tag_type = preferred_tag_type_for_path(&stripped).unwrap_or(tagged_file.primary_tag_type());
+
+    if tagged_file.tag_mut(tag_type).is_none() {
+        tagged_file.insert_tag(Tag::new(tag_type));
+    }
+
+    let tag = tagged_file
+        .tag_mut(tag_type)
+        .context("failed to access primary tag")?;
+    replace_cover_picture(tag, image_data)?;
+
+    tagged_file
+        .save_to_path(&stripped, WriteOptions::default())
+        .with_context(|| format!("failed to write cover art for {}", stripped.display()))
+}
+
+fn replace_cover_picture(tag: &mut Tag, image_data: &[u8]) -> Result<()> {
+    let mut cursor = std::io::Cursor::new(image_data);
+    let mut picture = Picture::from_reader(&mut cursor)
+        .context("cover art bytes are not in a supported image format")?;
+    picture.set_pic_type(PictureType::CoverFront);
+
+    while !tag.pictures().is_empty() {
+        let _ = tag.remove_picture(0);
+    }
+    tag.push_picture(picture);
+    Ok(())
+}
+
+fn apply_metadata_edit_to_tag(tag: &mut Tag, edit: &MetadataEdit) {
+    set_tag_text(tag, ItemKey::TrackTitle, edit.title.as_deref());
+    set_tag_text(tag, ItemKey::TrackArtist, edit.artist.as_deref());
+    set_tag_text(tag, ItemKey::AlbumTitle, edit.album.as_deref());
+}
+
+fn set_tag_text(tag: &mut Tag, key: ItemKey, value: Option<&str>) {
+    let cleaned = value.and_then(clean_metadata_value);
+    tag.remove_key(&key);
+    if let Some(text) = cleaned {
+        tag.insert_text(key, text);
+    }
+}
+
+fn clean_metadata_value(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn validate_tag_edit_target(path: &Path) -> Result<()> {
+    let stripped = crate::config::strip_windows_verbatim_prefix(path);
+    if !is_audio(&stripped) {
+        anyhow::bail!("unsupported audio format for metadata editing")
+    }
+
+    if !stripped.exists() {
+        anyhow::bail!("track file not found")
+    }
+
+    if !stripped.is_file() {
+        anyhow::bail!("track path is not a file")
+    }
+
+    Ok(())
+}
+
+fn preferred_tag_type_for_path(path: &Path) -> Option<TagType> {
+    let ext = path.extension().and_then(OsStr::to_str)?;
+    if ext.eq_ignore_ascii_case("mp3") {
+        return Some(TagType::Id3v2);
+    }
+    if ext.eq_ignore_ascii_case("flac")
+        || ext.eq_ignore_ascii_case("ogg")
+        || ext.eq_ignore_ascii_case("opus")
+    {
+        return Some(TagType::VorbisComments);
+    }
+    if ext.eq_ignore_ascii_case("m4a") {
+        return Some(TagType::Mp4Ilst);
+    }
+    None
 }
 
 pub fn embedded_cover_art(path: &Path) -> Option<Vec<u8>> {
@@ -526,5 +677,40 @@ mod tests {
         assert_eq!(tracks[0].title, "a");
         assert_eq!(tracks[0].artist, None);
         assert_eq!(tracks[0].album, None);
+    }
+
+    #[test]
+    fn metadata_value_cleaning_trims_and_drops_empty() {
+        assert_eq!(
+            clean_metadata_value("  hello  "),
+            Some(String::from("hello"))
+        );
+        assert_eq!(clean_metadata_value("   \t  "), None);
+    }
+
+    #[test]
+    fn metadata_edit_rejects_non_audio_paths() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        fs::write(&file, b"x").expect("write text");
+
+        let err = write_embedded_metadata(&file, &MetadataEdit::default()).expect_err("error");
+        assert!(
+            err.to_string().contains("unsupported audio format"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn cover_edit_rejects_non_audio_paths() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        fs::write(&file, b"x").expect("write text");
+
+        let err = write_embedded_cover_art(&file, b"not-image").expect_err("error");
+        assert!(
+            err.to_string().contains("unsupported audio format"),
+            "unexpected error: {err:#}"
+        );
     }
 }

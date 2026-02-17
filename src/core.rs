@@ -1036,6 +1036,21 @@ impl TuneCore {
             .map(|track| track.path.as_path())
     }
 
+    pub fn selected_browser_track_path(&self) -> Option<PathBuf> {
+        self.browser_entries
+            .get(self.selected_browser)
+            .filter(|entry| entry.kind == BrowserEntryKind::Track)
+            .map(|entry| entry.path.clone())
+    }
+
+    pub fn selected_browser_entry(&self) -> Option<BrowserEntry> {
+        self.browser_entries.get(self.selected_browser).cloned()
+    }
+
+    pub fn selected_paths_for_browser_selection(&self) -> Vec<PathBuf> {
+        self.selected_paths_for_playlist_action()
+    }
+
     pub fn queue_position_for_path(&self, path: &Path) -> Option<usize> {
         self.queue.iter().position(|idx| {
             self.tracks
@@ -1077,6 +1092,51 @@ impl TuneCore {
             .and_then(|track| library::duration_seconds(&track.path));
         self.duration_lookup.borrow_mut().insert(key, duration);
         duration
+    }
+
+    pub fn reload_track_metadata(&mut self, path: &Path) {
+        let Some(idx) = self.track_index(path) else {
+            return;
+        };
+        let key = normalized_path_key(path);
+
+        let metadata = library::metadata_snapshot_for_path(path);
+        let fallback_title = path
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let title = metadata
+            .title
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(fallback_title);
+
+        let title_changed = self
+            .tracks
+            .get(idx)
+            .map(|track| track.title != title)
+            .unwrap_or(false);
+
+        if let Some(track) = self.tracks.get_mut(idx) {
+            track.title = title;
+            track.artist = metadata.artist;
+            track.album = metadata.album;
+        }
+
+        if title_changed && self.queue_matches_main_library_order() {
+            let current_path = self.current_path().map(Path::to_path_buf);
+            self.queue = self.metadata_sorted_library_queue();
+            self.rebuild_shuffle_order();
+            self.current_queue_index = current_path.and_then(|track_path| {
+                self.queue
+                    .iter()
+                    .position(|track_idx| path_eq(&self.tracks[*track_idx].path, &track_path))
+            });
+        }
+
+        self.cover_art_lookup.borrow_mut().remove(&key);
+        self.refresh_browser_entries();
+        self.dirty = true;
     }
 
     pub fn cover_art_for_path(&self, path: &Path) -> Option<Arc<[u8]>> {
@@ -1227,6 +1287,13 @@ impl TuneCore {
         self.queue = self.metadata_sorted_library_queue();
         self.rebuild_shuffle_order();
         self.dirty = true;
+    }
+
+    fn queue_matches_main_library_order(&self) -> bool {
+        if self.queue.len() != self.tracks.len() {
+            return false;
+        }
+        self.queue == self.metadata_sorted_library_queue()
     }
 
     fn metadata_sorted_library_queue(&self) -> Vec<usize> {
@@ -1597,6 +1664,25 @@ mod tests {
         core.cycle_header_section();
         core.cycle_header_section();
         assert_eq!(core.header_section, HeaderSection::Library);
+    }
+
+    #[test]
+    fn reload_track_metadata_falls_back_to_file_stem_for_missing_tags() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![Track {
+            path: PathBuf::from("new-title.mp3"),
+            title: String::from("Old"),
+            artist: Some(String::from("Artist")),
+            album: Some(String::from("Album")),
+        }];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.queue = vec![0];
+
+        core.reload_track_metadata(Path::new("new-title.mp3"));
+
+        assert_eq!(core.tracks[0].title, "new-title");
+        assert_eq!(core.tracks[0].artist, None);
+        assert_eq!(core.tracks[0].album, None);
     }
 
     #[test]
