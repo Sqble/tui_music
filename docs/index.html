@@ -1,0 +1,476 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TuneTUI - Docs</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <button class="mobile-toggle" id="sidebarToggle" aria-label="Toggle sidebar">
+        <span></span>
+        <span></span>
+        <span></span>
+    </button>
+
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <span class="prompt">$</span><span class="path">~/docs</span><span class="cursor">_</span>
+        </div>
+        <nav class="nav-menu">
+            <a href="#landing" class="nav-item active" data-section="landing">
+                <span class="prompt">›</span> Home
+            </a>
+            <a href="#getting-started" class="nav-item" data-section="getting-started">
+                <span class="prompt">›</span> Getting Started
+            </a>
+            <a href="#controls" class="nav-item" data-section="controls">
+                <span class="prompt">›</span> Controls
+            </a>
+            <a href="#configuration" class="nav-item" data-section="configuration">
+                <span class="prompt">›</span> Configuration
+            </a>
+            <a href="#online-sync" class="nav-item" data-section="online-sync">
+                <span class="prompt">›</span> Online Sync
+            </a>
+            <a href="#hosting" class="nav-item" data-section="hosting">
+                <span class="prompt">›</span> Hosting
+            </a>
+            <a href="#troubleshooting" class="nav-item" data-section="troubleshooting">
+                <span class="prompt">›</span> Troubleshooting
+            </a>
+            <div class="nav-divider"></div>
+            <a href="https://github.com/Sqble/tui_music" target="_blank" class="nav-item external">
+                <span class="prompt">⇧</span> GitHub
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <span class="version">v0.1.0</span>
+        </div>
+    </aside>
+
+    <main class="content">
+        <section id="landing" class="docs-section active">
+            <div class="hero">
+                <div class="logo">
+                    <pre><code><span class="cm">  ________  ___   ________________  ______</span>
+<span class="cm"> /_  __/ / / / | / / ____/_  __/ / / /  _/</span>
+<span class="cm">  / / / / / /  |/ / __/   / / / / / // / </span>
+<span class="cm"> / / / /_/ / /|  / /___  / / / /_/ // /   </span>
+<span class="cm">/_/  \____/_/ |_/_____/ /_/  \____/___/   </span>
+
+<span class="str">tunetui.online</span></code></pre>
+                </div>
+                <p class="tagline">Performance-oriented terminal music player</p>
+                <div class="cta-group">
+                    <a href="https://github.com/Sqble/tui_music/releases/download/alpha-3/tune.exe" class="btn btn-primary">
+                        <span class="btn-arrow btn-arrow-download">▼</span> Download .exe
+                    </a>
+                    <a href="#getting-started" class="btn btn-secondary">
+                        <span class="btn-arrow">→</span> Read Docs
+                    </a>
+                    <a href="https://github.com/Sqble/tui_music" target="_blank" rel="noopener noreferrer" class="btn btn-secondary">
+                        <span class="btn-arrow">⇧</span> View on GitHub
+                    </a>
+                </div>
+            </div>
+
+            <p class="hero-overview">
+                TuneTUI uses a folder-based library—add your music directories and browse as you would in a file manager. Listen together with friends over the public server at tunetui.online. Stats tracking records your listening history, and lyrics stay in sync with playback.
+            </p>
+            <footer class="section-footer">
+                <span></span>
+                <a href="#getting-started" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">→</span> Next: Getting Started
+                </a>
+            </footer>
+        </section>
+
+        <section id="getting-started" class="docs-section">
+            <h1><span class="prompt">#</span> Getting Started</h1>
+            
+            <h2><span class="prompt">›</span> Quick Start (Windows)</h2>
+            <p>Download <code>tune.exe</code> from the <a href="https://github.com/Sqble/tui_music/releases" target="_blank" rel="noopener noreferrer">releases page</a> and run it. No installation required.</p>
+
+            <h2><span class="prompt">›</span> Installing on Linux and macOS</h2>
+            <p>TuneTUI is a Rust project. Install Rust via <a href="https://rustup.rs" target="_blank" rel="noopener noreferrer">rustup</a>, then clone and build:</p>
+            <pre><code>git clone https://github.com/Sqble/tui_music.git
+cd tui_music
+cargo build --release</code></pre>
+            <p>The binary will be at <code>target/release/tune</code>. Add it to your PATH or run it directly.</p>
+            <p>To install system-wide: <code>cargo install --path .</code></p>
+            <p>Check the <a href="https://github.com/Sqble/tui_music/releases" target="_blank" rel="noopener noreferrer">releases page</a> for prebuilt Linux or macOS binaries when available.</p>
+
+            <h2><span class="prompt">›</span> Adding Your Music</h2>
+            <ol>
+                <li>Press <kbd>Tab</kbd> to switch to the <strong>Library</strong> tab</li>
+                <li>Press <kbd>/</kbd> to open the actions panel</li>
+                <li>Select <strong>"Add directory"</strong></li>
+                <li>Choose your music folder (or type the path)</li>
+            </ol>
+
+            <h2><span class="prompt">›</span> Basic Playback</h2>
+            <ul>
+                <li><kbd>↑</kbd> / <kbd>↓</kbd> — Navigate through your tracks</li>
+                <li><kbd>Enter</kbd> — Play the selected track</li>
+                <li><kbd>Space</kbd> — Pause / Resume</li>
+                <li><kbd>n</kbd> — Next track</li>
+                <li><kbd>b</kbd> — Previous track</li>
+            </ul>
+
+            <h2><span class="prompt">›</span> Want to Listen with Friends?</h2>
+            <p>TuneTUI supports real-time listen-together via the Online tab. The public server at <strong>tunetui.online</strong> is already running and available for anyone to use.</p>
+            <ol>
+                <li>Press <kbd>Tab</kbd> until you reach the <strong>Online</strong> tab</li>
+                <li>Press <kbd>h</kbd> to host a room, or <kbd>j</kbd> to join</li>
+                <li>For joining, enter <code>tunetui.online</code> as the server address</li>
+                <li>Share the invite code with friends!</li>
+            </ol>
+            <div class="callout callout-info">
+                <span class="prompt">$</span> First time? You'll be prompted to enter a nickname. This is saved for next time.
+            </div>
+
+            <h2><span class="prompt">›</span> SSH Usage</h2>
+            <p>If running over SSH, TuneTUI automatically sets <code>TERM=xterm-256color</code> when needed. For clipboard support over SSH, ensure your terminal allows OSC 52 escape sequences.</p>
+            <footer class="section-footer">
+                <a href="#landing" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">←</span> Back: Home
+                </a>
+                <a href="#controls" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">→</span> Next: Controls
+                </a>
+            </footer>
+        </section>
+
+        <section id="controls" class="docs-section">
+            <h1><span class="prompt">#</span> Controls</h1>
+            
+            <h2><span class="prompt">›</span> Navigation</h2>
+            <div class="keybindings">
+                <div class="keybind"><kbd>↑</kbd> <kbd>↓</kbd> <span>Select track up/down</span></div>
+                <div class="keybind"><kbd>Enter</kbd> <span>Play selected track</span></div>
+                <div class="keybind"><kbd>Backspace</kbd> <span>Go back in library (folder navigation)</span></div>
+                <div class="keybind"><kbd>Tab</kbd> <span>Cycle through tabs (Library → Lyrics → Stats → Online)</span></div>
+            </div>
+
+            <h2><span class="prompt">›</span> Playback</h2>
+            <div class="keybindings">
+                <div class="keybind"><kbd>Space</kbd> <span>Pause / Resume</span></div>
+                <div class="keybind"><kbd>n</kbd> <span>Next track</span></div>
+                <div class="keybind"><kbd>b</kbd> <span>Previous track</span></div>
+                <div class="keybind"><kbd>d</kbd> <span>Seek forward (default 10s)</span></div>
+                <div class="keybind"><kbd>a</kbd> <span>Seek backward (default 10s)</span></div>
+                <div class="keybind"><kbd>m</kbd> <span>Cycle playback mode (Normal → Shuffle → Loop Playlist → Loop Single)</span></div>
+                <div class="keybind"><kbd>=</kbd> <kbd>+</kbd> <span>Volume up</span></div>
+                <div class="keybind"><kbd>-</kbd> <kbd>_</kbd> <span>Volume down</span></div>
+                <div class="keybind"><kbd>Shift</kbd>+<kbd>=</kbd> <kbd>+</kbd> <span>Fine volume adjust (smaller increments)</span></div>
+            </div>
+
+            <h2><span class="prompt">›</span> Library Actions</h2>
+            <div class="keybindings">
+                <div class="keybind"><kbd>/</kbd> <span>Open actions panel (search & commands)</span></div>
+                <div class="keybind"><kbd>r</kbd> <span>Rescan music folders</span></div>
+                <div class="keybind"><kbd>s</kbd> <span>Save current state</span></div>
+                <div class="keybind"><kbd>t</kbd> <span>Minimize to system tray (Windows only)</span></div>
+            </div>
+
+            <h2><span class="prompt">›</span> Actions Panel</h2>
+            <p>Press <kbd>/</kbd> to open. Type to filter actions. Use <kbd>↑</kbd> / <kbd>↓</kbd> to navigate, <kbd>Enter</kbd> to select.</p>
+            <div class="keybindings">
+                <div class="keybind"><kbd>Enter</kbd> <span>Execute selected action</span></div>
+                <div class="keybind"><kbd>Esc</kbd> <span>Close actions panel</span></div>
+                <div class="keybind"><kbd>Type</kbd> <span>Filter actions by text</span></div>
+                <div class="keybind"><kbd>Backspace</kbd> <span>Clear filter</span></div>
+            </div>
+
+            <h2><span class="prompt">›</span> Lyrics Tab</h2>
+            <div class="keybindings">
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>e</kbd> <span>Toggle lyrics editor mode</span></div>
+                <div class="keybind"><kbd>↑</kbd> <kbd>↓</kbd> <span>Navigate lyric lines</span></div>
+                <div class="keybind"><kbd>Enter</kbd> <span>Insert new line after selection (editor mode)</span></div>
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>t</kbd> <span>Timestamp current line with playback position (editor mode)</span></div>
+            </div>
+
+            <h2><span class="prompt">›</span> Stats Tab</h2>
+            <div class="keybindings">
+                <div class="keybind"><kbd>←</kbd> <kbd>→</kbd> <span>Move filter focus (range/sort)</span></div>
+                <div class="keybind"><kbd>Enter</kbd> <span>Cycle focused filter</span></div>
+                <div class="keybind"><kbd>Type</kbd> <span>Live filter by artist/album/search</span></div>
+                <div class="keybind"><kbd>Backspace</kbd> <span>Clear filter</span></div>
+                <div class="keybind"><kbd>Shift</kbd>+<kbd>↑</kbd> <span>Jump back to top filters</span></div>
+            </div>
+
+            <h2><span class="prompt">›</span> Online Tab</h2>
+            <div class="keybindings">
+                <div class="keybind"><kbd>l</kbd> <span>Leave current room</span></div>
+                <div class="keybind"><kbd>o</kbd> <span>Toggle room mode — host only (collaborative / host-only)</span></div>
+                <div class="keybind"><kbd>q</kbd> <span>Cycle stream quality — host only (Lossless / Balanced)</span></div>
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>s</kbd> <span>Add selected to shared queue (Library tab only)</span></div>
+            </div>
+            <div class="callout callout-warning">
+                <span class="prompt">!</span> <strong>Host-only mode:</strong> In this mode, listeners cannot control playback. Only the host can play/pause/skip.
+            </div>
+
+            <h2><span class="prompt">›</span> Quitting</h2>
+            <div class="keybindings">
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>c</kbd> <span>Quit TuneTUI</span></div>
+            </div>
+            <footer class="section-footer">
+                <a href="#getting-started" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">←</span> Back: Getting Started
+                </a>
+                <a href="#configuration" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">→</span> Next: Configuration
+                </a>
+            </footer>
+        </section>
+
+        <section id="configuration" class="docs-section">
+            <h1><span class="prompt">#</span> Configuration</h1>
+            
+            <h2><span class="prompt">›</span> Config Directory</h2>
+            <ul>
+                <li><strong>Linux:</strong> <code>$XDG_CONFIG_HOME/tunetui/</code> (defaults to <code>~/.config/tunetui/</code>)</li>
+                <li><strong>Windows:</strong> <code>%USERPROFILE%\.config\tunetui\</code></li>
+                <li><strong>Override:</strong> Set <code>TUNETUI_CONFIG_DIR</code> environment variable</li>
+            </ul>
+
+            <h2><span class="prompt">›</span> Files</h2>
+            <ul>
+                <li><code>state.json</code> — Playback state, library folders, playlists, settings</li>
+                <li><code>stats.json</code> — Listen history and statistics</li>
+                <li><code>lyrics/</code> — LRC sidecar files (one per track)</li>
+            </ul>
+
+            <h2><span class="prompt">›</span> Playback Settings</h2>
+            <p>Open actions panel (<kbd>/</kbd>) → <strong>"Playback settings"</strong></p>
+            <ul>
+                <li><strong>Loudness normalization</strong> — Normalize track volumes</li>
+                <li><strong>Crossfade</strong> — Smooth transitions between tracks</li>
+                <li><strong>Scrub length</strong> — How far to seek with a/d keys (5s/10s/15s/30s/1m)</li>
+                <li><strong>Stats tracking</strong> — Enable/disable listen history</li>
+                <li><strong>Top songs rows</strong> — How many rows to show in stats charts</li>
+                <li><strong>Missing cover fallback</strong> — Template for tracks without album art</li>
+                <li><strong>Online nickname</strong> — Your display name for online rooms</li>
+                <li><strong>Online sync delay</strong> — Manual delay, auto-ping, recalibrate, sync correction threshold</li>
+            </ul>
+
+            <h2><span class="prompt">›</span> Themes</h2>
+            <p>Available themes (actions panel → Playback settings → Theme):</p>
+            <ul>
+                <li>Dark (default)</li>
+                <li>Pitch Black</li>
+                <li>Galaxy</li>
+                <li>Matrix</li>
+                <li>Demonic</li>
+                <li>Cotton Candy</li>
+            </ul>
+
+            <h2><span class="prompt">›</span> Audio Output</h2>
+            <p>Select your audio output device via actions panel → <strong>"Output speaker"</strong>. The selection persists across launches.</p>
+
+            <h2><span class="prompt">›</span> Lyrics</h2>
+            <p>TuneTUI looks for lyrics in this order:</p>
+            <ol>
+                <li><code>.lrc</code> sidecar file in the config lyrics folder</li>
+                <li>Embedded lyrics in audio file metadata</li>
+            </ol>
+            <p>Sidecar files are named based on track path and stored in <code>lyrics/</code>. If no lyrics exist, the Lyrics tab offers to create a new sidecar.</p>
+            <p>To import plain <code>.txt</code> lyrics: actions panel → <strong>"Import .txt to .lrc"</strong></p>
+
+            <h2><span class="prompt">›</span> Metadata Editor</h2>
+            <p>Actions panel → <strong>"Edit selected track metadata"</strong> to edit:</p>
+            <ul>
+                <li>Title</li>
+                <li>Artist</li>
+                <li>Album</li>
+            </ul>
+            <p>You can also copy now-playing cover art to selected track, current folder, current playlist, or all songs.</p>
+            <footer class="section-footer">
+                <a href="#controls" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">←</span> Back: Controls
+                </a>
+                <a href="#online-sync" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">→</span> Next: Online Sync
+                </a>
+            </footer>
+        </section>
+
+        <section id="online-sync" class="docs-section">
+            <h1><span class="prompt">#</span> Online Sync</h1>
+            
+            <h2><span class="prompt">›</span> Using the Public Server</h2>
+            <p>The server at <strong>tunetui.online</strong> is already running and available for anyone to use. No setup required.</p>
+
+            <h2><span class="prompt">›</span> Hosting a Room</h2>
+            <ol>
+                <li>Press <kbd>Tab</kbd> to reach the <strong>Online</strong> tab</li>
+                <li>If not connected to a server, enter <code>tunetui.online</code> (or your own server)</li>
+                <li>Enter a room name</li>
+                <li>Optional: Set a password (lock icon in directory = password protected)</li>
+                <li>Friends connect to the same server to see your room in the directory</li>
+            </ol>
+
+            <h2><span class="prompt">›</span> Joining a Room</h2>
+            <ol>
+                <li>Press <kbd>Tab</kbd> to reach the <strong>Online</strong> tab</li>
+                <li>If not connected to a server, enter <code>tunetui.online</code> (or your own server)</li>
+                <li>Browse the room directory for available rooms</li>
+                <li>Select a room to join</li>
+                <li>If password-protected, enter the password</li>
+            </ol>
+
+            <h2><span class="prompt">›</span> Room Modes</h2>
+            <ul>
+                <li><strong>Collaborative</strong> — Anyone can add music to the shared queue</li>
+                <li><strong>Host-only</strong> — Only the host controls playback; listeners are locked</li>
+            </ul>
+            <p>Press <kbd>o</kbd> to toggle between modes (host only).</p>
+
+            <h2><span class="prompt">›</span> Stream Quality</h2>
+            <ul>
+                <li><strong>Lossless</strong> — Direct audio streaming from host (best quality)</li>
+                <li><strong>Balanced</strong> — Opus 160kbps VBR (lower bandwidth, still great quality)</li>
+            </ul>
+            <p>Press <kbd>q</kbd> to cycle quality (host only).</p>
+
+            <h2><span class="prompt">›</span> Shared Queue</h2>
+            <ul>
+                <li>In Library tab, select tracks and press <kbd>Ctrl</kbd>+<kbd>s</kbd> to add to shared queue</li>
+                <li>You can add individual tracks, folders, playlists, or all songs</li>
+                <li>The queue is FIFO — tracks play in order and are removed when played</li>
+                <li>Auto-start when idle: the queue begins playing automatically</li>
+            </ul>
+
+            <h2><span class="prompt">›</span> Sync Mechanics</h2>
+            <p>TuneTUI syncs playback state (track, position, pause) every sub-second, including:</p>
+            <ul>
+                <li>Ping-compensated target position</li>
+                <li>Drift deadzone to avoid micro-seeks</li>
+                <li>Periodic ping RTT measurements</li>
+                <li>Automatic peer cleanup on disconnect</li>
+            </ul>
+
+            <h2><span class="prompt">›</span> File Streaming (Reverse Stream Safety)</h2>
+            <p>When hosts don't have a track that listeners have added to the queue, listeners can upload that track to the host. This is limited to:</p>
+            <ul>
+                <li>Only shared-queue items owned by that peer</li>
+                <li>Capped at 1 GiB per file</li>
+            </ul>
+
+            <h2><span class="prompt">›</span> Nickname</h2>
+            <p>Your nickname is saved in <code>state.json</code>. Set or change it via: actions panel → Playback settings → Online nickname</p>
+            <footer class="section-footer">
+                <a href="#configuration" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">←</span> Back: Configuration
+                </a>
+                <a href="#hosting" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">→</span> Next: Hosting
+                </a>
+            </footer>
+        </section>
+
+        <section id="hosting" class="docs-section">
+            <h1><span class="prompt">#</span> Hosting Your Own Server</h2>
+            
+            <h2><span class="prompt">›</span> CLI Options</h2>
+            <pre><code>tune --help</code></pre>
+            
+            <h3>Run only the home server (headless):</h3>
+            <pre><code>tune --host --ip 0.0.0.0</code></pre>
+            <p>This runs the server on port <strong>7878</strong> (default).</p>
+
+            <h3>Run server + TUI app together:</h3>
+            <pre><code>tune --host --app --ip 0.0.0.0</code></pre>
+            <p>This starts both the server and the client app in one process.</p>
+
+            <h3>Custom port:</h3>
+            <pre><code>tune --host --ip 0.0.0.0:9000</code></pre>
+
+            <h3>Custom room port range:</h3>
+            <pre><code>tune --host --ip 0.0.0.0 --room-port-range 9000-9100</code></pre>
+            <p>Default room range is <strong>9000-9100</strong>.</p>
+
+            <h3>Connect to your server from another machine:</h3>
+            <pre><code>tune --ip 192.168.1.100</code></pre>
+            <p>Replace with your server's IP or domain.</p>
+
+            <h2><span class="prompt">›</span> Port Requirements</h2>
+            <ul>
+                <li><strong>7878</strong> — Home server signaling port (TCP)</li>
+                <li><strong>9000-9100</strong> — Room transport ports (TCP, default range)</li>
+            </ul>
+            <div class="callout callout-warning">
+                <span class="prompt">!</span> <strong>Firewall:</strong> Open these ports in your firewall for remote connections.
+            </div>
+
+            <h2><span class="prompt">›</span> Room Port Range</h2>
+            <p>The range determines how many simultaneous rooms can exist. Default is 100 ports (9000-9100). Adjust with <code>--room-port-range</code> if you need more or fewer rooms.</p>
+            <footer class="section-footer">
+                <a href="#online-sync" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">←</span> Back: Online Sync
+                </a>
+                <a href="#troubleshooting" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">→</span> Next: Troubleshooting
+                </a>
+            </footer>
+        </section>
+
+        <section id="troubleshooting" class="docs-section">
+            <h1><span class="prompt">#</span> Troubleshooting</h1>
+            
+            <h2><span class="prompt">›</span> No Audio Output</h2>
+            <ol>
+                <li>Open actions panel (<kbd>/</kbd>)</li>
+                <li>Select <strong>"Output speaker"</strong></li>
+                <li>Choose a valid audio device</li>
+            </ol>
+
+            <h2><span class="prompt">›</span> Missing Album Art</h2>
+            <ol>
+                <li>Actions panel → Playback settings</li>
+                <li>Set <strong>"Missing cover fallback"</strong> to a template (default: Music Note)</li>
+            </ol>
+
+            <h2><span class="prompt">›</span> Lyrics Not Showing</h2>
+            <p>Check that:</p>
+            <ul>
+                <li><code>.lrc</code> sidecar exists in <code>lyrics/</code> folder in your config dir</li>
+                <li>Or lyrics are embedded in audio file metadata</li>
+            </ul>
+            <p>If neither exists, the Lyrics tab will offer to create a new sidecar file.</p>
+
+            <h2><span class="prompt">›</span> Connection Issues</h2>
+            <ul>
+                <li>Verify the server address is correct</li>
+                <li>Check that port <strong>7878</strong> (server) and <strong>9000-9100</strong> (rooms) are open</li>
+                <li>If using a password-protected room, ensure you're entering it correctly</li>
+            </ul>
+
+            <h2><span class="prompt">›</span> Stats Not Tracking</h2>
+            <ol>
+                <li>Actions panel → Playback settings</li>
+                <li>Ensure <strong>"Stats tracking"</strong> is enabled</li>
+            </ol>
+
+            <h2><span class="prompt">›</span> Clear Listen History</h2>
+            <p>Actions panel → <strong>"Clear listen history (backup)"</strong> — resets stats but saves a <code>.bak</code> snapshot first.</p>
+
+            <h2><span class="prompt">›</span> Debug Output</h2>
+            <pre><code>RUST_BACKTRACE=1 tune</code></pre>
+            <p>This provides detailed error information for troubleshooting.</p>
+
+            <h2><span class="prompt">›</span> Clipboard Over SSH</h2>
+            <p>If clipboard copy fails natively, TuneTUI falls back to OSC 52 terminal escape sequences. Ensure your terminal (and tmux/screen if used) allows clipboard passthrough.</p>
+            <footer class="section-footer">
+                <a href="#hosting" class="btn btn-secondary nav-page">
+                    <span class="btn-arrow">←</span> Back: Hosting
+                </a>
+                <span></span>
+            </footer>
+        </section>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>

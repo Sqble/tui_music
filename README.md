@@ -12,30 +12,75 @@ Performance-oriented terminal music player for desktop terminal workflows.
 - Queue scope follows where you start playback (folder, playlist, or All Songs)
 - Single-instance behavior on Windows (new launches focus/restore existing app)
 - Automatic track advance when a song ends, including while minimized to tray (Windows)
-- Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\state.json` on Windows)
-- Stats sidecar in config dir (`$XDG_CONFIG_HOME/tunetui/stats.json` on Linux, `%USERPROFILE%\\.config\\tunetui\\stats.json` on Windows) with metadata-keyed listen events/aggregates (normalized artist+title merge across local/online sources, with filename fallback when metadata is incomplete), automatic migration from legacy path-keyed totals, and provider-ID pinning for stable online mapping
-- Keyboard-driven TUI with actions panel search, recent actions (session-local, last 3), and overflow scrollbar
+- Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\.config\tunetui\state.json` on Windows)
+- Stats sidecar in config dir with metadata-keyed listen events/aggregates
+- Keyboard-driven TUI with actions panel search, recent actions, and overflow scrollbar
 - Right-aligned status tabs with `Tab` cycling (Library, Lyrics, Stats, Online)
-- Song Info panel renders now-playing embedded album art as a cached Unicode color raster, with configurable built-in fallback templates for tracks missing embedded art
-- Stats tab with totals, ASCII charts, configurable top songs rows (default 10 via Playback settings), and range-filtered recent listen log sized to panel space (looped track replays count as separate plays)
-- Lyrics tab with live line sync from `.lrc` sidecars or embedded lyric metadata
-- Lyrics sidecars are stored in the config dir lyrics folder (`$XDG_CONFIG_HOME/tunetui/lyrics/` on Linux, `%USERPROFILE%\.config\tunetui\lyrics\` on Windows)
-- Split-pane lyrics editor in TUI (`Ctrl+e` toggle in Lyrics tab) with per-line timestamp stamping
-- `.txt` to `.lrc` import with fixed-interval timestamp seeding from actions panel
-- Metadata editor in actions panel for selected track embedded tags (title/artist/album) with save/clear and cover-art copy flows (selected track, current folder, current playlist, or all songs with confirmation)
-- If no lyrics exist, Lyrics tab prompts before creating a new sidecar `.lrc`
-- Sidecar-first source precedence (`.lrc` wins over embedded tags when both exist)
-- Audio driver recovery and output speaker selection from actions panel
-- Selected output speaker persists across launches with fallback to default when unavailable
-- Volume level persists across launches in saved state
-- Playback settings in actions panel: loudness normalization, crossfade, scrub length cycle (5s/10s/15s/30s/1m), stats tracking toggle, top songs rows, missing-cover fallback template (Music Note), and themes (Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy)
-- Middle status area uses separate `Timeline` and `Control` panels (`Control` shows volume and scrub/adjust hints)
-- Actions panel includes "Clear listen history (backup)" to reset stats while preserving a `.bak` snapshot
-- Add directory from actions panel via typed path or external folder picker (PowerShell on Windows, zenity/kdialog on Linux)
-- Remove directory from actions panel
-- Online tab direct TCP host/client room sync: room-code handshake, host-only vs collaborative mode, shared queue updates (global FIFO consume), shared-queue auto-start when idle, last-player-or-host authority for end-of-song auto-advance, shared queue priority when local queue songs end, stop-at-end when shared queue is exhausted, sub-second periodic playback-state sync (track/position/pause plus metadata/provider ID for stats identity, including ping-compensated target position and a small drift deadzone to avoid micro-seeks, plus null-audio host fallback), periodic measured ping RTT updates, ping-timeout peer cleanup for abrupt disconnects, and bidirectional file streaming fallback (host->listener and host<-listener over the same session socket): Lossless streams source bytes directly, while Balanced streams are packetized and frame-streamed as Opus stereo at 160 kbps VBR (decoded to WAV on receipt for playback); in host-only mode, non-host peers are immediately forced into listen-only playback lock (local play/pause/seek/skip/mode changes are blocked)
-- Invite code is password-encrypted with checksum validation (secure `T2` format); host sets password first, joiner enters invite then password
-- Auto-save on state-changing actions (folders, playlists, playback settings, theme, mode, output)
+- Song Info panel renders now-playing embedded album art as cached Unicode color raster
+- Stats tab with totals, ASCII charts, and range-filtered recent listen log
+- Lyrics tab with live line sync from `.lrc` sidecars or embedded metadata
+- Lyrics sidecars stored in config dir (`lyrics/`)
+- Split-pane lyrics editor (`Ctrl+e` toggle) with per-line timestamp stamping
+- `.txt` to `.lrc` import with fixed-interval timestamp seeding
+- Metadata editor for title/artist/album with cover-art copy flows
+- Audio driver recovery and output speaker selection
+- Selected output speaker persists across launches with fallback to default
+- Volume level persists across launches
+- Playback settings: loudness normalization, crossfade, scrub length, stats tracking, top songs rows, missing-cover fallback template, themes
+- Online tab: TCP host/client room sync, room-code handshake, collaborative/host-only modes, shared queue, password-encrypted invite codes
+- Clipboard fallback to OSC 52 for SSH
+- Auto-save on state-changing actions
+
+## Quick Start
+
+Download `tune.exe` from releases and run. No installation required.
+
+### Adding Music
+
+1. Press `Tab` to switch to Library tab
+2. Press `/` to open actions panel
+3. Select "Add directory"
+4. Choose your music folder
+
+### Basic Controls
+
+| Key | Action |
+|-----|--------|
+| `↑` `↓` | Navigate tracks |
+| `Enter` | Play selected track |
+| `Space` | Pause/Resume |
+| `n` | Next track |
+| `b` | Previous track |
+| `d` | Seek forward |
+| `a` | Seek backward |
+| `m` | Cycle playback mode |
+| `=` `+` | Volume up |
+| `-` `_` | Volume down |
+| `/` | Open actions panel |
+| `Tab` | Cycle tabs (Library/Lyrics/Stats/Online) |
+| `Ctrl+c` | Quit |
+
+### Online / Listen Together
+
+A public server is available at **tunetui.online** — anyone can use it to host or join rooms.
+
+**Host a room:**
+1. `Tab` to Online tab
+2. `h` to host
+3. Enter room name (optional password)
+4. Share invite code
+
+**Join a room:**
+1. `Tab` to Online tab  
+2. `j` to join
+3. Enter server (`tunetui.online`) or room link
+4. Enter invite code (and password if needed)
+
+### Lyrics
+
+- `.lrc` sidecar files in config `lyrics/` folder take precedence over embedded
+- `Ctrl+e` toggles split-pane editor
+- `Ctrl+t` stamps selected line with current playback time
 
 ## Run
 
@@ -43,59 +88,52 @@ Performance-oriented terminal music player for desktop terminal workflows.
 cargo run --release
 ```
 
+Or run the built binary:
+```bash
+./tune
+```
+
 On SSH sessions, TuneTUI auto-sets `TERM=xterm-256color` when `TERM` is missing/`dumb`.
 If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI auto-falls back to `$HOME/.config/tunetui`.
 
-## Controls
+## Hosting Your Own Server
 
-- `Up/Down`: select track
-- `Enter`: play selected track
-- `Backspace`: go back in library navigation
-- `Space`: pause/resume
-- `n`: next track
-- `b`: previous track
-- `a` / `d`: scrub backward/forward by configured scrub length
-- `m`: cycle playback mode
-- `=`/`-`: volume adjust
-- `+`/`_` (Shift): higher precision volume adjust
-- `r`: rescan folders
-- `s`: save state
-- `/`: actions panel
-- `Type/Backspace` (actions panel): filter actions by search
-- `/` -> `Edit selected track metadata`: edit selected track title/artist/album tags and copy now-playing cover art to selected/folder/playlist/all songs
-- `Tab`: cycle header sections (Library/Lyrics/Stats/Online)
-- `Left/Right` (Stats tab): move filter focus
-- `Enter` (Stats tab): cycle focused range/sort filter
-- `Type/Backspace` (Stats tab): live edit artist/album/search filters
-- `Shift+Up` (Stats tab): jump back to top filters
-- `Ctrl+e` (Lyrics tab): toggle playback view <-> split editor
-- `Up/Down` (Lyrics tab): move selected lyric line
-- `Enter` (Lyrics edit mode): insert line after selection
-- `Ctrl+t` (Lyrics edit mode): stamp selected line with current playback time
-- `h` / `j` / `l` (Online tab): host room / join room or browse room directory / leave room
-- `o` / `q` (Online tab): toggle room mode / cycle stream quality profile
-- Host-only mode behavior: non-host peers are immediately listen-only (local playback controls and local playlist-start actions are blocked, while tab/navigation UI still works)
-- `Ctrl+s` (Library tab, while in online room): add selected item to shared queue (track, folder, playlist, or all songs in selection order)
-- Connect-to-homeserver modal: type home-server link/address (supports bare `127.0.0.1:7878/room/name` and `http(s)://...`), `V` paste clipboard, `Enter` continue, `Esc` cancel
-- First-time online flow: on `h`/`j`, if nickname is not set yet, a nickname prompt appears before host/join flow continues
-- Host flow: if connected to a homeserver, `h` asks for room name then optional password; if not connected, `h` opens the same connect-to-homeserver modal first
-- Join flow: if link includes room, optional password prompt appears before connect; if link has only server, a searchable room directory modal opens (lock/open + current/max); missing rooms from links are not auto-created
-- Edit nickname later: `/` -> `Playback settings` -> `Online nickname`
-- Online delay tuning moved to actions panel: `/` -> `Playback settings` -> `Online sync delay settings` (manual delay, auto-ping, recalibrate, sync correction threshold)
-- Clipboard copy falls back to terminal OSC 52 when native clipboard access is unavailable (useful over SSH, including tmux/screen passthrough; terminal/tmux must allow clipboard escape sequences)
-- `Ctrl+C`: quit
+**Headless server:**
+```bash
+tune --host --ip 0.0.0.0
+```
+- Default port: **7878**
+- Room port range: **9000-9100** (default)
 
-### Online Networking Defaults
+**Server + app in one process:**
+```bash
+tune --host --app --ip 0.0.0.0
+```
 
-- Home server bind (CLI): `tune --host --ip 0.0.0.0` (defaults to `:7878` when port is omitted)
-- Headless home server: `tune --host --ip 0.0.0.0`
-- Home server + app in one process: `tune --host --app --ip 0.0.0.0`
-- Default room transport port range in host mode: `9000-9100` (override with `--room-port-range start-end`)
-- App-only targeting a home server: `tune --ip 127.0.0.1` (defaults to `:7878`)
-- Open firewall for the home server port and the active room range (default `9000-9100`)
-- Password for host/join: optional in TUI (lock icon in room directory indicates password required)
-- Nickname: saved in app state (`state.json`), set from in-app prompt/settings
-- Reverse stream safety: peer uploads are only served for shared-queue items owned by that peer and are capped at 1 GiB per file
+**Custom port/range:**
+```bash
+tune --host --ip 0.0.0.0:9000 --room-port-range 9000-9100
+```
+
+**Connect to a server:**
+```bash
+tune --ip 192.168.1.100   # defaults to port 7878
+tune --ip 192.168.1.100:9000
+```
+
+## Configuration
+
+Config directory:
+- **Linux:** `$XDG_CONFIG_HOME/tunetui/` (default `~/.config/tunetui/`)
+- **Windows:** `%USERPROFILE%\.config\tunetui\`
+- Override: `TUNETUI_CONFIG_DIR` env var
+
+Files:
+- `state.json` — Playback state, library, playlists
+- `stats.json` — Listen history and statistics
+- `lyrics/` — LRC sidecar files
+
+Themes (actions panel → Playback settings): Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy
 
 ## Fuzzing
 
