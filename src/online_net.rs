@@ -637,9 +637,9 @@ fn resolve_from_response(response: HomeResponse) -> anyhow::Result<HomeRoomResol
 const HOME_CONNECT_TIMEOUT_MS: u64 = 3_000;
 const HOME_READ_TIMEOUT_MS: u64 = 5_000;
 
-fn resolve_server_addr(server_addr: &str) -> anyhow::Result<SocketAddr> {
+fn resolve_server_addrs(server_addr: &str) -> anyhow::Result<Vec<SocketAddr>> {
     if let Ok(addr) = server_addr.parse() {
-        return Ok(addr);
+        return Ok(vec![addr]);
     }
     let (host, port) = server_addr
         .rsplit_once(':')
@@ -647,19 +647,33 @@ fn resolve_server_addr(server_addr: &str) -> anyhow::Result<SocketAddr> {
     let port: u16 = port
         .parse()
         .with_context(|| format!("invalid port in address: {server_addr}"))?;
-    let mut addrs = (host, port)
+    let addrs: Vec<SocketAddr> = (host, port)
         .to_socket_addrs()
-        .with_context(|| format!("failed to resolve host: {host}"))?;
-    addrs
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no addresses found for host: {host}"))
+        .with_context(|| format!("failed to resolve host: {host}"))?
+        .collect();
+    if addrs.is_empty() {
+        anyhow::bail!("no addresses found for host: {host}");
+    }
+    Ok(addrs)
 }
 
 fn send_home_request(server_addr: &str, request: &HomeRequest) -> anyhow::Result<HomeResponse> {
-    let addr = resolve_server_addr(server_addr)?;
+    let addrs = resolve_server_addrs(server_addr)?;
+    let mut last_err: Option<anyhow::Error> = None;
+    for addr in &addrs {
+        match try_home_connect(*addr, request) {
+            Ok(response) => return Ok(response),
+            Err(err) => last_err = Some(err),
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| anyhow::anyhow!("failed to connect to home server {server_addr}")))
+}
+
+fn try_home_connect(addr: SocketAddr, request: &HomeRequest) -> anyhow::Result<HomeResponse> {
     let mut stream =
         TcpStream::connect_timeout(&addr, Duration::from_millis(HOME_CONNECT_TIMEOUT_MS))
-            .with_context(|| format!("failed to connect to home server {server_addr}"))?;
+            .with_context(|| format!("failed to connect to {addr}"))?;
     stream
         .set_read_timeout(Some(Duration::from_millis(HOME_READ_TIMEOUT_MS)))
         .context("failed to set read timeout")?;
@@ -3906,6 +3920,18 @@ mod tests {
 
         client.shutdown();
         handle.shutdown();
+    }
+
+    #[test]
+    fn resolve_server_addrs_parses_socket_addr() {
+        let addrs = resolve_server_addrs("127.0.0.1:7878").expect("resolve");
+        assert_eq!(addrs.len(), 1);
+        assert_eq!(addrs[0], "127.0.0.1:7878".parse::<SocketAddr>().unwrap());
+    }
+
+    #[test]
+    fn resolve_server_addrs_rejects_missing_port() {
+        assert!(resolve_server_addrs("127.0.0.1").is_err());
     }
 
     #[test]

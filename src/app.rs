@@ -54,6 +54,7 @@ const ONLINE_SYNC_CORRECTION_THRESHOLD_PAUSED_MS: i64 = 100;
 const ONLINE_SYNC_CORRECTION_THRESHOLD_OPTIONS_MS: [u16; 8] =
     [100, 150, 200, 300, 400, 500, 750, 1000];
 const MAX_ONLINE_EVENTS_PER_TICK: usize = 128;
+const ONLINE_DEFAULT_HOME_SERVER_PORT: u16 = 7878;
 const ONLINE_DEFAULT_HOME_SERVER_ADDR: &str = "127.0.0.1:7878";
 const HOST_ONLY_LISTENER_LOCKED_STATUS: &str = "Room is host-only. Listener playback locked";
 
@@ -2722,6 +2723,25 @@ fn apply_online_nickname(core: &mut TuneCore, online_runtime: &mut OnlineRuntime
     core.status = format!("Online nickname: {new_name}");
 }
 
+fn ensure_authority_port(authority: String) -> String {
+    if authority.parse::<std::net::SocketAddr>().is_ok() {
+        return authority;
+    }
+    if authority.starts_with('[') {
+        return if authority.contains("]:") {
+            authority
+        } else {
+            format!("{authority}:{ONLINE_DEFAULT_HOME_SERVER_PORT}")
+        };
+    }
+    match authority.rsplit_once(':') {
+        Some((_host, port)) if !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) => {
+            authority
+        }
+        _ => format!("{authority}:{ONLINE_DEFAULT_HOME_SERVER_PORT}"),
+    }
+}
+
 fn parse_home_link(input: &str) -> Result<ParsedHomeLink> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -2736,11 +2756,9 @@ fn parse_home_link(input: &str) -> Result<ParsedHomeLink> {
         .next()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow::anyhow!("missing host:port"))?
+        .ok_or_else(|| anyhow::anyhow!("missing host"))?
         .to_string();
-    if !authority.contains(':') {
-        anyhow::bail!("host must include port");
-    }
+    let authority = ensure_authority_port(authority);
     let path = split
         .next()
         .unwrap_or_default()
@@ -7729,5 +7747,81 @@ mod tests {
     fn rewrite_room_server_addr_returns_none_for_invalid_input() {
         assert!(rewrite_room_server_addr_host("", "127.0.0.1:44623").is_none());
         assert!(rewrite_room_server_addr_host("198.51.100.42:7878", "bad").is_none());
+    }
+
+    #[test]
+    fn ensure_authority_port_adds_default_for_domain() {
+        assert_eq!(
+            ensure_authority_port(String::from("tunetui.online")),
+            "tunetui.online:7878"
+        );
+    }
+
+    #[test]
+    fn ensure_authority_port_adds_default_for_ip() {
+        assert_eq!(
+            ensure_authority_port(String::from("192.168.1.1")),
+            "192.168.1.1:7878"
+        );
+    }
+
+    #[test]
+    fn ensure_authority_port_keeps_explicit_port() {
+        assert_eq!(
+            ensure_authority_port(String::from("tunetui.online:9000")),
+            "tunetui.online:9000"
+        );
+        assert_eq!(
+            ensure_authority_port(String::from("192.168.1.1:9000")),
+            "192.168.1.1:9000"
+        );
+    }
+
+    #[test]
+    fn ensure_authority_port_handles_ipv6_bracket() {
+        assert_eq!(ensure_authority_port(String::from("[::1]")), "[::1]:7878");
+        assert_eq!(
+            ensure_authority_port(String::from("[::1]:9000")),
+            "[::1]:9000"
+        );
+    }
+
+    #[test]
+    fn parse_home_link_defaults_port_for_bare_domain() {
+        let parsed = parse_home_link("tunetui.online").expect("parsed");
+        assert_eq!(parsed.server_addr, "tunetui.online:7878");
+        assert_eq!(parsed.room_name, None);
+    }
+
+    #[test]
+    fn parse_home_link_keeps_explicit_port() {
+        let parsed = parse_home_link("tunetui.online:9000").expect("parsed");
+        assert_eq!(parsed.server_addr, "tunetui.online:9000");
+    }
+
+    #[test]
+    fn parse_home_link_defaults_port_with_http_scheme() {
+        let parsed = parse_home_link("http://tunetui.online/room/test").expect("parsed");
+        assert_eq!(parsed.server_addr, "tunetui.online:7878");
+        assert_eq!(parsed.room_name, Some(String::from("test")));
+    }
+
+    #[test]
+    fn parse_home_link_keeps_port_with_scheme_and_room() {
+        let parsed = parse_home_link("http://tunetui.online:9000/room/test").expect("parsed");
+        assert_eq!(parsed.server_addr, "tunetui.online:9000");
+        assert_eq!(parsed.room_name, Some(String::from("test")));
+    }
+
+    #[test]
+    fn parse_home_link_defaults_port_for_bare_ip() {
+        let parsed = parse_home_link("192.168.1.1").expect("parsed");
+        assert_eq!(parsed.server_addr, "192.168.1.1:7878");
+    }
+
+    #[test]
+    fn parse_home_link_rejects_empty_input() {
+        assert!(parse_home_link("").is_err());
+        assert!(parse_home_link("   ").is_err());
     }
 }
