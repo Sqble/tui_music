@@ -1,6 +1,7 @@
 use crate::config;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
@@ -13,7 +14,7 @@ const MIN_TRACKED_LISTEN_SECONDS: u32 = 10;
 const MINUTE_TREND_END_ADVANCE_SECONDS: i64 = 20;
 const STATS_SCHEMA_VERSION: u32 = 3;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatsRange {
     Today,
     Days7,
@@ -41,7 +42,7 @@ impl StatsRange {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatsSort {
     Plays,
     ListenTime,
@@ -128,6 +129,8 @@ pub struct StatsStore {
     pub track_totals: HashMap<String, TrackTotals>,
     #[serde(default)]
     pub events: Vec<ListenEvent>,
+    #[serde(skip)]
+    pub cache: RefCell<StatsQueryCache>,
 }
 
 impl Default for StatsStore {
@@ -137,12 +140,62 @@ impl Default for StatsStore {
             provider_track_key_map: HashMap::new(),
             track_totals: HashMap::new(),
             events: Vec::new(),
+            cache: RefCell::new(StatsQueryCache::default()),
         }
     }
 }
 
 fn default_stats_schema_version() -> u32 {
     STATS_SCHEMA_VERSION
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct StatsQueryCache {
+    generation: u64,
+    cached_key: Option<StatsQueryCacheKey>,
+    cached_result: Option<StatsSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct StatsQueryCacheKey {
+    range: StatsRange,
+    sort: StatsSort,
+    artist_filter: String,
+    album_filter: String,
+    search: String,
+    time_bucket: i64,
+}
+
+impl StatsQueryCache {
+    fn invalidate(&mut self) {
+        self.generation = self.generation.saturating_add(1);
+        self.cached_key = None;
+        self.cached_result = None;
+    }
+
+    fn get(&self, key: &StatsQueryCacheKey) -> Option<StatsSnapshot> {
+        if self.cached_key.as_ref() == Some(key) {
+            self.cached_result.clone()
+        } else {
+            None
+        }
+    }
+
+    fn set(&mut self, key: StatsQueryCacheKey, result: StatsSnapshot) {
+        self.cached_key = Some(key);
+        self.cached_result = Some(result);
+    }
+}
+
+fn time_bucket_for_range(range: StatsRange, now_epoch_seconds: i64) -> i64 {
+    const SECONDS_PER_HOUR: i64 = 3600;
+    const SECONDS_PER_DAY: i64 = 86400;
+    match range {
+        StatsRange::Today => now_epoch_seconds / SECONDS_PER_HOUR,
+        StatsRange::Days7 => now_epoch_seconds / SECONDS_PER_DAY,
+        StatsRange::Days30 => now_epoch_seconds / SECONDS_PER_DAY,
+        StatsRange::Lifetime => 0,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -239,6 +292,7 @@ impl StatsStore {
     pub fn clear_history(&mut self) {
         self.track_totals.clear();
         self.events.clear();
+        self.cache.borrow_mut().invalidate();
     }
 
     pub fn record_listen(&mut self, record: ListenSessionRecord) {
@@ -295,9 +349,31 @@ impl StatsStore {
             let drop_count = self.events.len().saturating_sub(MAX_EVENTS);
             self.events.drain(0..drop_count);
         }
+
+        self.cache.borrow_mut().invalidate();
     }
 
     pub fn query(&self, query: &StatsQuery, now_epoch_seconds: i64) -> StatsSnapshot {
+        let time_bucket = time_bucket_for_range(query.range, now_epoch_seconds);
+        let cache_key = StatsQueryCacheKey {
+            range: query.range,
+            sort: query.sort,
+            artist_filter: query.artist_filter.clone(),
+            album_filter: query.album_filter.clone(),
+            search: query.search.clone(),
+            time_bucket,
+        };
+
+        if let Some(cached) = self.cache.borrow().get(&cache_key) {
+            return cached;
+        }
+
+        let result = self.compute_query(query, now_epoch_seconds);
+        self.cache.borrow_mut().set(cache_key, result.clone());
+        result
+    }
+
+    fn compute_query(&self, query: &StatsQuery, now_epoch_seconds: i64) -> StatsSnapshot {
         let range_start = range_start_epoch(query.range, now_epoch_seconds);
         let artist_filter = query.artist_filter.trim().to_ascii_lowercase();
         let album_filter = query.album_filter.trim().to_ascii_lowercase();
