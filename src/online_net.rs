@@ -621,9 +621,19 @@ fn resolve_from_response(response: HomeResponse) -> anyhow::Result<HomeRoomResol
     }
 }
 
+const HOME_CONNECT_TIMEOUT_MS: u64 = 3_000;
+const HOME_READ_TIMEOUT_MS: u64 = 5_000;
+
 fn send_home_request(server_addr: &str, request: &HomeRequest) -> anyhow::Result<HomeResponse> {
-    let mut stream = TcpStream::connect(server_addr)
-        .with_context(|| format!("failed to connect to home server {server_addr}"))?;
+    let addr: SocketAddr = server_addr
+        .parse()
+        .with_context(|| format!("invalid home server address: {server_addr}"))?;
+    let mut stream =
+        TcpStream::connect_timeout(&addr, Duration::from_millis(HOME_CONNECT_TIMEOUT_MS))
+            .with_context(|| format!("failed to connect to home server {server_addr}"))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(HOME_READ_TIMEOUT_MS)))
+        .context("failed to set read timeout")?;
     send_json_line(&mut stream, request).context("failed to send home request")?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();

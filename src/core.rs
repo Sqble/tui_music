@@ -130,6 +130,7 @@ pub struct TuneCore {
     pub online: OnlineState,
     duration_lookup: RefCell<HashMap<String, Option<u32>>>,
     cover_art_lookup: RefCell<HashMap<String, Option<Arc<[u8]>>>>,
+    sorted_library_queue_cache: RefCell<Option<Vec<usize>>>,
     shuffle_order: Vec<usize>,
     shuffle_cursor: usize,
     shuffle_rng: SmallRng,
@@ -184,6 +185,7 @@ impl TuneCore {
             online: OnlineState::default(),
             duration_lookup: RefCell::new(HashMap::new()),
             cover_art_lookup: RefCell::new(HashMap::new()),
+            sorted_library_queue_cache: RefCell::new(None),
             shuffle_order: Vec::new(),
             shuffle_cursor: 0,
             shuffle_rng: SmallRng::from_os_rng(),
@@ -222,6 +224,10 @@ impl TuneCore {
         Ok(())
     }
 
+    fn invalidate_library_caches(&self) {
+        *self.sorted_library_queue_cache.borrow_mut() = None;
+    }
+
     pub fn add_folder(&mut self, input: &Path) {
         let sanitized = config::sanitize_user_folder_path(input);
         if sanitized.as_os_str().is_empty() {
@@ -254,6 +260,7 @@ impl TuneCore {
         self.folders.push(normalized.clone());
         let mut found = library::scan_folder(&normalized);
         let count = found.len();
+        self.invalidate_library_caches();
         self.tracks.append(&mut found);
         self.tracks.sort_by(|a, b| a.path.cmp(&b.path));
         self.tracks.dedup_by(|a, b| a.path == b.path);
@@ -297,6 +304,7 @@ impl TuneCore {
         self.browser_path = None;
         self.browser_all_songs = false;
         self.selected_browser = 0;
+        self.invalidate_library_caches();
         self.tracks = library::scan_many(&self.folders);
         self.rebuild_main_queue();
         self.refresh_browser_entries();
@@ -304,6 +312,7 @@ impl TuneCore {
     }
 
     pub fn rescan(&mut self) {
+        self.invalidate_library_caches();
         self.tracks = library::scan_many(&self.folders);
         self.rebuild_main_queue();
         self.refresh_browser_entries();
@@ -1304,8 +1313,16 @@ impl TuneCore {
     }
 
     fn metadata_sorted_library_queue(&self) -> Vec<usize> {
+        let cache = self.sorted_library_queue_cache.borrow();
+        if let Some(ref cached) = *cache
+            && cached.len() == self.tracks.len()
+        {
+            return cached.clone();
+        }
+        drop(cache);
         let mut queue: Vec<usize> = (0..self.tracks.len()).collect();
         queue.sort_by_cached_key(|idx| self.tracks[*idx].title.to_ascii_lowercase());
+        *self.sorted_library_queue_cache.borrow_mut() = Some(queue.clone());
         queue
     }
 
@@ -1364,7 +1381,7 @@ impl TuneCore {
     }
 
     fn refresh_browser_entries(&mut self) {
-        let mut entries = Vec::new();
+        let mut entries = Vec::with_capacity(self.tracks.len().max(self.folders.len()));
 
         if let Some(name) = &self.browser_playlist {
             entries.push(BrowserEntry {
@@ -1374,6 +1391,7 @@ impl TuneCore {
             });
 
             if let Some(playlist) = self.playlists.get(name) {
+                entries.reserve_exact(playlist.tracks.len());
                 for track in &playlist.tracks {
                     let cleaned = config::strip_windows_verbatim_prefix(track);
                     entries.push(BrowserEntry {
@@ -1391,6 +1409,7 @@ impl TuneCore {
             });
 
             let queue = self.metadata_sorted_library_queue();
+            entries.reserve_exact(queue.len());
             for idx in queue {
                 if let Some(track) = self.tracks.get(idx) {
                     entries.push(BrowserEntry {
@@ -1438,6 +1457,7 @@ impl TuneCore {
                 entries.extend(files);
             }
         } else {
+            entries.reserve_exact(self.folders.len() + self.playlists.len() + 1);
             for folder in &self.folders {
                 let cleaned = config::strip_windows_verbatim_prefix(folder);
                 let label = cleaned

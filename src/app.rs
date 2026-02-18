@@ -31,8 +31,10 @@ use std::io::{Write, stdout};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver};
 #[cfg(windows)]
 use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -71,6 +73,12 @@ struct ParsedHomeLink {
 enum OnlinePlaybackSource {
     LocalQueue,
     SharedQueue,
+}
+
+#[derive(Debug, Clone)]
+enum HomeServerVerifyResult {
+    Success { server_addr: String },
+    Failure { error: String },
 }
 
 struct OnlineRuntime {
@@ -112,6 +120,7 @@ struct OnlineRuntime {
     last_remote_transport_origin: Option<String>,
     last_periodic_sync_at: Instant,
     online_playback_source: OnlinePlaybackSource,
+    pending_verification_rx: Option<Receiver<HomeServerVerifyResult>>,
 }
 
 impl OnlineRuntime {
@@ -146,6 +155,7 @@ impl OnlineRuntime {
         self.host_invite_code.clear();
         self.host_invite_button = HostInviteModalButton::Copy;
         self.online_playback_source = OnlinePlaybackSource::LocalQueue;
+        self.pending_verification_rx = None;
     }
 
     fn host_invite_modal_view(&self) -> Option<crate::ui::HostInviteModalView> {
@@ -1173,11 +1183,13 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
         last_remote_transport_origin: None,
         last_periodic_sync_at: Instant::now(),
         online_playback_source: OnlinePlaybackSource::LocalQueue,
+        pending_verification_rx: None,
     };
 
     let result: Result<()> = loop {
         pump_tray_events(&mut core);
         drain_online_network_events(&mut core, &mut *audio, &mut online_runtime);
+        poll_home_server_verification(&mut core, &mut online_runtime);
         audio.tick();
         maybe_publish_online_playback_sync(&core, &*audio, &mut online_runtime);
         let stats_identity_hint = online_streaming_stats_identity(&online_runtime, &*audio);
@@ -2774,6 +2786,9 @@ fn trigger_online_tab_entry(core: &mut TuneCore, online_runtime: &mut OnlineRunt
     if core.online.session.is_some() {
         return;
     }
+    if online_runtime.pending_verification_rx.is_some() {
+        return;
+    }
     if !online_runtime.nickname_configured {
         online_runtime.join_prompt_active = true;
         online_runtime.join_prompt_mode = JoinPromptMode::NicknameForJoin;
@@ -2794,20 +2809,21 @@ fn trigger_online_tab_entry(core: &mut TuneCore, online_runtime: &mut OnlineRunt
     } else {
         online_runtime.home_server_addr.clone()
     };
-    if let Err(err) = verify_home_server(&server_addr) {
-        online_runtime.join_prompt_active = true;
-        online_runtime.join_prompt_mode = JoinPromptMode::Connect;
-        online_runtime.join_code_input.clear();
-        online_runtime.join_prompt_button = JoinPromptButton::Join;
-        core.status = format!("Homeserver unavailable: {err}. Enter address to connect.");
-        core.dirty = true;
-        return;
-    }
-    online_runtime.home_server_addr = server_addr.clone();
-    online_runtime.home_server_connected = true;
-    online_runtime.pending_join_server_addr = server_addr;
-    load_home_room_directory(core, online_runtime, "Connected and loaded room directory");
+    core.status = String::from("Connecting to home server...");
     core.dirty = true;
+    let (tx, rx) = mpsc::channel();
+    online_runtime.pending_verification_rx = Some(rx);
+    thread::spawn(move || {
+        let result = match verify_home_server(&server_addr) {
+            Ok(()) => HomeServerVerifyResult::Success {
+                server_addr: server_addr.clone(),
+            },
+            Err(err) => HomeServerVerifyResult::Failure {
+                error: err.to_string(),
+            },
+        };
+        let _ = tx.send(result);
+    });
 }
 
 fn load_home_room_directory(
@@ -2836,6 +2852,37 @@ fn refresh_room_directory(core: &mut TuneCore, online_runtime: &mut OnlineRuntim
         online_runtime.join_directory_rooms = rooms;
         online_runtime.last_directory_refresh_at = Instant::now();
         if !had_rooms && !online_runtime.join_directory_rooms.is_empty() {
+            core.dirty = true;
+        }
+    }
+}
+
+fn poll_home_server_verification(core: &mut TuneCore, online_runtime: &mut OnlineRuntime) {
+    let Some(rx) = online_runtime.pending_verification_rx.as_ref() else {
+        return;
+    };
+    match rx.try_recv() {
+        Ok(HomeServerVerifyResult::Success { server_addr }) => {
+            online_runtime.pending_verification_rx = None;
+            online_runtime.home_server_addr = server_addr.clone();
+            online_runtime.home_server_connected = true;
+            online_runtime.pending_join_server_addr = server_addr;
+            load_home_room_directory(core, online_runtime, "Connected and loaded room directory");
+            core.dirty = true;
+        }
+        Ok(HomeServerVerifyResult::Failure { error }) => {
+            online_runtime.pending_verification_rx = None;
+            online_runtime.join_prompt_active = true;
+            online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+            online_runtime.join_code_input.clear();
+            online_runtime.join_prompt_button = JoinPromptButton::Join;
+            core.status = format!("Homeserver unavailable: {error}. Enter address to connect.");
+            core.dirty = true;
+        }
+        Err(mpsc::TryRecvError::Empty) => {}
+        Err(mpsc::TryRecvError::Disconnected) => {
+            online_runtime.pending_verification_rx = None;
+            core.status = String::from("Home server verification failed unexpectedly");
             core.dirty = true;
         }
     }
@@ -5579,6 +5626,7 @@ mod tests {
             last_remote_transport_origin: None,
             last_periodic_sync_at: Instant::now(),
             online_playback_source: OnlinePlaybackSource::LocalQueue,
+            pending_verification_rx: None,
         }
     }
 
