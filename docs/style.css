@@ -219,6 +219,11 @@ body {
     transition: all var(--transition);
 }
 
+.btn-arrow {
+    color: var(--bg-primary);
+    opacity: 0.8;
+}
+
 .btn-primary {
     background: var(--accent-blue);
     color: var(--bg-primary);

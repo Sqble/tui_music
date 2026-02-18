@@ -5,7 +5,6 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>TuneTUI - Docs</title>
     <link rel="stylesheet" href="style.css">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
 </head>
 <body>
     <button class="mobile-toggle" id="sidebarToggle" aria-label="Toggle sidebar">
@@ -51,38 +50,22 @@
         <section id="landing" class="docs-section active">
             <div class="hero">
                 <div class="logo">
-                    <pre><code><span class="kw">_____</span>      <span class="kw">__</span>                  
-<span class="kw">/ ___/</span><span class="type">____</span><span class="kw">___</span><span class="type">____</span><span class="kw">_</span><span class="type">____</span><span class="kw">___</span>  <span class="cm">TuneTUI</span>
-<span class="kw">\__ \</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span>  <span class="cm">───────</span>
-<span class="kw">___</span><span class="type">/</span><span class="kw">_</span><span class="type">____</span><span class="kw">__</span><span class="type">/</span><span class="kw">__</span><span class="type">_</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span>  <span class="str">Performance-oriented</span>
-<span class="kw">/</span><span class="type">____</span><span class="kw">/</span><span class="type">____</span><span class="kw">/</span><span class="type">___</span><span class="kw">/</span><span class="type">___</span><span class="kw">/</span><span class="type">___</span><span class="kw">/</span><span class="type">_</span>  <span class="str">terminal music player</span></code></pre>
+                    <pre><code><span class="cm">    ____  __</span>
+<span class="cm">   / __ \/ /_</span>
+<span class="cm">  / /_/ / __ \</span>
+<span class="cm"> / ____/ /_/ /</span>
+<span class="cm">/_/   \____/</span>
+
+<span class="str">TuneTUI</span> - Performance-oriented terminal music player</code></pre>
                 </div>
                 <p class="tagline">High-performance terminal music player for desktop workflows</p>
                 <div class="cta-group">
                     <a href="https://github.com/Sqble/tui_music/releases/download/alpha-3/tune.exe" class="btn btn-primary">
-                        <span class="prompt">$</span> Download .exe
+                        <span class="btn-arrow">→</span> Download .exe
                     </a>
                     <a href="#getting-started" class="btn btn-secondary">
-                        <span class="prompt">›</span> Read Docs
+                        <span class="btn-arrow">→</span> Read Docs
                     </a>
-                </div>
-                <div class="hero-features">
-                    <div class="feature">
-                        <span class="feature-icon">⚡</span>
-                        <span>Minimal redraw</span>
-                    </div>
-                    <div class="feature">
-                        <span class="feature-icon">📁</span>
-                        <span>Folder-based library</span>
-                    </div>
-                    <div class="feature">
-                        <span class="feature-icon">🔊</span>
-                        <span>Multiple audio formats</span>
-                    </div>
-                    <div class="feature">
-                        <span class="feature-icon">🎛️</span>
-                        <span>Online room sync</span>
-                    </div>
                 </div>
             </div>
         </section>
@@ -96,7 +79,7 @@
             <h2><span class="prompt">›</span> Adding Music</h2>
             <p>Press <kbd>Tab</kbd> to cycle to the Library tab, then:</p>
             <ol>
-                <li>Open the actions panel with <kbd>Ctrl+a</kbd></li>
+                <li>Open the actions panel with <kbd>/</kbd></li>
                 <li>Select "Add directory"</li>
                 <li>Choose your music folder</li>
             </ol>
@@ -109,7 +92,7 @@
             </ul>
 
             <div class="callout callout-info">
-                <span class="prompt">$</span> <strong>Tip:</strong> On first run, TuneTUI auto-sets <code>TERM=xterm-256color</code> if running in SSH.
+                <span class="prompt">$</span> If running in SSH, TuneTUI auto-sets <code>TERM=xterm-256color</code> on first run to ensure proper terminal emulation.
             </div>
         </section>
 
@@ -128,21 +111,19 @@
             <h2><span class="prompt">›</span> Playback</h2>
             <div class="keybindings">
                 <div class="keybind"><kbd>n</kbd> <span>Next track</span></div>
-                <div class="keybind"><kbd>p</kbd> <span>Previous track</span></div>
-                <div class="keybind"><kbd>m</kbd> <span>Toggle mute</span></div>
-                <div class="keybind"><kbd>r</kbd> <span>Cycle repeat mode</span></div>
-                <div class="keybind"><kbd>s</kbd> <span>Toggle shuffle</span></div>
-                <div class="keybind"><kbd>f</kbd> <span>Seek forward</span></div>
-                <div class="keybind"><kbd>b</kbd> <span>Seek backward</span></div>
+                <div class="keybind"><kbd>b</kbd> <span>Previous track</span></div>
+                <div class="keybind"><kbd>m</kbd> <span>Cycle playback mode (shuffle/loop)</span></div>
+                <div class="keybind"><kbd>d</kbd> <span>Seek forward</span></div>
+                <div class="keybind"><kbd>a</kbd> <span>Seek backward</span></div>
                 <div class="keybind"><kbd>+</kbd> <kbd>-</kbd> <span>Volume up/down</span></div>
             </div>
 
             <h2><span class="prompt">›</span> Actions Panel</h2>
             <div class="keybindings">
-                <div class="keybind"><kbd>Ctrl+a</kbd> <span>Open actions panel</span></div>
+                <div class="keybind"><kbd>/</kbd> <span>Open actions panel</span></div>
                 <div class="keybind"><kbd>Ctrl+e</kbd> <span>Toggle lyrics editor</span></div>
-                <div class="keybind"><kbd>Ctrl+s</kbd> <span>Save state</span></div>
-                <div class="keybind"><kbd>Ctrl+q</kbd> <span>Quit</span></div>
+                <div class="keybind"><kbd>Ctrl+s</kbd> <span>Add to shared queue</span></div>
+                <div class="keybind"><kbd>Ctrl+c</kbd> <span>Quit</span></div>
             </div>
         </section>
 
@@ -178,7 +159,7 @@
             <h2><span class="prompt">›</span> Creating a Room</h2>
             <ol>
                 <li>Press <kbd>Tab</kbd> to reach the Online tab</li>
-                <li>Open actions panel with <kbd>Ctrl+a</kbd></li>
+                <li>Open actions panel with <kbd>/</kbd></li>
                 <li>Select "Host room"</li>
                 <li>Set a password for the room</li>
                 <li>Share the invite code with friends</li>
@@ -187,7 +168,7 @@
             <h2><span class="prompt">›</span> Joining a Room</h2>
             <ol>
                 <li>Press <kbd>Tab</kbd> to reach the Online tab</li>
-                <li>Open actions panel with <kbd>Ctrl+a</kbd></li>
+                <li>Open actions panel with <kbd>/</kbd></li>
                 <li>Select "Join room"</li>
                 <li>Enter the invite code and password</li>
             </ol>
@@ -216,7 +197,7 @@
             <p>Ensure .lrc sidecars are in the config directory's lyrics folder, or embedded in the audio file metadata.</p>
             
             <h2><span class="prompt">›</span> Connection Issues</h2>
-            <p>Check that UDP port 3478 is open for room connections.</p>
+            <p>Check that the required ports are open (TCP 3478 for signaling, plus ephemeral ports for media).</p>
 
             <div class="callout callout-info">
                 <span class="prompt">$</span> Run with <code>RUST_BACKTRACE=1</code> for detailed error output.
