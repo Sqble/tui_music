@@ -737,13 +737,16 @@ fn home_room_resolved_wire(
     let final_addr = if use_local_addr {
         SocketAddr::new(local_ip, room.room_server_port).to_string()
     } else {
-        resolve_advertise_addr(bind_addr).unwrap_or_else(|_| {
-            if let Ok(socket) = bind_addr.parse::<SocketAddr>() {
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), socket.port()).to_string()
-            } else {
-                format!("127.0.0.1:{}", room.room_server_port)
-            }
-        })
+        let advertise_ip = resolve_advertise_addr(bind_addr)
+            .ok()
+            .and_then(|addr| addr.rsplit_once(':').map(|(ip, _)| ip.to_string()))
+            .unwrap_or_else(|| {
+                bind_addr
+                    .rsplit_once(':')
+                    .map(|(ip, _)| ip.to_string())
+                    .unwrap_or_else(|| String::from("127.0.0.1"))
+            });
+        format!("{advertise_ip}:{}", room.room_server_port)
     };
 
     let (ip_str, port_str) = final_addr.rsplit_once(':').unwrap_or(("127.0.0.1", "0"));
