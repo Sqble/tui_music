@@ -35,6 +35,8 @@ Performance-oriented terminal music player for desktop terminal workflows.
 
 Download `tune.exe` from releases and run. No installation required.
 
+Full documentation available at **https://tunetui.online**
+
 ### Adding Music
 
 1. Press `Tab` to switch to Library tab
