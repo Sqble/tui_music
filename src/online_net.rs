@@ -232,13 +232,13 @@ impl OnlineNetwork {
         )
         .context("failed to send hello")?;
 
-        let mut hello_reader = BufReader::new(
+        let mut reader = BufReader::new(
             stream
                 .try_clone()
                 .context("failed to clone client stream")?,
         );
         let mut line = String::new();
-        let read = hello_reader
+        let read = reader
             .read_line(&mut line)
             .context("failed to read hello ack")?;
         if read == 0 {
@@ -247,12 +247,12 @@ impl OnlineNetwork {
 
         let ack: WireServerMessage =
             serde_json::from_str(line.trim_end()).context("failed to parse hello ack")?;
-        match ack {
+        let initial_session = match ack {
             WireServerMessage::HelloAck {
                 accepted: true,
                 reason: _,
-                session: _,
-            } => {}
+                session,
+            } => session,
             WireServerMessage::HelloAck {
                 accepted: false,
                 reason,
@@ -261,12 +261,15 @@ impl OnlineNetwork {
                 anyhow::bail!(reason.unwrap_or_else(|| String::from("server rejected connection")))
             }
             _ => anyhow::bail!("invalid handshake response from server"),
-        }
+        };
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
+        if let Some(session) = initial_session {
+            let _ = event_tx.send(NetworkEvent::SessionSync(session));
+        }
         let local_nickname = nickname.to_string();
-        thread::spawn(move || client_loop(stream, local_nickname, cmd_rx, event_tx));
+        thread::spawn(move || client_loop(stream, reader, local_nickname, cmd_rx, event_tx));
 
         Ok(Self {
             role: NetworkRole::Client,
@@ -1094,20 +1097,11 @@ fn base32_decode_no_padding(value: &str) -> anyhow::Result<Vec<u8>> {
 
 fn client_loop(
     stream: TcpStream,
+    handshake_reader: BufReader<TcpStream>,
     local_nickname: String,
     cmd_rx: Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
 ) {
-    let mut read_stream = match stream.try_clone() {
-        Ok(s) => s,
-        Err(err) => {
-            let _ = event_tx.send(NetworkEvent::Status(format!(
-                "Online read clone failed: {err}"
-            )));
-            return;
-        }
-    };
-
     let writer = Arc::new(Mutex::new(stream));
     let upload_guard = Arc::new(Mutex::new(ClientUploadGuard {
         local_nickname,
@@ -1120,7 +1114,7 @@ fn client_loop(
     let read_upload_guard = Arc::clone(&upload_guard);
     let read_stream_quality = Arc::clone(&stream_quality);
     thread::spawn(move || {
-        let mut reader = BufReader::new(&mut read_stream);
+        let mut reader = handshake_reader;
         let mut line = String::new();
         let mut inbound_streams: HashMap<u64, InboundStreamDownload> = HashMap::new();
         loop {
