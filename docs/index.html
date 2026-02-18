@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TuneTUI - Docs</title>
+    <link rel="stylesheet" href="style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
+</head>
+<body>
+    <button class="mobile-toggle" id="sidebarToggle" aria-label="Toggle sidebar">
+        <span></span>
+        <span></span>
+        <span></span>
+    </button>
+
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+            <span class="prompt">$</span><span class="path">~/docs</span><span class="cursor">_</span>
+        </div>
+        <nav class="nav-menu">
+            <a href="#landing" class="nav-item active" data-section="landing">
+                <span class="prompt">›</span> Home
+            </a>
+            <a href="#getting-started" class="nav-item" data-section="getting-started">
+                <span class="prompt">›</span> Getting Started
+            </a>
+            <a href="#controls" class="nav-item" data-section="controls">
+                <span class="prompt">›</span> Controls
+            </a>
+            <a href="#configuration" class="nav-item" data-section="configuration">
+                <span class="prompt">›</span> Configuration
+            </a>
+            <a href="#online-sync" class="nav-item" data-section="online-sync">
+                <span class="prompt">›</span> Online Sync
+            </a>
+            <a href="#troubleshooting" class="nav-item" data-section="troubleshooting">
+                <span class="prompt">›</span> Troubleshooting
+            </a>
+            <div class="nav-divider"></div>
+            <a href="https://github.com/Sqble/tui_music" target="_blank" class="nav-item external">
+                <span class="prompt">⇧</span> GitHub
+            </a>
+        </nav>
+        <div class="sidebar-footer">
+            <span class="version">v0.1.0</span>
+        </div>
+    </aside>
+
+    <main class="content">
+        <section id="landing" class="docs-section active">
+            <div class="hero">
+                <div class="logo">
+                    <pre><code><span class="kw">_____</span>      <span class="kw">__</span>                  
+<span class="kw">/ ___/</span><span class="type">____</span><span class="kw">___</span><span class="type">____</span><span class="kw">_</span><span class="type">____</span><span class="kw">___</span>  <span class="cm">TuneTUI</span>
+<span class="kw">\__ \</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span>  <span class="cm">───────</span>
+<span class="kw">___</span><span class="type">/</span><span class="kw">_</span><span class="type">____</span><span class="kw">__</span><span class="type">/</span><span class="kw">__</span><span class="type">_</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span><span class="type">__</span><span class="kw">/</span>  <span class="str">Performance-oriented</span>
+<span class="kw">/</span><span class="type">____</span><span class="kw">/</span><span class="type">____</span><span class="kw">/</span><span class="type">___</span><span class="kw">/</span><span class="type">___</span><span class="kw">/</span><span class="type">___</span><span class="kw">/</span><span class="type">_</span>  <span class="str">terminal music player</span></code></pre>
+                </div>
+                <p class="tagline">High-performance terminal music player for desktop workflows</p>
+                <div class="cta-group">
+                    <a href="https://github.com/Sqble/tui_music/releases/download/alpha-3/tune.exe" class="btn btn-primary">
+                        <span class="prompt">$</span> Download .exe
+                    </a>
+                    <a href="#getting-started" class="btn btn-secondary">
+                        <span class="prompt">›</span> Read Docs
+                    </a>
+                </div>
+                <div class="hero-features">
+                    <div class="feature">
+                        <span class="feature-icon">⚡</span>
+                        <span>Minimal redraw</span>
+                    </div>
+                    <div class="feature">
+                        <span class="feature-icon">📁</span>
+                        <span>Folder-based library</span>
+                    </div>
+                    <div class="feature">
+                        <span class="feature-icon">🔊</span>
+                        <span>Multiple audio formats</span>
+                    </div>
+                    <div class="feature">
+                        <span class="feature-icon">🎛️</span>
+                        <span>Online room sync</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section id="getting-started" class="docs-section">
+            <h1><span class="prompt">#</span> Getting Started</h1>
+            
+            <h2><span class="prompt">›</span> Installation</h2>
+            <p>Download the latest <code>tune.exe</code> from the releases page and run it. No installation required.</p>
+            
+            <h2><span class="prompt">›</span> Adding Music</h2>
+            <p>Press <kbd>Tab</kbd> to cycle to the Library tab, then:</p>
+            <ol>
+                <li>Open the actions panel with <kbd>Ctrl+a</kbd></li>
+                <li>Select "Add directory"</li>
+                <li>Choose your music folder</li>
+            </ol>
+            
+            <h2><span class="prompt">›</span> First Playback</h2>
+            <ul>
+                <li>Navigate with <kbd>↑</kbd> / <kbd>↓</kbd> arrows</li>
+                <li>Press <kbd>Enter</kbd> to play a track</li>
+                <li>Use <kbd>Space</kbd> to toggle play/pause</li>
+            </ul>
+
+            <div class="callout callout-info">
+                <span class="prompt">$</span> <strong>Tip:</strong> On first run, TuneTUI auto-sets <code>TERM=xterm-256color</code> if running in SSH.
+            </div>
+        </section>
+
+        <section id="controls" class="docs-section">
+            <h1><span class="prompt">#</span> Controls</h1>
+            
+            <h2><span class="prompt">›</span> Navigation</h2>
+            <div class="keybindings">
+                <div class="keybind"><kbd>↑</kbd> <kbd>↓</kbd> <span>Navigate tracks</span></div>
+                <div class="keybind"><kbd>Enter</kbd> <span>Play selected track</span></div>
+                <div class="keybind"><kbd>Space</kbd> <span>Play/Pause</span></div>
+                <div class="keybind"><kbd>Tab</kbd> <span>Cycle status tabs</span></div>
+                <div class="keybind"><kbd>`</kbd> <span>Toggle queue panel</span></div>
+            </div>
+
+            <h2><span class="prompt">›</span> Playback</h2>
+            <div class="keybindings">
+                <div class="keybind"><kbd>n</kbd> <span>Next track</span></div>
+                <div class="keybind"><kbd>p</kbd> <span>Previous track</span></div>
+                <div class="keybind"><kbd>m</kbd> <span>Toggle mute</span></div>
+                <div class="keybind"><kbd>r</kbd> <span>Cycle repeat mode</span></div>
+                <div class="keybind"><kbd>s</kbd> <span>Toggle shuffle</span></div>
+                <div class="keybind"><kbd>f</kbd> <span>Seek forward</span></div>
+                <div class="keybind"><kbd>b</kbd> <span>Seek backward</span></div>
+                <div class="keybind"><kbd>+</kbd> <kbd>-</kbd> <span>Volume up/down</span></div>
+            </div>
+
+            <h2><span class="prompt">›</span> Actions Panel</h2>
+            <div class="keybindings">
+                <div class="keybind"><kbd>Ctrl+a</kbd> <span>Open actions panel</span></div>
+                <div class="keybind"><kbd>Ctrl+e</kbd> <span>Toggle lyrics editor</span></div>
+                <div class="keybind"><kbd>Ctrl+s</kbd> <span>Save state</span></div>
+                <div class="keybind"><kbd>Ctrl+q</kbd> <span>Quit</span></div>
+            </div>
+        </section>
+
+        <section id="configuration" class="docs-section">
+            <h1><span class="prompt">#</span> Configuration</h1>
+            
+            <h2><span class="prompt">›</span> Config Directory</h2>
+            <ul>
+                <li><strong>Linux:</strong> <code>$XDG_CONFIG_HOME/tunetui/</code></li>
+                <li><strong>Windows:</strong> <code>%USERPROFILE%\.config\tunetui\</code></li>
+            </ul>
+            
+            <h2><span class="prompt">›</span> Files</h2>
+            <ul>
+                <li><code>state.json</code> - Playback state, library, playlists</li>
+                <li><code>stats.json</code> - Listen history and statistics</li>
+                <li><code>lyrics/</code> - LRC sidecar files</li>
+            </ul>
+
+            <h2><span class="prompt">›</span> Themes</h2>
+            <p>Available themes: Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy</p>
+            <p>Change via Actions Panel → Playback Settings → Theme</p>
+
+            <h2><span class="prompt">›</span> Environment Variables</h2>
+            <ul>
+                <li><code>TUNETUI_CONFIG_DIR</code> - Override config directory</li>
+            </ul>
+        </section>
+
+        <section id="online-sync" class="docs-section">
+            <h1><span class="prompt">#</span> Online Sync</h1>
+            
+            <h2><span class="prompt">›</span> Creating a Room</h2>
+            <ol>
+                <li>Press <kbd>Tab</kbd> to reach the Online tab</li>
+                <li>Open actions panel with <kbd>Ctrl+a</kbd></li>
+                <li>Select "Host room"</li>
+                <li>Set a password for the room</li>
+                <li>Share the invite code with friends</li>
+            </ol>
+
+            <h2><span class="prompt">›</span> Joining a Room</h2>
+            <ol>
+                <li>Press <kbd>Tab</kbd> to reach the Online tab</li>
+                <li>Open actions panel with <kbd>Ctrl+a</kbd></li>
+                <li>Select "Join room"</li>
+                <li>Enter the invite code and password</li>
+            </ol>
+
+            <div class="callout callout-warning">
+                <span class="prompt">!</span> <strong>Note:</strong> In host-only mode, non-host peers are in listen-only mode.
+            </div>
+
+            <h2><span class="prompt">›</span> Streaming Modes</h2>
+            <ul>
+                <li><strong>Lossless</strong> - Direct audio stream from host</li>
+                <li><strong>Balanced</strong> - Opus 160kbps VBR encoded stream</li>
+            </ul>
+        </section>
+
+        <section id="troubleshooting" class="docs-section">
+            <h1><span class="prompt">#</span> Troubleshooting</h1>
+            
+            <h2><span class="prompt">›</span> No Audio Output</h2>
+            <p>Open actions panel and check "Output speaker" - ensure it's set to a valid device.</p>
+            
+            <h2><span class="prompt">›</span> Missing Album Art</h2>
+            <p>Go to Playback Settings and configure a fallback template (Music Note by default).</p>
+            
+            <h2><span class="prompt">›</span> Lyrics Not Showing</h2>
+            <p>Ensure .lrc sidecars are in the config directory's lyrics folder, or embedded in the audio file metadata.</p>
+            
+            <h2><span class="prompt">›</span> Connection Issues</h2>
+            <p>Check that UDP port 3478 is open for room connections.</p>
+
+            <div class="callout callout-info">
+                <span class="prompt">$</span> Run with <code>RUST_BACKTRACE=1</code> for detailed error output.
+            </div>
+        </section>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>
