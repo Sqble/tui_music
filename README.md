@@ -2,6 +2,10 @@
 
 Performance-oriented terminal music player for desktop terminal workflows.
 
+## Documentation
+
+Full documentation available at **https://tunetui.online**
+
 ## Features
 
 - Minimal redraw strategy (renders only on dirty state or timed tick)
@@ -34,8 +38,6 @@ Performance-oriented terminal music player for desktop terminal workflows.
 ## Quick Start
 
 Download `tune.exe` from releases and run. No installation required.
-
-Full documentation available at **https://tunetui.online**
 
 ### Adding Music
 
