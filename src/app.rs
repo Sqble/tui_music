@@ -88,6 +88,7 @@ struct OnlineRuntime {
     join_directory_search: String,
     join_directory_selected: usize,
     join_directory_rooms: Vec<HomeRoomDirectoryEntry>,
+    last_directory_refresh_at: Instant,
     pending_join_server_addr: String,
     pending_join_room_name: Option<String>,
     host_server_input: String,
@@ -165,10 +166,7 @@ impl OnlineRuntime {
             invite_code: self.join_code_input.clone(),
             paste_selected: matches!(self.join_prompt_button, JoinPromptButton::Paste),
             room_name_mode: matches!(self.join_prompt_mode, JoinPromptMode::HostRoomName),
-            nickname_mode: matches!(
-                self.join_prompt_mode,
-                JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
-            ),
+            nickname_mode: matches!(self.join_prompt_mode, JoinPromptMode::NicknameForJoin),
         })
     }
 
@@ -176,31 +174,21 @@ impl OnlineRuntime {
         if !self.join_directory_active {
             return None;
         }
-        let mut rooms =
-            filtered_room_entries(&self.join_directory_rooms, &self.join_directory_search);
-        if rooms.is_empty() {
-            return Some(crate::ui::OnlineRoomDirectoryModalView {
-                server_addr: self.pending_join_server_addr.clone(),
-                search: self.join_directory_search.clone(),
-                selected: 0,
-                rooms: Vec::new(),
-            });
+        let mut rendered = vec![String::from("[+] Create Room")];
+        let rooms = filtered_room_entries(&self.join_directory_rooms, &self.join_directory_search);
+        for entry in rooms {
+            rendered.push(format!(
+                "{} {} {}/{}",
+                if entry.locked { "[lock]" } else { "[open]" },
+                entry.room_name,
+                entry.current_connections,
+                entry.max_connections
+            ));
         }
+        let total_len = rendered.len();
         let selected = self
             .join_directory_selected
-            .min(rooms.len().saturating_sub(1));
-        let rendered: Vec<String> = rooms
-            .drain(..)
-            .map(|entry| {
-                format!(
-                    "{} {} {}/{}",
-                    if entry.locked { "[lock]" } else { "[open]" },
-                    entry.room_name,
-                    entry.current_connections,
-                    entry.max_connections
-                )
-            })
-            .collect();
+            .min(total_len.saturating_sub(1));
         Some(crate::ui::OnlineRoomDirectoryModalView {
             server_addr: self.pending_join_server_addr.clone(),
             search: self.join_directory_search.clone(),
@@ -252,10 +240,8 @@ enum JoinPromptButton {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JoinPromptMode {
     Connect,
-    ConnectForHost,
     HostRoomName,
     NicknameForJoin,
-    NicknameForHost,
 }
 
 impl JoinPromptButton {
@@ -1163,6 +1149,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
         join_directory_search: String::new(),
         join_directory_selected: 0,
         join_directory_rooms: Vec::new(),
+        last_directory_refresh_at: Instant::now(),
         pending_join_server_addr: String::new(),
         pending_join_room_name: None,
         host_server_input: String::new(),
@@ -1224,6 +1211,12 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
         stats_enabled_last = core.stats_enabled;
         maybe_start_online_shared_queue_if_idle(&mut core, &mut *audio, &mut online_runtime);
         maybe_auto_advance_track(&mut core, &mut *audio, &mut online_runtime);
+        if core.header_section == HeaderSection::Online
+            && online_runtime.join_directory_active
+            && online_runtime.last_directory_refresh_at.elapsed() > Duration::from_secs(1)
+        {
+            refresh_room_directory(&mut core, &mut online_runtime);
+        }
         let lyrics_track_path = audio
             .current_track()
             .map(Path::to_path_buf)
@@ -1261,7 +1254,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                     stats_snapshot.as_ref(),
                     crate::ui::OverlayViews {
                         join_prompt_modal: join_prompt_modal.as_ref(),
-                        room_directory_modal: room_directory_modal.as_ref(),
+                        room_directory_view: room_directory_modal.as_ref(),
                         online_password_prompt: password_prompt_modal.as_ref(),
                         host_invite_modal: host_invite_modal.as_ref(),
                         room_code_revealed: online_runtime.room_code_revealed,
@@ -1470,7 +1463,13 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 core.cycle_mode();
                 auto_save_state(&mut core, &*audio);
             }
-            KeyCode::Tab => core.cycle_header_section(),
+            KeyCode::Tab => {
+                let next_section = core.header_section.next();
+                core.cycle_header_section();
+                if next_section == HeaderSection::Online {
+                    trigger_online_tab_entry(&mut core, &mut online_runtime);
+                }
+            }
             KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'t') => {
                 #[cfg(windows)]
                 {
@@ -2050,14 +2049,13 @@ fn handle_online_inline_input(
                     &online_runtime.join_directory_rooms,
                     &online_runtime.join_directory_search,
                 );
-                if !visible.is_empty() {
-                    if online_runtime.join_directory_selected == 0 {
-                        online_runtime.join_directory_selected = visible.len() - 1;
-                    } else {
-                        online_runtime.join_directory_selected -= 1;
-                    }
-                    core.dirty = true;
+                let total_count = visible.len() + 1;
+                if online_runtime.join_directory_selected == 0 {
+                    online_runtime.join_directory_selected = total_count - 1;
+                } else {
+                    online_runtime.join_directory_selected -= 1;
                 }
+                core.dirty = true;
                 return true;
             }
             KeyCode::Down => {
@@ -2065,11 +2063,10 @@ fn handle_online_inline_input(
                     &online_runtime.join_directory_rooms,
                     &online_runtime.join_directory_search,
                 );
-                if !visible.is_empty() {
-                    online_runtime.join_directory_selected =
-                        (online_runtime.join_directory_selected + 1) % visible.len();
-                    core.dirty = true;
-                }
+                let total_count = visible.len() + 1;
+                online_runtime.join_directory_selected =
+                    (online_runtime.join_directory_selected + 1) % total_count;
+                core.dirty = true;
                 return true;
             }
             KeyCode::Backspace => {
@@ -2079,16 +2076,26 @@ fn handle_online_inline_input(
                 return true;
             }
             KeyCode::Enter => {
+                if online_runtime.join_directory_selected == 0 {
+                    online_runtime.join_directory_active = false;
+                    online_runtime.join_prompt_active = true;
+                    online_runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
+                    online_runtime.join_code_input.clear();
+                    online_runtime.join_prompt_button = JoinPromptButton::Join;
+                    core.status = format!(
+                        "Home server {} selected. Enter room name",
+                        online_runtime.home_server_addr
+                    );
+                    core.dirty = true;
+                    return true;
+                }
                 let visible = filtered_room_entries(
                     &online_runtime.join_directory_rooms,
                     &online_runtime.join_directory_search,
                 );
+                let adjusted_index = online_runtime.join_directory_selected.saturating_sub(1);
                 let Some(selected_room) = visible
-                    .get(
-                        online_runtime
-                            .join_directory_selected
-                            .min(visible.len().saturating_sub(1)),
-                    )
+                    .get(adjusted_index.min(visible.len().saturating_sub(1)))
                     .cloned()
                 else {
                     core.status = String::from("No rooms available");
@@ -2131,6 +2138,7 @@ fn handle_online_inline_input(
                 core.dirty = true;
                 return true;
             }
+            KeyCode::Tab => return false,
             _ => return true,
         }
     }
@@ -2166,7 +2174,7 @@ fn handle_online_inline_input(
                     format!("Enter room name: {}", online_runtime.join_code_input)
                 } else if matches!(
                     online_runtime.join_prompt_mode,
-                    JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                    JoinPromptMode::NicknameForJoin
                 ) {
                     format!("Enter nickname: {}", online_runtime.join_code_input)
                 } else {
@@ -2214,7 +2222,7 @@ fn handle_online_inline_input(
                         String::from("Enter room name, then Enter")
                     } else if matches!(
                         online_runtime.join_prompt_mode,
-                        JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                        JoinPromptMode::NicknameForJoin
                     ) {
                         String::from("Enter nickname, then press Enter")
                     } else {
@@ -2225,33 +2233,16 @@ fn handle_online_inline_input(
                 }
                 if matches!(
                     online_runtime.join_prompt_mode,
-                    JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                    JoinPromptMode::NicknameForJoin
                 ) {
                     let nickname = online_runtime.join_code_input.trim().to_string();
                     online_runtime.join_prompt_active = false;
                     online_runtime.join_code_input.clear();
                     online_runtime.join_prompt_button = JoinPromptButton::Join;
-                    let continue_to_host = matches!(
-                        online_runtime.join_prompt_mode,
-                        JoinPromptMode::NicknameForHost
-                    );
                     online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                     apply_online_nickname(core, online_runtime, &nickname);
                     auto_save_state(core, audio);
-                    if continue_to_host {
-                        if online_runtime.home_server_connected {
-                            online_runtime.join_prompt_active = true;
-                            online_runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
-                            core.status = format!(
-                                "Home server {} selected. Enter room name",
-                                online_runtime.home_server_addr
-                            );
-                        } else {
-                            online_runtime.join_prompt_active = true;
-                            online_runtime.join_prompt_mode = JoinPromptMode::ConnectForHost;
-                            core.status = String::from("Connect to homeserver to host a room");
-                        }
-                    } else if online_runtime.home_server_connected {
+                    if online_runtime.home_server_connected {
                         online_runtime.pending_join_server_addr =
                             online_runtime.home_server_addr.clone();
                         load_home_room_directory(core, online_runtime, "Select a room to join");
@@ -2297,29 +2288,10 @@ fn handle_online_inline_input(
                 online_runtime.join_prompt_active = false;
                 online_runtime.join_code_input.clear();
                 online_runtime.join_prompt_button = JoinPromptButton::Join;
-                let prompt_mode = online_runtime.join_prompt_mode;
                 online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                 online_runtime.home_server_addr = online_runtime.pending_join_server_addr.clone();
                 online_runtime.home_server_connected = true;
                 if online_runtime.pending_join_room_name.is_none() {
-                    if matches!(prompt_mode, JoinPromptMode::ConnectForHost) {
-                        if let Err(err) =
-                            verify_home_server(&online_runtime.pending_join_server_addr)
-                        {
-                            core.status = format!("Home server unavailable: {err}");
-                            core.dirty = true;
-                            return true;
-                        }
-                        online_runtime.join_prompt_active = true;
-                        online_runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
-                        online_runtime.join_prompt_button = JoinPromptButton::Join;
-                        core.status = format!(
-                            "Home server {} selected. Enter room name",
-                            online_runtime.pending_join_server_addr
-                        );
-                        core.dirty = true;
-                        return true;
-                    }
                     load_home_room_directory(core, online_runtime, "Select a room to join");
                     core.dirty = true;
                     return true;
@@ -2357,7 +2329,7 @@ fn handle_online_inline_input(
                     format!("Enter room name: {}", online_runtime.join_code_input)
                 } else if matches!(
                     online_runtime.join_prompt_mode,
-                    JoinPromptMode::NicknameForJoin | JoinPromptMode::NicknameForHost
+                    JoinPromptMode::NicknameForJoin
                 ) {
                     format!("Enter nickname: {}", online_runtime.join_code_input)
                 } else {
@@ -2375,73 +2347,14 @@ fn handle_online_inline_input(
     }
 
     match key.code {
-        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'h') => {
-            if core.online.session.is_some() {
-                core.status = String::from("Already in online room. Press l to leave first");
-                core.dirty = true;
-                return true;
-            }
-            if !online_runtime.nickname_configured {
-                online_runtime.join_prompt_active = true;
-                online_runtime.join_prompt_mode = JoinPromptMode::NicknameForHost;
-                online_runtime.join_code_input.clear();
-                online_runtime.join_prompt_button = JoinPromptButton::Join;
-                core.status = String::from("Set your online nickname");
-                core.dirty = true;
-                return true;
-            }
-            if online_runtime.home_server_connected {
-                online_runtime.join_prompt_active = true;
-                online_runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
-                online_runtime.join_code_input.clear();
-                online_runtime.join_prompt_button = JoinPromptButton::Join;
-                core.status = format!(
-                    "Home server {} selected. Enter room name",
-                    online_runtime.home_server_addr
-                );
-            } else {
-                online_runtime.join_prompt_active = true;
-                online_runtime.join_prompt_mode = JoinPromptMode::ConnectForHost;
-                online_runtime.join_code_input.clear();
-                online_runtime.join_prompt_button = JoinPromptButton::Join;
-                core.status = String::from("Connect to homeserver to host a room");
-            }
-            core.dirty = true;
-            true
-        }
-        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'j') => {
-            if core.online.session.is_some() {
-                core.status = String::from("Already in online room. Press l to leave first");
-                core.dirty = true;
-                return true;
-            }
-            if !online_runtime.nickname_configured {
-                online_runtime.join_prompt_active = true;
-                online_runtime.join_prompt_mode = JoinPromptMode::NicknameForJoin;
-                online_runtime.join_code_input.clear();
-                online_runtime.join_prompt_button = JoinPromptButton::Join;
-                core.status = String::from("Set your online nickname");
-                core.dirty = true;
-                return true;
-            }
-            if online_runtime.home_server_connected {
-                online_runtime.pending_join_server_addr = online_runtime.home_server_addr.clone();
-                load_home_room_directory(core, online_runtime, "Select a room to join");
-                core.dirty = true;
-                return true;
-            }
-            online_runtime.join_prompt_active = true;
-            online_runtime.join_prompt_mode = JoinPromptMode::Connect;
-            online_runtime.join_code_input.clear();
-            online_runtime.join_prompt_button = JoinPromptButton::Join;
-            core.status = String::from("Connect to homeserver to browse rooms");
-            core.dirty = true;
-            true
-        }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'l') => {
             online_runtime.shutdown();
             online_runtime.last_transport_seq = 0;
             core.online_leave_room();
+            if online_runtime.home_server_connected {
+                online_runtime.pending_join_server_addr = online_runtime.home_server_addr.clone();
+                load_home_room_directory(core, online_runtime, "Left room. Room directory loaded.");
+            }
             true
         }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'o') => {
@@ -2857,6 +2770,46 @@ fn rewrite_room_server_addr_host(home_server_addr: &str, room_server_addr: &str)
     }
 }
 
+fn trigger_online_tab_entry(core: &mut TuneCore, online_runtime: &mut OnlineRuntime) {
+    if core.online.session.is_some() {
+        return;
+    }
+    if !online_runtime.nickname_configured {
+        online_runtime.join_prompt_active = true;
+        online_runtime.join_prompt_mode = JoinPromptMode::NicknameForJoin;
+        online_runtime.join_code_input.clear();
+        online_runtime.join_prompt_button = JoinPromptButton::Join;
+        core.status = String::from("Set your online nickname");
+        core.dirty = true;
+        return;
+    }
+    if online_runtime.home_server_connected {
+        online_runtime.pending_join_server_addr = online_runtime.home_server_addr.clone();
+        load_home_room_directory(core, online_runtime, "Room directory loaded");
+        core.dirty = true;
+        return;
+    }
+    let server_addr = if online_runtime.home_server_addr.is_empty() {
+        String::from(ONLINE_DEFAULT_HOME_SERVER_ADDR)
+    } else {
+        online_runtime.home_server_addr.clone()
+    };
+    if let Err(err) = verify_home_server(&server_addr) {
+        online_runtime.join_prompt_active = true;
+        online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+        online_runtime.join_code_input.clear();
+        online_runtime.join_prompt_button = JoinPromptButton::Join;
+        core.status = format!("Homeserver unavailable: {err}. Enter address to connect.");
+        core.dirty = true;
+        return;
+    }
+    online_runtime.home_server_addr = server_addr.clone();
+    online_runtime.home_server_connected = true;
+    online_runtime.pending_join_server_addr = server_addr;
+    load_home_room_directory(core, online_runtime, "Connected and loaded room directory");
+    core.dirty = true;
+}
+
 fn load_home_room_directory(
     core: &mut TuneCore,
     online_runtime: &mut OnlineRuntime,
@@ -2868,10 +2821,22 @@ fn load_home_room_directory(
             online_runtime.join_directory_search.clear();
             online_runtime.join_directory_selected = 0;
             online_runtime.join_directory_active = true;
+            online_runtime.last_directory_refresh_at = Instant::now();
             core.status = String::from(ok_status);
         }
         Err(err) => {
             core.status = format!("Failed to load rooms: {err}");
+        }
+    }
+}
+
+fn refresh_room_directory(core: &mut TuneCore, online_runtime: &mut OnlineRuntime) {
+    if let Ok(rooms) = list_home_rooms(&online_runtime.pending_join_server_addr, None) {
+        let had_rooms = !online_runtime.join_directory_rooms.is_empty();
+        online_runtime.join_directory_rooms = rooms;
+        online_runtime.last_directory_refresh_at = Instant::now();
+        if !had_rooms && !online_runtime.join_directory_rooms.is_empty() {
+            core.dirty = true;
         }
     }
 }
@@ -5590,6 +5555,7 @@ mod tests {
             join_directory_search: String::new(),
             join_directory_selected: 0,
             join_directory_rooms: Vec::new(),
+            last_directory_refresh_at: Instant::now(),
             pending_join_server_addr: String::new(),
             pending_join_room_name: None,
             host_server_input: String::new(),
@@ -7627,125 +7593,14 @@ mod tests {
     }
 
     #[test]
-    fn online_tab_h_without_connected_home_server_opens_connect_prompt() {
+    fn online_tab_uppercase_l_leaves_room() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
         let audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
-        runtime.home_server_connected = false;
-
-        assert!(handle_online_inline_input(
-            &mut core,
-            &audio,
-            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
-            &mut runtime,
-        ));
-        assert!(runtime.join_prompt_active);
-        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::ConnectForHost);
-    }
-
-    #[test]
-    fn online_tab_h_with_connected_home_server_opens_room_name_prompt() {
-        let mut core = TuneCore::from_persisted(PersistedState::default());
-        core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
-        let mut runtime = test_online_runtime();
-        runtime.local_nickname = String::from("tester");
-        runtime.home_server_connected = true;
-
-        assert!(handle_online_inline_input(
-            &mut core,
-            &audio,
-            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
-            &mut runtime,
-        ));
-        assert!(runtime.join_prompt_active);
-        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::HostRoomName);
-    }
-
-    #[test]
-    fn online_tab_j_without_connected_home_server_opens_connect_prompt() {
-        let mut core = TuneCore::from_persisted(PersistedState::default());
-        core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
-        let mut runtime = test_online_runtime();
-        runtime.local_nickname = String::from("tester");
-        runtime.home_server_connected = false;
-
-        assert!(handle_online_inline_input(
-            &mut core,
-            &audio,
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
-            &mut runtime,
-        ));
-        assert!(runtime.join_prompt_active);
-        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
-        assert!(runtime.join_code_input.is_empty());
-    }
-
-    #[test]
-    fn online_tab_j_without_nickname_prompts_for_nickname_first() {
-        let mut core = TuneCore::from_persisted(PersistedState::default());
-        core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
-        let mut runtime = test_online_runtime();
-        runtime.local_nickname = String::from("you");
-        runtime.nickname_configured = false;
-
-        assert!(handle_online_inline_input(
-            &mut core,
-            &audio,
-            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
-            &mut runtime,
-        ));
-        assert!(runtime.join_prompt_active);
-        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::NicknameForJoin);
-    }
-
-    #[test]
-    fn nickname_prompt_sets_name_and_continues_join_flow() {
-        let mut core = TuneCore::from_persisted(PersistedState::default());
-        core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
-        let mut runtime = test_online_runtime();
-        runtime.local_nickname = String::from("you");
-        runtime.nickname_configured = false;
-        runtime.join_prompt_active = true;
-        runtime.join_prompt_mode = JoinPromptMode::NicknameForJoin;
-        runtime.join_code_input = String::from("dj");
-
-        assert!(handle_online_inline_input(
-            &mut core,
-            &audio,
-            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
-            &mut runtime,
-        ));
-        assert_eq!(runtime.local_nickname, "dj");
-        assert!(runtime.nickname_configured);
-        assert_eq!(core.online_nickname, "dj");
-        assert!(runtime.join_prompt_active);
-        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
-    }
-
-    #[test]
-    fn online_tab_uppercase_commands_work_with_caps_lock() {
-        let mut core = TuneCore::from_persisted(PersistedState::default());
-        core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
-        let mut runtime = test_online_runtime();
-        runtime.local_nickname = String::from("tester");
-
-        assert!(handle_online_inline_input(
-            &mut core,
-            &audio,
-            KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE),
-            &mut runtime,
-        ));
-        assert!(runtime.join_prompt_active);
-
-        runtime.join_prompt_active = false;
         core.online_host_room("tester");
+
         assert!(handle_online_inline_input(
             &mut core,
             &audio,

@@ -60,7 +60,7 @@ impl StatsFilterFocus {
 }
 
 impl HeaderSection {
-    fn next(self) -> Self {
+    pub fn next(self) -> Self {
         match self {
             Self::Library => Self::Lyrics,
             Self::Lyrics => Self::Stats,

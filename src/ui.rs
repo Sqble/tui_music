@@ -58,7 +58,7 @@ pub struct OnlineRoomDirectoryModalView {
 
 pub struct OverlayViews<'a> {
     pub join_prompt_modal: Option<&'a JoinPromptModalView>,
-    pub room_directory_modal: Option<&'a OnlineRoomDirectoryModalView>,
+    pub room_directory_view: Option<&'a OnlineRoomDirectoryModalView>,
     pub online_password_prompt: Option<&'a OnlinePasswordPromptView>,
     pub host_invite_modal: Option<&'a HostInviteModalView>,
     pub room_code_revealed: bool,
@@ -514,7 +514,14 @@ pub fn draw(
                 draw_lyrics_section(frame, &body, colors, core, audio);
             }
             HeaderSection::Online => {
-                draw_online_section(frame, &body, colors, core, overlays.room_code_revealed);
+                draw_online_section(
+                    frame,
+                    &body,
+                    colors,
+                    core,
+                    overlays.room_code_revealed,
+                    overlays.room_directory_view,
+                );
             }
         }
     }
@@ -550,7 +557,7 @@ pub fn draw(
     } else if core.header_section == HeaderSection::Lyrics {
         "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: h host room, j join/browse rooms, l leave, o mode, q quality, t hide/show code, 2 copy code"
+        "Keys: Enter select/join, l leave room, o mode, q quality, t hide/show code, 2 copy code, Tab tabs"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -573,9 +580,6 @@ pub fn draw(
     if let Some(join_prompt_modal) = overlays.join_prompt_modal {
         draw_join_prompt(frame, join_prompt_modal, &colors);
     }
-    if let Some(room_directory_modal) = overlays.room_directory_modal {
-        draw_room_directory_modal(frame, room_directory_modal, &colors);
-    }
     if let Some(password_prompt) = overlays.online_password_prompt {
         draw_online_password_prompt(frame, password_prompt, &colors);
     }
@@ -584,61 +588,113 @@ pub fn draw(
     }
 }
 
-fn draw_room_directory_modal(
+fn draw_room_directory_inline(
     frame: &mut Frame,
-    modal: &OnlineRoomDirectoryModalView,
-    colors: &ThemePalette,
+    horizontal: &[Rect],
+    colors: ThemePalette,
+    dir: &OnlineRoomDirectoryModalView,
 ) {
-    let popup = centered_rect(frame.area(), 76, 58);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        panel_block(
-            "Room Directory",
-            colors.popup_bg,
-            colors.text,
-            colors.border,
-        ),
-        popup,
-    );
-    let inner = popup.inner(Margin {
-        vertical: 1,
-        horizontal: 2,
-    });
-    let mut lines = vec![
+    let mut left_lines = vec![
         Line::from(Span::styled(
-            format!("Server {}", modal.server_addr),
+            "Room Directory",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            format!("Server: {}", dir.server_addr),
             Style::default().fg(colors.muted),
         )),
         Line::from(Span::styled(
-            format!("Search: {}", modal.search),
+            format!("Search: {}", dir.search),
             Style::default().fg(colors.accent),
         )),
         Line::from(""),
     ];
-    if modal.rooms.is_empty() {
-        lines.push(Line::from(Span::styled(
+
+    let max_rooms = horizontal[0].height.saturating_sub(8) as usize;
+    for (index, room_line) in dir.rooms.iter().enumerate().take(max_rooms) {
+        let style = if index == dir.selected {
+            Style::default()
+                .fg(colors.text)
+                .bg(colors.selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(colors.text)
+        };
+        left_lines.push(Line::from(Span::styled(room_line.as_str(), style)));
+    }
+
+    if dir.rooms.is_empty() {
+        left_lines.push(Line::from(Span::styled(
             "(no rooms)",
             Style::default().fg(colors.muted),
         )));
-    } else {
-        for (index, room_line) in modal.rooms.iter().enumerate().take(14) {
-            let style = if index == modal.selected {
-                Style::default()
-                    .fg(colors.text)
-                    .bg(colors.popup_selected_bg)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(colors.text)
-            };
-            lines.push(Line::from(Span::styled(room_line.as_str(), style)));
-        }
     }
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Type to search. Up/Down select. Enter join. Esc cancel.",
-        Style::default().fg(colors.muted),
-    )));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+
+    let left = Paragraph::new(left_lines)
+        .block(panel_block(
+            "Online",
+            colors.content_panel_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(left, horizontal[0]);
+
+    let right_lines = vec![
+        Line::from(Span::styled(
+            "Controls",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[+] Create Room",
+            Style::default().fg(colors.accent),
+        )),
+        Line::from(Span::styled(
+            "    Start a new room for others to join",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[open] Unlocked room",
+            Style::default().fg(colors.text),
+        )),
+        Line::from(Span::styled(
+            "[lock] Password protected",
+            Style::default().fg(colors.alert),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Up/Down - Navigate",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            "Enter - Join/Create",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            "Esc - Close directory",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            "Type - Search rooms",
+            Style::default().fg(colors.muted),
+        )),
+    ];
+
+    let right = Paragraph::new(right_lines)
+        .block(panel_block(
+            "Help",
+            colors.content_panel_alt_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(right, horizontal[1]);
 }
 
 fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &ThemePalette) {
@@ -910,6 +966,7 @@ fn draw_online_section(
     colors: ThemePalette,
     core: &TuneCore,
     room_code_revealed: bool,
+    room_directory: Option<&OnlineRoomDirectoryModalView>,
 ) {
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
@@ -922,13 +979,17 @@ fn draw_online_section(
         });
 
     let Some(session) = core.online.session.as_ref() else {
-        draw_placeholder_section(
-            frame,
-            body,
-            colors,
-            "Online",
-            "No room connected. Press h to host or j to join.",
-        );
+        if let Some(dir) = room_directory {
+            draw_room_directory_inline(frame, &horizontal, colors, dir);
+        } else {
+            draw_placeholder_section(
+                frame,
+                body,
+                colors,
+                "Online",
+                "No room connected. Use Tab to switch to this tab.",
+            );
+        }
         return;
     };
 
