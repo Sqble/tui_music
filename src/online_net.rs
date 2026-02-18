@@ -355,6 +355,7 @@ pub fn start_home_server(
     let bind = listener
         .local_addr()
         .context("failed to get local home addr")?;
+    let bind_addr_for_closure = bind_addr.to_string();
     let join_handle = thread::spawn(move || {
         let mut rooms: HashMap<String, HostedRoom> = HashMap::new();
         loop {
@@ -428,7 +429,11 @@ pub fn start_home_server(
                         Ok(HomeRequest::ResolveRoom { room_name }) => {
                             match room_by_name(&rooms, &room_name) {
                                 Some(room) => HomeResponse::RoomResolved {
-                                    room: home_room_resolved_wire(room, &stream, bind),
+                                    room: home_room_resolved_wire(
+                                        room,
+                                        &stream,
+                                        &bind_addr_for_closure,
+                                    ),
                                 },
                                 None => HomeResponse::Error {
                                     message: String::from("room not found"),
@@ -499,7 +504,11 @@ pub fn start_home_server(
                                         );
                                         match room_by_name(&rooms, name) {
                                             Some(room) => HomeResponse::RoomResolved {
-                                                room: home_room_resolved_wire(room, &stream, bind),
+                                                room: home_room_resolved_wire(
+                                                    room,
+                                                    &stream,
+                                                    &bind_addr_for_closure,
+                                                ),
                                             },
                                             None => HomeResponse::Error {
                                                 message: String::from(
@@ -710,22 +719,43 @@ fn room_by_name<'a>(
 fn home_room_resolved_wire(
     room: &HostedRoom,
     stream: &TcpStream,
-    fallback_bind: SocketAddr,
+    bind_addr: &str,
 ) -> HomeRoomResolvedWire {
-    let ip = stream
+    let local_ip = stream
         .local_addr()
         .map(|addr| addr.ip())
-        .unwrap_or(fallback_bind.ip());
-    let safe_ip = match ip {
-        IpAddr::V4(v4) if v4.is_unspecified() => IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        IpAddr::V6(v6) if v6.is_unspecified() => IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
-        _ => ip,
+        .unwrap_or_else(|_| IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+
+    let use_local_addr = match local_ip {
+        IpAddr::V4(v4) if v4.is_loopback() => true,
+        IpAddr::V4(v4) if v4.is_unspecified() => false,
+        IpAddr::V6(v6) if v6.is_loopback() => true,
+        IpAddr::V6(v6) if v6.is_unspecified() => false,
+        _ => false,
     };
+
+    let final_addr = if use_local_addr {
+        SocketAddr::new(local_ip, room.room_server_port).to_string()
+    } else {
+        resolve_advertise_addr(bind_addr).unwrap_or_else(|_| {
+            if let Ok(socket) = bind_addr.parse::<SocketAddr>() {
+                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), socket.port()).to_string()
+            } else {
+                format!("127.0.0.1:{}", room.room_server_port)
+            }
+        })
+    };
+
+    let (ip_str, port_str) = final_addr.rsplit_once(':').unwrap_or(("127.0.0.1", "0"));
+    let ip: IpAddr = ip_str
+        .parse()
+        .unwrap_or(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
+    let port: u16 = port_str.parse().unwrap_or(0);
 
     HomeRoomResolvedWire {
         room_name: room.room_name.clone(),
         room_code: room.room_code.clone(),
-        room_server_addr: SocketAddr::new(safe_ip, room.room_server_port).to_string(),
+        room_server_addr: SocketAddr::new(ip, port).to_string(),
         locked: room.locked,
         current_connections: room.current_connections,
         max_connections: room.max_connections,
