@@ -9,7 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::net::{
-    IpAddr, Ipv4Addr, Shutdown as NetShutdown, SocketAddr, TcpListener, TcpStream, UdpSocket,
+    IpAddr, Ipv4Addr, Shutdown as NetShutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs,
+    UdpSocket,
 };
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
@@ -624,10 +625,26 @@ fn resolve_from_response(response: HomeResponse) -> anyhow::Result<HomeRoomResol
 const HOME_CONNECT_TIMEOUT_MS: u64 = 3_000;
 const HOME_READ_TIMEOUT_MS: u64 = 5_000;
 
-fn send_home_request(server_addr: &str, request: &HomeRequest) -> anyhow::Result<HomeResponse> {
-    let addr: SocketAddr = server_addr
+fn resolve_server_addr(server_addr: &str) -> anyhow::Result<SocketAddr> {
+    if let Ok(addr) = server_addr.parse() {
+        return Ok(addr);
+    }
+    let (host, port) = server_addr
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("invalid address format: {server_addr}"))?;
+    let port: u16 = port
         .parse()
-        .with_context(|| format!("invalid home server address: {server_addr}"))?;
+        .with_context(|| format!("invalid port in address: {server_addr}"))?;
+    let mut addrs = (host, port)
+        .to_socket_addrs()
+        .with_context(|| format!("failed to resolve host: {host}"))?;
+    addrs
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no addresses found for host: {host}"))
+}
+
+fn send_home_request(server_addr: &str, request: &HomeRequest) -> anyhow::Result<HomeResponse> {
+    let addr = resolve_server_addr(server_addr)?;
     let mut stream =
         TcpStream::connect_timeout(&addr, Duration::from_millis(HOME_CONNECT_TIMEOUT_MS))
             .with_context(|| format!("failed to connect to home server {server_addr}"))?;
