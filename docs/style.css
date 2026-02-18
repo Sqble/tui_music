@@ -29,6 +29,7 @@
 
 html {
     scroll-behavior: smooth;
+    overflow-x: hidden;
 }
 
 body {
@@ -38,7 +39,9 @@ body {
     background: var(--bg-primary);
     color: var(--fg-primary);
     min-height: 100vh;
+    min-width: 0;
     display: flex;
+    overflow-x: hidden;
 }
 
 .sidebar {
@@ -151,10 +154,15 @@ body {
 }
 
 .content {
-    margin-left: var(--sidebar-width);
-    flex: 1;
-    padding: 48px 64px;
+    margin-left: max(var(--sidebar-width), calc((100vw - 900px) / 2));
+    margin-right: auto;
+    flex: 0 1 900px;
+    padding: 48px clamp(20px, 5vw, 64px);
     max-width: 900px;
+    min-width: 0;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
 }
 
 .docs-section {
@@ -163,7 +171,9 @@ body {
 }
 
 .docs-section.active {
-    display: block;
+    display: flex;
+    flex-direction: column;
+    flex: 1;
 }
 
 @keyframes fadeIn {
@@ -178,10 +188,12 @@ body {
 
 .logo {
     margin-bottom: 24px;
+    overflow-x: auto;
+    max-width: 100%;
 }
 
 .logo pre {
-    font-size: 12px;
+    font-size: clamp(12px, 3.5vw, 18px);
     line-height: 1.4;
     color: var(--fg-primary);
 }
@@ -199,19 +211,27 @@ body {
 
 .cta-group {
     display: flex;
-    gap: 16px;
-    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    align-items: stretch;
     margin-bottom: 48px;
-    flex-wrap: wrap;
+    width: 100%;
+    max-width: 320px;
+    margin-left: auto;
+    margin-right: auto;
 }
 
 .btn {
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
-    padding: 12px 24px;
+    padding: 14px clamp(16px, 4vw, 28px);
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
     font-family: inherit;
-    font-size: 14px;
+    font-size: clamp(14px, 2.5vw, 15px);
     font-weight: 500;
     text-decoration: none;
     border-radius: 6px;
@@ -220,13 +240,17 @@ body {
 }
 
 .btn-arrow {
-    color: var(--bg-primary);
+    color: var(--fg-primary);
     opacity: 0.8;
+}
+
+.btn-arrow-download {
+    color: #fff;
 }
 
 .btn-primary {
     background: var(--accent-blue);
-    color: var(--bg-primary);
+    color: #fff;
     border: none;
 }
 
@@ -247,27 +271,31 @@ body {
     color: var(--accent-blue);
 }
 
-.hero-features {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-    gap: 16px;
-    max-width: 600px;
-    margin: 0 auto;
-}
-
-.feature {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 12px 16px;
-    background: var(--bg-secondary);
-    border-radius: 6px;
-    font-size: 13px;
+.hero-overview {
+    width: 100%;
+    max-width: 520px;
+    margin: 0 auto 48px;
     color: var(--fg-secondary);
+    font-size: clamp(14px, 2.5vw, 15px);
+    line-height: 1.7;
 }
 
-.feature-icon {
-    font-size: 16px;
+.section-footer {
+    margin-top: auto;
+    padding-top: 24px;
+    padding-bottom: 24px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 16px;
+}
+
+.section-footer .btn.nav-page {
+    display: inline-flex;
+    width: auto;
+    min-width: 0;
+    max-width: none;
 }
 
 h1 {
@@ -295,6 +323,16 @@ p {
     color: var(--fg-primary);
 }
 
+.docs-section a:not(.btn) {
+    color: var(--accent-cyan);
+    text-decoration: none;
+}
+
+.docs-section a:not(.btn):hover {
+    color: var(--accent-blue);
+    text-decoration: underline;
+}
+
 ul, ol {
     margin: 16px 0;
     padding-left: 24px;
@@ -320,6 +358,7 @@ pre {
     border-radius: 6px;
     padding: 16px;
     overflow-x: auto;
+    max-width: 100%;
     margin: 16px 0;
 }
 
@@ -348,12 +387,13 @@ kbd {
 
 .keybind {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 8px;
     padding: 8px 12px;
     background: var(--bg-secondary);
     border-radius: 4px;
-    font-size: 14px;
+    font-size: clamp(12px, 2vw, 14px);
 }
 
 .keybind span {
@@ -393,7 +433,8 @@ kbd {
     }
 
     .content {
-        margin-left: 0;
+        margin-left: auto;
+        margin-right: auto;
         padding: 72px 20px 40px;
     }
 
@@ -401,12 +442,21 @@ kbd {
         display: flex;
     }
 
-    .hero-features {
-        grid-template-columns: 1fr;
+    .cta-group {
+        max-width: 100%;
     }
 
-    .cta-group {
-        flex-direction: column;
-        align-items: center;
+    .section-footer {
+        flex-wrap: wrap;
+    }
+}
+
+@media (max-width: 480px) {
+    .content {
+        padding: 72px 16px 40px;
+    }
+
+    .hero {
+        padding: 24px 0 40px;
     }
 }

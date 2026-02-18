@@ -2370,21 +2370,35 @@ fn handle_online_inline_input(
             true
         }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'o') => {
-            core.online_toggle_mode();
-            if let (Some(network), Some(session)) =
-                (&online_runtime.network, core.online.session.as_ref())
-            {
-                network.send_local_action(NetworkLocalAction::SetMode(session.mode));
+            if let Some(session) = core.online.session.as_ref() {
+                let is_host = session.local_participant().is_some_and(|p| p.is_host);
+                let mode = session.mode;
+                if is_host {
+                    core.online_toggle_mode();
+                    if let Some(network) = &online_runtime.network {
+                        network.send_local_action(NetworkLocalAction::SetMode(mode));
+                    }
+                } else {
+                    core.status = String::from("Only host can change room mode");
+                }
             }
+            core.dirty = true;
             true
         }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'q') => {
-            core.online_cycle_quality();
-            if let (Some(network), Some(session)) =
-                (&online_runtime.network, core.online.session.as_ref())
-            {
-                network.send_local_action(NetworkLocalAction::SetQuality(session.quality));
+            if let Some(session) = core.online.session.as_ref() {
+                let is_host = session.local_participant().is_some_and(|p| p.is_host);
+                let quality = session.quality;
+                if is_host {
+                    core.online_cycle_quality();
+                    if let Some(network) = &online_runtime.network {
+                        network.send_local_action(NetworkLocalAction::SetQuality(quality));
+                    }
+                } else {
+                    core.status = String::from("Only host can change stream quality");
+                }
             }
+            core.dirty = true;
             true
         }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'t') => {
