@@ -4,7 +4,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tempfile::tempdir;
-use tune::online::{OnlineSession, QueueDelivery, SharedQueueItem};
+use tune::online::{
+    OnlineSession, QueueDelivery, SharedQueueItem, TransportCommand, TransportEnvelope,
+};
 use tune::online_net::{LocalAction, NetworkEvent, OnlineNetwork};
 
 fn start_host_and_two_clients() -> (OnlineNetwork, OnlineNetwork, OnlineNetwork) {
@@ -139,6 +141,43 @@ fn host_can_pull_track_from_remote_client_owner() {
 
     let streamed_path = wait_for_stream_ready(&host, &source_path, Duration::from_secs(5))
         .expect("host did not receive pulled stream");
+    let streamed_bytes = fs::read(&streamed_path).expect("read streamed cache");
+    assert_eq!(streamed_bytes, source_bytes);
+
+    listener_client.shutdown();
+    source_client.shutdown();
+    host.shutdown();
+
+    let _ = fs::remove_file(streamed_path);
+}
+
+#[test]
+fn remote_transport_origin_can_stream_without_shared_queue_entry() {
+    let temp = tempdir().expect("tempdir");
+    let source_path = temp.path().join("transport-origin-source.bin");
+    let source_bytes = b"transport-origin-stream-payload";
+    fs::write(&source_path, source_bytes).expect("write source");
+
+    let (host, source_client, listener_client) = start_host_and_two_clients();
+
+    source_client.send_local_action(LocalAction::Transport(TransportEnvelope {
+        seq: 0,
+        origin_nickname: String::from("alice"),
+        command: TransportCommand::PlayTrack {
+            path: source_path.clone(),
+            title: None,
+            artist: None,
+            album: None,
+            provider_track_id: None,
+        },
+    }));
+
+    thread::sleep(Duration::from_millis(100));
+    listener_client.request_track_stream(source_path.clone(), Some(String::from("alice")));
+
+    let streamed_path =
+        wait_for_stream_ready(&listener_client, &source_path, Duration::from_secs(5))
+            .expect("listener did not receive stream from transport origin");
     let streamed_bytes = fs::read(&streamed_path).expect("read streamed cache");
     assert_eq!(streamed_bytes, source_bytes);
 

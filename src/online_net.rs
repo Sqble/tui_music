@@ -1146,16 +1146,8 @@ fn client_loop(
                         Ok(WireServerMessage::Session(session)) => {
                             if let Ok(mut guard) = read_upload_guard.lock() {
                                 let local_nickname = guard.local_nickname.clone();
-                                let allowed_paths = session
-                                    .shared_queue
-                                    .iter()
-                                    .filter(|item| {
-                                        item.owner_nickname.as_deref().is_some_and(|owner| {
-                                            owner.eq_ignore_ascii_case(&local_nickname)
-                                        })
-                                    })
-                                    .map(|item| item.path.clone())
-                                    .collect();
+                                let allowed_paths =
+                                    allowed_upload_paths_for_client(&session, &local_nickname);
                                 guard.allowed_paths = allowed_paths;
                             }
                             if let Ok(mut quality) = read_stream_quality.lock() {
@@ -2332,6 +2324,42 @@ fn action_allowed_for_origin(
         action,
         LocalAction::DelayUpdate { .. } | LocalAction::SetNickname { .. }
     )
+}
+
+fn allowed_upload_paths_for_client(
+    session: &OnlineSession,
+    local_nickname: &str,
+) -> HashSet<PathBuf> {
+    let mut allowed_paths: HashSet<PathBuf> = session
+        .shared_queue
+        .iter()
+        .filter(|item| {
+            item.owner_nickname
+                .as_deref()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(local_nickname))
+        })
+        .map(|item| item.path.clone())
+        .collect();
+
+    if let Some(last_transport) = session.last_transport.as_ref()
+        && last_transport
+            .origin_nickname
+            .eq_ignore_ascii_case(local_nickname)
+        && let Some(path) = transport_path(&last_transport.command)
+    {
+        allowed_paths.insert(path.to_path_buf());
+    }
+
+    allowed_paths
+}
+
+fn transport_path(command: &crate::online::TransportCommand) -> Option<&Path> {
+    match command {
+        crate::online::TransportCommand::PlayTrack { path, .. }
+        | crate::online::TransportCommand::SetPlaybackState { path, .. } => Some(path.as_path()),
+        crate::online::TransportCommand::StopPlayback
+        | crate::online::TransportCommand::SetPaused { .. } => None,
+    }
 }
 
 fn origin_is_host(session: &OnlineSession, origin_nickname: &str) -> bool {
@@ -3693,6 +3721,46 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[test]
+    fn upload_guard_allows_local_last_transport_path() {
+        let mut session = OnlineSession::join("ROOM22", "alice");
+        session.last_transport = Some(crate::online::TransportEnvelope {
+            seq: 1,
+            origin_nickname: String::from("alice"),
+            command: crate::online::TransportCommand::PlayTrack {
+                path: PathBuf::from("live-set.flac"),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+            },
+        });
+
+        let allowed = allowed_upload_paths_for_client(&session, "alice");
+        assert!(allowed.contains(&PathBuf::from("live-set.flac")));
+    }
+
+    #[test]
+    fn upload_guard_ignores_non_local_last_transport_path() {
+        let mut session = OnlineSession::join("ROOM22", "alice");
+        session.last_transport = Some(crate::online::TransportEnvelope {
+            seq: 1,
+            origin_nickname: String::from("bob"),
+            command: crate::online::TransportCommand::SetPlaybackState {
+                path: PathBuf::from("other.flac"),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 500,
+                paused: false,
+            },
+        });
+
+        let allowed = allowed_upload_paths_for_client(&session, "alice");
+        assert!(!allowed.contains(&PathBuf::from("other.flac")));
     }
 
     #[test]
