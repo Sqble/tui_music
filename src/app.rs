@@ -3468,9 +3468,8 @@ fn ensure_remote_track(
     online_runtime: &mut OnlineRuntime,
     path: &Path,
 ) -> bool {
-    if online_runtime.remote_logical_track.as_ref() == Some(&path.to_path_buf())
-        && audio.current_track().is_some()
-    {
+    if current_track_matches_remote_logical_path(audio, online_runtime, path) {
+        online_runtime.remote_logical_track = Some(path.to_path_buf());
         return true;
     }
 
@@ -3506,6 +3505,23 @@ fn ensure_remote_track(
             false
         }
     }
+}
+
+fn current_track_matches_remote_logical_path(
+    audio: &dyn AudioEngine,
+    online_runtime: &OnlineRuntime,
+    path: &Path,
+) -> bool {
+    let Some(current) = audio.current_track() else {
+        return false;
+    };
+    if current == path {
+        return true;
+    }
+    online_runtime
+        .streamed_track_cache
+        .get(path)
+        .is_some_and(|cached| cached.as_path() == current)
 }
 
 fn preferred_stream_source(
@@ -6701,6 +6717,41 @@ mod tests {
                 .as_ref()
                 .map(|session| session.last_sync_drift_ms),
             Some(250)
+        );
+    }
+
+    #[test]
+    fn remote_sync_switches_track_when_current_track_differs() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(crate::online::OnlineSession::join("ROOM22", "listener"));
+        let mut runtime = test_online_runtime();
+        runtime.remote_logical_track = Some(PathBuf::from("remote.mp3"));
+
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("local.mp3"));
+        audio.position = Some(Duration::from_millis(1_000));
+
+        apply_remote_transport(
+            &mut core,
+            &mut audio,
+            &mut runtime,
+            &TransportCommand::SetPlaybackState {
+                path: PathBuf::from("remote.mp3"),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 1_200,
+                paused: false,
+            },
+        );
+
+        assert_eq!(audio.current.as_deref(), Some(Path::new("remote.mp3")));
+        assert!(
+            audio
+                .played
+                .iter()
+                .any(|entry| entry == Path::new("remote.mp3"))
         );
     }
 
