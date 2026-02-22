@@ -3271,8 +3271,7 @@ fn handle_stream_quality_change(
         online_runtime.pending_stream_path = None;
         online_runtime.remote_logical_track = None;
         if let Some(network) = online_runtime.network.as_ref() {
-            let source_nickname =
-                preferred_stream_source(core, online_runtime, network.role(), path.as_path());
+            let source_nickname = preferred_stream_source(core, online_runtime, path.as_path());
             network.request_track_stream(path.clone(), source_nickname);
             online_runtime.pending_stream_path = Some(path.clone());
             online_runtime.remote_logical_track = Some(path);
@@ -3491,8 +3490,7 @@ fn ensure_remote_track(
         Err(err) => {
             if online_runtime.pending_stream_path.as_ref() != Some(&path.to_path_buf()) {
                 if let Some(network) = online_runtime.network.as_ref() {
-                    let source_nickname =
-                        preferred_stream_source(core, online_runtime, network.role(), path);
+                    let source_nickname = preferred_stream_source(core, online_runtime, path);
                     network.request_track_stream(path.to_path_buf(), source_nickname.clone());
                     online_runtime.pending_stream_path = Some(path.to_path_buf());
                     online_runtime.remote_logical_track = Some(path.to_path_buf());
@@ -3513,12 +3511,8 @@ fn ensure_remote_track(
 fn preferred_stream_source(
     core: &TuneCore,
     online_runtime: &OnlineRuntime,
-    role: &NetworkRole,
     path: &Path,
 ) -> Option<String> {
-    if !matches!(role, NetworkRole::Host) {
-        return None;
-    }
     let session = core.online.session.as_ref()?;
     let local_nickname = session
         .local_participant()
@@ -5906,6 +5900,35 @@ mod tests {
             OnlinePlaybackSource::LocalQueue
         );
         assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
+    }
+
+    #[test]
+    fn preferred_stream_source_uses_queue_owner_for_client_roles() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("alice");
+
+        let mut session = crate::online::OnlineSession::join("ROOM22", "alice");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("bob"),
+            is_local: false,
+            is_host: true,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("shared.mp3"),
+            title: String::from("shared"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("bob")),
+        });
+        core.online.session = Some(session);
+
+        assert_eq!(
+            preferred_stream_source(&core, &runtime, Path::new("shared.mp3")),
+            Some(String::from("bob"))
+        );
     }
 
     #[test]
