@@ -3178,6 +3178,9 @@ fn drain_online_network_events(
                                     .and_then(|name| name.to_str())
                                     .unwrap_or("track")
                             );
+                            if should_publish_after_pending_stream_ready(core, online_runtime) {
+                                publish_current_playback_state(core, audio, online_runtime);
+                            }
                             core.dirty = true;
                         }
                         Err(err) => {
@@ -3245,6 +3248,17 @@ fn drain_online_network_events(
             }
         }
     }
+}
+
+fn should_publish_after_pending_stream_ready(
+    core: &TuneCore,
+    online_runtime: &OnlineRuntime,
+) -> bool {
+    core.online
+        .session
+        .as_ref()
+        .and_then(online_authority_nickname)
+        .is_some_and(|authority| authority.eq_ignore_ascii_case(&online_runtime.local_nickname))
 }
 
 fn handle_stream_quality_change(
@@ -7477,6 +7491,33 @@ mod tests {
             runtime.online_playback_source,
             OnlinePlaybackSource::LocalQueue
         );
+    }
+
+    #[test]
+    fn pending_stream_ready_publish_allowed_for_local_authority() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(crate::online::OnlineSession::host("listener"));
+        let runtime = test_online_runtime();
+
+        assert!(should_publish_after_pending_stream_ready(&core, &runtime));
+    }
+
+    #[test]
+    fn pending_stream_ready_publish_blocked_for_non_authority() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut session = crate::online::OnlineSession::join("ROOM22", "listener");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("dj-host"),
+            is_local: false,
+            is_host: true,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        core.online.session = Some(session);
+        let runtime = test_online_runtime();
+
+        assert!(!should_publish_after_pending_stream_ready(&core, &runtime));
     }
 
     #[test]
