@@ -1346,7 +1346,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             continue;
         }
 
-        if handle_online_inline_input(&mut core, &*audio, key, &mut online_runtime) {
+        if handle_online_inline_input(&mut core, &mut *audio, key, &mut online_runtime) {
             continue;
         }
         if handle_stats_inline_input(&mut core, key) {
@@ -1787,6 +1787,49 @@ fn maybe_start_online_shared_queue_if_idle(
     }
 }
 
+fn play_shared_queue_now(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
+) {
+    if local_playback_locked_by_host_only(core) {
+        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+        core.dirty = true;
+        return;
+    }
+
+    let next_shared = core
+        .online
+        .session
+        .as_ref()
+        .and_then(|session| session.shared_queue.first().cloned());
+    let Some(shared_item) = next_shared else {
+        core.status = String::from("Shared queue is empty");
+        core.dirty = true;
+        return;
+    };
+
+    let switched = ensure_remote_track(core, audio, online_runtime, &shared_item.path);
+    let stream_pending = online_runtime.pending_stream_path.as_ref() == Some(&shared_item.path);
+    if switched || stream_pending {
+        consume_shared_queue_item(core, online_runtime, Some(shared_item.path.clone()));
+        online_runtime.online_playback_source = OnlinePlaybackSource::SharedQueue;
+        if switched {
+            audio.resume();
+            publish_current_playback_state(core, audio, online_runtime);
+            core.status = format!(
+                "Shared queue now: {}",
+                shared_item
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("track")
+            );
+            core.dirty = true;
+        }
+    }
+}
+
 fn online_authority_nickname(session: &OnlineSession) -> Option<&str> {
     if let Some(last_transport) = session.last_transport.as_ref()
         && session.participants.iter().any(|participant| {
@@ -2034,7 +2077,7 @@ fn handle_lyrics_inline_input(core: &mut TuneCore, audio: &dyn AudioEngine, key:
 
 fn handle_online_inline_input(
     core: &mut TuneCore,
-    audio: &dyn AudioEngine,
+    audio: &mut dyn AudioEngine,
     key: KeyEvent,
     online_runtime: &mut OnlineRuntime,
 ) -> bool {
@@ -2360,6 +2403,10 @@ fn handle_online_inline_input(
     }
 
     match key.code {
+        KeyCode::Char(_) if key_event_matches_ctrl_char(&key, 'n') => {
+            play_shared_queue_now(core, audio, online_runtime);
+            true
+        }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'l') => {
             online_runtime.shutdown();
             online_runtime.last_transport_seq = 0;
@@ -7696,6 +7743,98 @@ mod tests {
     }
 
     #[test]
+    fn play_shared_queue_now_starts_head_while_local_queue_is_playing() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(crate::online::OnlineSession::host("host"));
+        if let Some(session) = core.online.session.as_mut() {
+            session.push_shared_track(
+                Path::new("shared.mp3"),
+                String::from("shared"),
+                Some(String::from("listener")),
+            );
+        }
+
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("host");
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("local.mp3"));
+        audio.position = Some(Duration::from_millis(400));
+
+        play_shared_queue_now(&mut core, &mut audio, &mut runtime);
+
+        assert_eq!(audio.current.as_deref(), Some(Path::new("shared.mp3")));
+        assert_eq!(audio.played, vec![PathBuf::from("shared.mp3")]);
+        assert_eq!(
+            runtime.online_playback_source,
+            OnlinePlaybackSource::SharedQueue
+        );
+        assert_eq!(
+            core.online
+                .session
+                .as_ref()
+                .map(|session| session.shared_queue.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn play_shared_queue_now_respects_host_only_listener_lockdown() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut session = host_only_listener_session();
+        session.push_shared_track(
+            Path::new("shared.mp3"),
+            String::from("shared"),
+            Some(String::from("listener")),
+        );
+        core.online.session = Some(session);
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("listener");
+        let mut audio = TestAudioEngine::new();
+
+        play_shared_queue_now(&mut core, &mut audio, &mut runtime);
+
+        assert!(audio.played.is_empty());
+        assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
+        assert_eq!(
+            core.online
+                .session
+                .as_ref()
+                .map(|session| session.shared_queue.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn online_tab_ctrl_n_triggers_play_shared_queue_now() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        core.online.session = Some(crate::online::OnlineSession::host("host"));
+        if let Some(session) = core.online.session.as_mut() {
+            session.push_shared_track(
+                Path::new("shared.mp3"),
+                String::from("shared"),
+                Some(String::from("listener")),
+            );
+        }
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("local.mp3"));
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("host");
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &mut runtime,
+        ));
+        assert_eq!(audio.current.as_deref(), Some(Path::new("shared.mp3")));
+        assert_eq!(
+            runtime.online_playback_source,
+            OnlinePlaybackSource::SharedQueue
+        );
+    }
+
+    #[test]
     fn inferred_tunetui_config_dir_uses_home_when_userprofile_missing() {
         let inferred = inferred_tunetui_config_dir(None, Some("/home/tune"), None);
         assert_eq!(inferred, Some(PathBuf::from("/home/tune/.config/tunetui")));
@@ -7766,19 +7905,19 @@ mod tests {
     fn online_tab_consumes_library_navigation_keys() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
 
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             &mut runtime,
         ));
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut runtime,
         ));
@@ -7788,13 +7927,13 @@ mod tests {
     fn online_tab_does_not_consume_ctrl_c() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
 
         assert!(!handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             &mut runtime,
         ));
@@ -7804,13 +7943,13 @@ mod tests {
     fn online_tab_consumes_ctrl_s() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
 
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
             &mut runtime,
         ));
@@ -7820,19 +7959,19 @@ mod tests {
     fn online_tab_does_not_consume_volume_keys() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
 
         assert!(!handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE),
             &mut runtime,
         ));
         assert!(!handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE),
             &mut runtime,
         ));
@@ -7842,7 +7981,7 @@ mod tests {
     fn join_prompt_allows_typing_v_without_triggering_paste() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
         runtime.join_prompt_active = true;
@@ -7850,7 +7989,7 @@ mod tests {
 
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
             &mut runtime,
         ));
@@ -7861,14 +8000,14 @@ mod tests {
     fn online_tab_uppercase_l_leaves_room() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
         core.online_host_room("tester");
 
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE),
             &mut runtime,
         ));
@@ -7880,13 +8019,13 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
         core.online_host_room("tester");
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
 
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
             &mut runtime,
         ));

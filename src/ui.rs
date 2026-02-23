@@ -557,7 +557,7 @@ pub fn draw(
     } else if core.header_section == HeaderSection::Lyrics {
         "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: Enter select/join, l leave room, o mode, q quality, t hide/show code, 2 copy code, Tab tabs"
+        "Keys: Enter select/join, Ctrl+n shared now, l leave room, o mode, q quality, t hide/show code, 2 copy code, Tab tabs"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -1111,6 +1111,10 @@ fn draw_online_section(
             Style::default().fg(colors.muted),
         )));
     }
+    right_lines.push(Line::from(Span::styled(
+        "Ctrl+n: play shared now / next shared",
+        Style::default().fg(colors.muted),
+    )));
     right_lines.push(Line::from(""));
     right_lines.push(Line::from(Span::styled(
         "Networking",
