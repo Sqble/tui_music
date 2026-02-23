@@ -3082,10 +3082,10 @@ fn maybe_publish_online_playback_sync(
     audio: &dyn AudioEngine,
     online_runtime: &mut OnlineRuntime,
 ) {
-    let Some(network) = online_runtime.network.as_ref() else {
+    if !can_publish_online_playback_sync(core, online_runtime) {
         return;
-    };
-    if !matches!(network.role(), NetworkRole::Host) {
+    }
+    if online_runtime.network.is_none() {
         return;
     }
     if online_runtime.last_periodic_sync_at.elapsed() < Duration::from_millis(950) {
@@ -3094,6 +3094,14 @@ fn maybe_publish_online_playback_sync(
 
     online_runtime.last_periodic_sync_at = Instant::now();
     publish_current_playback_state(core, audio, online_runtime);
+}
+
+fn can_publish_online_playback_sync(core: &TuneCore, online_runtime: &OnlineRuntime) -> bool {
+    core.online
+        .session
+        .as_ref()
+        .and_then(online_authority_nickname)
+        .is_some_and(|authority| authority.eq_ignore_ascii_case(&online_runtime.local_nickname))
 }
 
 fn online_streaming_stats_identity(
@@ -7518,6 +7526,68 @@ mod tests {
         let runtime = test_online_runtime();
 
         assert!(!should_publish_after_pending_stream_ready(&core, &runtime));
+    }
+
+    #[test]
+    fn periodic_sync_allowed_for_client_authority() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut session = crate::online::OnlineSession::join("ROOM22", "listener");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("host"),
+            is_local: false,
+            is_host: true,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        session.last_transport = Some(TransportEnvelope {
+            seq: 7,
+            origin_nickname: String::from("listener"),
+            command: TransportCommand::SetPlaybackState {
+                path: PathBuf::from("song.mp3"),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 1_200,
+                paused: false,
+            },
+        });
+        core.online.session = Some(session);
+
+        let runtime = test_online_runtime();
+        assert!(can_publish_online_playback_sync(&core, &runtime));
+    }
+
+    #[test]
+    fn periodic_sync_blocked_for_non_authority_client() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut session = crate::online::OnlineSession::join("ROOM22", "listener");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("host"),
+            is_local: false,
+            is_host: true,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        session.last_transport = Some(TransportEnvelope {
+            seq: 7,
+            origin_nickname: String::from("host"),
+            command: TransportCommand::SetPlaybackState {
+                path: PathBuf::from("song.mp3"),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 1_200,
+                paused: false,
+            },
+        });
+        core.online.session = Some(session);
+
+        let runtime = test_online_runtime();
+        assert!(!can_publish_online_playback_sync(&core, &runtime));
     }
 
     #[test]
