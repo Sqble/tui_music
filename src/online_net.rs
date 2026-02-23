@@ -1146,16 +1146,8 @@ fn client_loop(
                         Ok(WireServerMessage::Session(session)) => {
                             if let Ok(mut guard) = read_upload_guard.lock() {
                                 let local_nickname = guard.local_nickname.clone();
-                                let allowed_paths = session
-                                    .shared_queue
-                                    .iter()
-                                    .filter(|item| {
-                                        item.owner_nickname.as_deref().is_some_and(|owner| {
-                                            owner.eq_ignore_ascii_case(&local_nickname)
-                                        })
-                                    })
-                                    .map(|item| item.path.clone())
-                                    .collect();
+                                let allowed_paths =
+                                    allowed_upload_paths_for_client(&session, &local_nickname);
                                 guard.allowed_paths = allowed_paths;
                             }
                             if let Ok(mut quality) = read_stream_quality.lock() {
@@ -1370,11 +1362,12 @@ fn client_loop(
             }
             Ok(NetworkCommand::RequestTrackStream {
                 path,
-                source_nickname: _,
+                source_nickname,
             }) => {
                 let msg = WireClientMessage::StreamRequest {
                     path,
                     request_id: next_request_id(),
+                    source_nickname,
                 };
                 if let Err(err) = send_json_line_shared(&writer, &msg) {
                     let _ =
@@ -1402,6 +1395,7 @@ fn host_loop(
     let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>();
     let mut peers: HashMap<u32, PeerConnection> = HashMap::new();
     let mut pending_pull_requests: HashMap<(u32, u64), PathBuf> = HashMap::new();
+    let mut pending_relay_requests: HashMap<(u32, u64), RelayStreamRequest> = HashMap::new();
     let mut inbound_streams: HashMap<(u32, u64), InboundStreamDownload> = HashMap::new();
     let mut pending_pings: HashMap<u32, PendingPing> = HashMap::new();
     let mut last_ping_sweep_at = Instant::now();
@@ -1443,6 +1437,7 @@ fn host_loop(
                     InboundState {
                         peers: &mut peers,
                         pending_pull_requests: &mut pending_pull_requests,
+                        pending_relay_requests: &mut pending_relay_requests,
                         inbound_streams: &mut inbound_streams,
                         pending_pings: &mut pending_pings,
                     },
@@ -1528,6 +1523,7 @@ fn host_loop(
                     &mut InboundState {
                         peers: &mut peers,
                         pending_pull_requests: &mut pending_pull_requests,
+                        pending_relay_requests: &mut pending_relay_requests,
                         inbound_streams: &mut inbound_streams,
                         pending_pings: &mut pending_pings,
                     },
@@ -1567,6 +1563,7 @@ fn handle_inbound(
     let InboundState {
         peers,
         pending_pull_requests,
+        pending_relay_requests,
         inbound_streams,
         pending_pings,
     } = state;
@@ -1736,24 +1733,81 @@ fn handle_inbound(
             peer_id,
             path,
             request_id,
+            source_nickname,
         } => {
-            if let Some(peer) = peers.get(&peer_id) {
-                let writer = Arc::clone(&peer.writer);
-                let quality = session.quality;
-                thread::spawn(move || {
-                    if let Err(err) = stream_file_to_client(&writer, &path, request_id, quality) {
-                        let _ = send_json_line_shared(
-                            &writer,
-                            &WireServerMessage::StreamEnd {
-                                request_id,
-                                path,
-                                success: false,
-                                error: Some(format!("stream failed: {err}")),
-                            },
-                        );
-                    }
-                });
+            let Some(requester_peer) = peers.get(&peer_id) else {
+                return;
+            };
+            let requester_writer = Arc::clone(&requester_peer.writer);
+
+            if let Some(source_peer_id) = resolve_stream_source_peer_id(
+                session,
+                peers,
+                peer_id,
+                &path,
+                source_nickname.as_deref(),
+            ) {
+                let upstream_request_id = next_request_id();
+                pending_relay_requests.insert(
+                    (source_peer_id, upstream_request_id),
+                    RelayStreamRequest {
+                        requester_peer_id: peer_id,
+                        requester_request_id: request_id,
+                        requested_path: path.clone(),
+                    },
+                );
+
+                let Some(source_peer) = peers.get(&source_peer_id) else {
+                    pending_relay_requests.remove(&(source_peer_id, upstream_request_id));
+                    let _ = send_json_line_shared(
+                        &requester_writer,
+                        &WireServerMessage::StreamEnd {
+                            request_id,
+                            path,
+                            success: false,
+                            error: Some(String::from("stream source went offline")),
+                        },
+                    );
+                    return;
+                };
+
+                if let Err(err) = send_json_line_shared(
+                    &source_peer.writer,
+                    &WireServerMessage::StreamRequest {
+                        path: path.clone(),
+                        request_id: upstream_request_id,
+                    },
+                ) {
+                    pending_relay_requests.remove(&(source_peer_id, upstream_request_id));
+                    let _ = send_json_line_shared(
+                        &requester_writer,
+                        &WireServerMessage::StreamEnd {
+                            request_id,
+                            path,
+                            success: false,
+                            error: Some(format!("peer relay request failed: {err}")),
+                        },
+                    );
+                }
+                return;
             }
+
+            let quality = session.quality;
+            thread::spawn(move || {
+                if let Err(err) =
+                    stream_file_to_client(&requester_writer, &path, request_id, quality)
+                {
+                    let _ = send_json_line_shared(
+                        &requester_writer,
+                        &WireServerMessage::StreamEnd {
+                            request_id,
+                            path,
+                            success: false,
+                            error: Some(format!("stream failed: {err}")),
+                        },
+                    );
+                }
+            });
         }
         Inbound::StreamStart {
             peer_id,
@@ -1762,6 +1816,40 @@ fn handle_inbound(
             total_bytes,
             payload_format,
         } => {
+            if let Some(relay) = pending_relay_requests.get(&(peer_id, request_id)) {
+                let Some(requester_peer) = peers.get(&relay.requester_peer_id) else {
+                    pending_relay_requests.remove(&(peer_id, request_id));
+                    return;
+                };
+                let requester_writer = Arc::clone(&requester_peer.writer);
+                if relay.requested_path != path {
+                    let _ = send_json_line_shared(
+                        &requester_writer,
+                        &WireServerMessage::StreamEnd {
+                            request_id: relay.requester_request_id,
+                            path: relay.requested_path.clone(),
+                            success: false,
+                            error: Some(String::from("peer stream start path mismatch")),
+                        },
+                    );
+                    pending_relay_requests.remove(&(peer_id, request_id));
+                    return;
+                }
+                if send_json_line_shared(
+                    &requester_writer,
+                    &WireServerMessage::StreamStart {
+                        request_id: relay.requester_request_id,
+                        path,
+                        total_bytes,
+                        payload_format,
+                    },
+                )
+                .is_err()
+                {
+                    pending_relay_requests.remove(&(peer_id, request_id));
+                }
+                return;
+            }
             let key = (peer_id, request_id);
             let expected_path = pending_pull_requests.get(&key);
             if expected_path != Some(&path) {
@@ -1789,6 +1877,24 @@ fn handle_inbound(
             request_id,
             data_base64,
         } => {
+            if let Some(relay) = pending_relay_requests.get(&(peer_id, request_id)) {
+                let Some(requester_peer) = peers.get(&relay.requester_peer_id) else {
+                    pending_relay_requests.remove(&(peer_id, request_id));
+                    return;
+                };
+                if send_json_line_shared(
+                    &requester_peer.writer,
+                    &WireServerMessage::StreamChunk {
+                        request_id: relay.requester_request_id,
+                        data_base64,
+                    },
+                )
+                .is_err()
+                {
+                    pending_relay_requests.remove(&(peer_id, request_id));
+                }
+                return;
+            }
             let key = (peer_id, request_id);
             let Some(state) = inbound_streams.get_mut(&key) else {
                 return;
@@ -1846,6 +1952,25 @@ fn handle_inbound(
             success,
             error,
         } => {
+            if let Some(relay) = pending_relay_requests.remove(&(peer_id, request_id)) {
+                if let Some(requester_peer) = peers.get(&relay.requester_peer_id) {
+                    let (forward_success, forward_error) = if relay.requested_path != path {
+                        (false, Some(String::from("peer stream end path mismatch")))
+                    } else {
+                        (success, error)
+                    };
+                    let _ = send_json_line_shared(
+                        &requester_peer.writer,
+                        &WireServerMessage::StreamEnd {
+                            request_id: relay.requester_request_id,
+                            path: relay.requested_path,
+                            success: forward_success,
+                            error: forward_error,
+                        },
+                    );
+                }
+                return;
+            }
             let key = (peer_id, request_id);
             let Some(mut state) = inbound_streams.remove(&key) else {
                 pending_pull_requests.remove(&key);
@@ -1900,6 +2025,7 @@ fn handle_inbound(
                 &mut InboundState {
                     peers,
                     pending_pull_requests,
+                    pending_relay_requests,
                     inbound_streams,
                     pending_pings,
                 },
@@ -1914,6 +2040,7 @@ fn handle_inbound(
                 &mut InboundState {
                     peers,
                     pending_pull_requests,
+                    pending_relay_requests,
                     inbound_streams,
                     pending_pings,
                 },
@@ -1934,12 +2061,43 @@ fn disconnect_peer(
     let InboundState {
         peers,
         pending_pull_requests,
+        pending_relay_requests,
         inbound_streams,
         pending_pings,
     } = state;
     let nickname = peers.remove(&peer_id).map(|peer| peer.nickname);
     pending_pull_requests.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
     inbound_streams.retain(|(pending_peer_id, _), _| *pending_peer_id != peer_id);
+    let removed_relays: Vec<RelayStreamRequest> = pending_relay_requests
+        .iter()
+        .filter(|((source_peer_id, _), relay)| {
+            *source_peer_id == peer_id || relay.requester_peer_id == peer_id
+        })
+        .map(|(_, relay)| RelayStreamRequest {
+            requester_peer_id: relay.requester_peer_id,
+            requester_request_id: relay.requester_request_id,
+            requested_path: relay.requested_path.clone(),
+        })
+        .collect();
+    pending_relay_requests.retain(|(source_peer_id, _), relay| {
+        *source_peer_id != peer_id && relay.requester_peer_id != peer_id
+    });
+    for relay in removed_relays {
+        if relay.requester_peer_id == peer_id {
+            continue;
+        }
+        if let Some(requester_peer) = peers.get(&relay.requester_peer_id) {
+            let _ = send_json_line_shared(
+                &requester_peer.writer,
+                &WireServerMessage::StreamEnd {
+                    request_id: relay.requester_request_id,
+                    path: relay.requested_path,
+                    success: false,
+                    error: Some(String::from("stream source disconnected")),
+                },
+            );
+        }
+    }
     pending_pings.remove(&peer_id);
 
     let changed = if let Some(name) = nickname.as_deref() {
@@ -1986,6 +2144,57 @@ fn disconnect_peer(
 
     let suffix = nickname.unwrap_or_else(|| format!("peer-{peer_id}"));
     let _ = event_tx.send(NetworkEvent::Status(format!("{reason}: {suffix}")));
+}
+
+fn resolve_stream_source_peer_id(
+    session: &OnlineSession,
+    peers: &HashMap<u32, PeerConnection>,
+    requester_peer_id: u32,
+    requested_path: &Path,
+    requested_source_nickname: Option<&str>,
+) -> Option<u32> {
+    if let Some(source_nickname) = requested_source_nickname {
+        let source = peers
+            .iter()
+            .find(|(peer_id, peer)| {
+                **peer_id != requester_peer_id
+                    && peer.nickname.eq_ignore_ascii_case(source_nickname)
+            })
+            .map(|(peer_id, _)| *peer_id);
+        if source.is_some() {
+            return source;
+        }
+    }
+
+    if let Some(owner) = session
+        .shared_queue
+        .iter()
+        .rev()
+        .find(|item| item.path == requested_path)
+        .and_then(|item| item.owner_nickname.as_deref())
+    {
+        let source = peers
+            .iter()
+            .find(|(peer_id, peer)| {
+                **peer_id != requester_peer_id && peer.nickname.eq_ignore_ascii_case(owner)
+            })
+            .map(|(peer_id, _)| *peer_id);
+        if source.is_some() {
+            return source;
+        }
+    }
+
+    session.last_transport.as_ref().and_then(|transport| {
+        peers
+            .iter()
+            .find(|(peer_id, peer)| {
+                **peer_id != requester_peer_id
+                    && peer
+                        .nickname
+                        .eq_ignore_ascii_case(&transport.origin_nickname)
+            })
+            .map(|(peer_id, _)| *peer_id)
+    })
 }
 
 fn peer_display_name(peers: &HashMap<u32, PeerConnection>, peer_id: u32) -> String {
@@ -2117,6 +2326,42 @@ fn action_allowed_for_origin(
     )
 }
 
+fn allowed_upload_paths_for_client(
+    session: &OnlineSession,
+    local_nickname: &str,
+) -> HashSet<PathBuf> {
+    let mut allowed_paths: HashSet<PathBuf> = session
+        .shared_queue
+        .iter()
+        .filter(|item| {
+            item.owner_nickname
+                .as_deref()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(local_nickname))
+        })
+        .map(|item| item.path.clone())
+        .collect();
+
+    if let Some(last_transport) = session.last_transport.as_ref()
+        && last_transport
+            .origin_nickname
+            .eq_ignore_ascii_case(local_nickname)
+        && let Some(path) = transport_path(&last_transport.command)
+    {
+        allowed_paths.insert(path.to_path_buf());
+    }
+
+    allowed_paths
+}
+
+fn transport_path(command: &crate::online::TransportCommand) -> Option<&Path> {
+    match command {
+        crate::online::TransportCommand::PlayTrack { path, .. }
+        | crate::online::TransportCommand::SetPlaybackState { path, .. } => Some(path.as_path()),
+        crate::online::TransportCommand::StopPlayback
+        | crate::online::TransportCommand::SetPaused { .. } => None,
+    }
+}
+
 fn origin_is_host(session: &OnlineSession, origin_nickname: &str) -> bool {
     session.participants.iter().any(|participant| {
         participant.is_host && participant.nickname.eq_ignore_ascii_case(origin_nickname)
@@ -2205,11 +2450,16 @@ fn host_peer_reader(peer_id: u32, stream: TcpStream, inbound_tx: Sender<Inbound>
                     Ok(WireClientMessage::Pong { nonce }) => {
                         let _ = inbound_tx.send(Inbound::Pong { peer_id, nonce });
                     }
-                    Ok(WireClientMessage::StreamRequest { path, request_id }) => {
+                    Ok(WireClientMessage::StreamRequest {
+                        path,
+                        request_id,
+                        source_nickname,
+                    }) => {
                         let _ = inbound_tx.send(Inbound::StreamRequest {
                             peer_id,
                             path,
                             request_id,
+                            source_nickname,
                         });
                     }
                     Ok(WireClientMessage::StreamStart {
@@ -2930,8 +3180,16 @@ struct PendingPing {
 struct InboundState<'a> {
     peers: &'a mut HashMap<u32, PeerConnection>,
     pending_pull_requests: &'a mut HashMap<(u32, u64), PathBuf>,
+    pending_relay_requests: &'a mut HashMap<(u32, u64), RelayStreamRequest>,
     inbound_streams: &'a mut HashMap<(u32, u64), InboundStreamDownload>,
     pending_pings: &'a mut HashMap<u32, PendingPing>,
+}
+
+#[derive(Debug)]
+struct RelayStreamRequest {
+    requester_peer_id: u32,
+    requester_request_id: u64,
+    requested_path: PathBuf,
 }
 
 #[derive(Debug)]
@@ -2955,6 +3213,7 @@ enum Inbound {
         peer_id: u32,
         path: PathBuf,
         request_id: u64,
+        source_nickname: Option<String>,
     },
     StreamStart {
         peer_id: u32,
@@ -3004,6 +3263,8 @@ enum WireClientMessage {
     StreamRequest {
         path: PathBuf,
         request_id: u64,
+        #[serde(default)]
+        source_nickname: Option<String>,
     },
     StreamStart {
         request_id: u64,
@@ -3414,6 +3675,29 @@ mod tests {
     }
 
     #[test]
+    fn client_stream_request_round_trip_preserves_source_nickname() {
+        let msg = WireClientMessage::StreamRequest {
+            path: PathBuf::from("track.flac"),
+            request_id: 88,
+            source_nickname: Some(String::from("dj-peer")),
+        };
+        let encoded = serde_json::to_string(&msg).expect("serialize");
+        let decoded: WireClientMessage = serde_json::from_str(&encoded).expect("deserialize");
+        match decoded {
+            WireClientMessage::StreamRequest {
+                path,
+                request_id,
+                source_nickname,
+            } => {
+                assert_eq!(path, PathBuf::from("track.flac"));
+                assert_eq!(request_id, 88);
+                assert_eq!(source_nickname.as_deref(), Some("dj-peer"));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
     fn stream_start_round_trip_preserves_payload_format() {
         let msg = WireServerMessage::StreamStart {
             request_id: 7,
@@ -3437,6 +3721,46 @@ mod tests {
             }
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[test]
+    fn upload_guard_allows_local_last_transport_path() {
+        let mut session = OnlineSession::join("ROOM22", "alice");
+        session.last_transport = Some(crate::online::TransportEnvelope {
+            seq: 1,
+            origin_nickname: String::from("alice"),
+            command: crate::online::TransportCommand::PlayTrack {
+                path: PathBuf::from("live-set.flac"),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+            },
+        });
+
+        let allowed = allowed_upload_paths_for_client(&session, "alice");
+        assert!(allowed.contains(&PathBuf::from("live-set.flac")));
+    }
+
+    #[test]
+    fn upload_guard_ignores_non_local_last_transport_path() {
+        let mut session = OnlineSession::join("ROOM22", "alice");
+        session.last_transport = Some(crate::online::TransportEnvelope {
+            seq: 1,
+            origin_nickname: String::from("bob"),
+            command: crate::online::TransportCommand::SetPlaybackState {
+                path: PathBuf::from("other.flac"),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 500,
+                paused: false,
+            },
+        });
+
+        let allowed = allowed_upload_paths_for_client(&session, "alice");
+        assert!(!allowed.contains(&PathBuf::from("other.flac")));
     }
 
     #[test]
@@ -3750,6 +4074,7 @@ mod tests {
         drop(client_stream);
 
         let mut pending_pull_requests = HashMap::new();
+        let mut pending_relay_requests = HashMap::new();
         let mut inbound_streams = HashMap::new();
         let mut pending_pings = HashMap::new();
         pending_pings.insert(
@@ -3767,6 +4092,7 @@ mod tests {
             &mut InboundState {
                 peers: &mut peers,
                 pending_pull_requests: &mut pending_pull_requests,
+                pending_relay_requests: &mut pending_relay_requests,
                 inbound_streams: &mut inbound_streams,
                 pending_pings: &mut pending_pings,
             },
@@ -3833,6 +4159,7 @@ mod tests {
         drop(client_stream);
 
         let mut pending_pull_requests = HashMap::new();
+        let mut pending_relay_requests = HashMap::new();
         let mut inbound_streams = HashMap::new();
         let mut pending_pings = HashMap::new();
         let (event_tx, event_rx) = mpsc::channel();
@@ -3843,6 +4170,7 @@ mod tests {
             &mut InboundState {
                 peers: &mut peers,
                 pending_pull_requests: &mut pending_pull_requests,
+                pending_relay_requests: &mut pending_relay_requests,
                 inbound_streams: &mut inbound_streams,
                 pending_pings: &mut pending_pings,
             },

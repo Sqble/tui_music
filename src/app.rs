@@ -1346,7 +1346,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             continue;
         }
 
-        if handle_online_inline_input(&mut core, &*audio, key, &mut online_runtime) {
+        if handle_online_inline_input(&mut core, &mut *audio, key, &mut online_runtime) {
             continue;
         }
         if handle_stats_inline_input(&mut core, key) {
@@ -1787,6 +1787,49 @@ fn maybe_start_online_shared_queue_if_idle(
     }
 }
 
+fn play_shared_queue_now(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
+) {
+    if local_playback_locked_by_host_only(core) {
+        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+        core.dirty = true;
+        return;
+    }
+
+    let next_shared = core
+        .online
+        .session
+        .as_ref()
+        .and_then(|session| session.shared_queue.first().cloned());
+    let Some(shared_item) = next_shared else {
+        core.status = String::from("Shared queue is empty");
+        core.dirty = true;
+        return;
+    };
+
+    let switched = ensure_remote_track(core, audio, online_runtime, &shared_item.path);
+    let stream_pending = online_runtime.pending_stream_path.as_ref() == Some(&shared_item.path);
+    if switched || stream_pending {
+        consume_shared_queue_item(core, online_runtime, Some(shared_item.path.clone()));
+        online_runtime.online_playback_source = OnlinePlaybackSource::SharedQueue;
+        if switched {
+            audio.resume();
+            publish_current_playback_state(core, audio, online_runtime);
+            core.status = format!(
+                "Shared queue now: {}",
+                shared_item
+                    .path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("track")
+            );
+            core.dirty = true;
+        }
+    }
+}
+
 fn online_authority_nickname(session: &OnlineSession) -> Option<&str> {
     if let Some(last_transport) = session.last_transport.as_ref()
         && session.participants.iter().any(|participant| {
@@ -2034,7 +2077,7 @@ fn handle_lyrics_inline_input(core: &mut TuneCore, audio: &dyn AudioEngine, key:
 
 fn handle_online_inline_input(
     core: &mut TuneCore,
-    audio: &dyn AudioEngine,
+    audio: &mut dyn AudioEngine,
     key: KeyEvent,
     online_runtime: &mut OnlineRuntime,
 ) -> bool {
@@ -2360,6 +2403,10 @@ fn handle_online_inline_input(
     }
 
     match key.code {
+        KeyCode::Char(_) if key_event_matches_ctrl_char(&key, 'n') => {
+            play_shared_queue_now(core, audio, online_runtime);
+            true
+        }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'l') => {
             online_runtime.shutdown();
             online_runtime.last_transport_seq = 0;
@@ -3082,10 +3129,10 @@ fn maybe_publish_online_playback_sync(
     audio: &dyn AudioEngine,
     online_runtime: &mut OnlineRuntime,
 ) {
-    let Some(network) = online_runtime.network.as_ref() else {
+    if !can_publish_online_playback_sync(core, online_runtime) {
         return;
-    };
-    if !matches!(network.role(), NetworkRole::Host) {
+    }
+    if online_runtime.network.is_none() {
         return;
     }
     if online_runtime.last_periodic_sync_at.elapsed() < Duration::from_millis(950) {
@@ -3094,6 +3141,14 @@ fn maybe_publish_online_playback_sync(
 
     online_runtime.last_periodic_sync_at = Instant::now();
     publish_current_playback_state(core, audio, online_runtime);
+}
+
+fn can_publish_online_playback_sync(core: &TuneCore, online_runtime: &OnlineRuntime) -> bool {
+    core.online
+        .session
+        .as_ref()
+        .and_then(online_authority_nickname)
+        .is_some_and(|authority| authority.eq_ignore_ascii_case(&online_runtime.local_nickname))
 }
 
 fn online_streaming_stats_identity(
@@ -3178,6 +3233,9 @@ fn drain_online_network_events(
                                     .and_then(|name| name.to_str())
                                     .unwrap_or("track")
                             );
+                            if should_publish_after_pending_stream_ready(core, online_runtime) {
+                                publish_current_playback_state(core, audio, online_runtime);
+                            }
                             core.dirty = true;
                         }
                         Err(err) => {
@@ -3247,6 +3305,17 @@ fn drain_online_network_events(
     }
 }
 
+fn should_publish_after_pending_stream_ready(
+    core: &TuneCore,
+    online_runtime: &OnlineRuntime,
+) -> bool {
+    core.online
+        .session
+        .as_ref()
+        .and_then(online_authority_nickname)
+        .is_some_and(|authority| authority.eq_ignore_ascii_case(&online_runtime.local_nickname))
+}
+
 fn handle_stream_quality_change(
     core: &mut TuneCore,
     audio: &mut dyn AudioEngine,
@@ -3271,8 +3340,7 @@ fn handle_stream_quality_change(
         online_runtime.pending_stream_path = None;
         online_runtime.remote_logical_track = None;
         if let Some(network) = online_runtime.network.as_ref() {
-            let source_nickname =
-                preferred_stream_source(core, online_runtime, network.role(), path.as_path());
+            let source_nickname = preferred_stream_source(core, online_runtime, path.as_path());
             network.request_track_stream(path.clone(), source_nickname);
             online_runtime.pending_stream_path = Some(path.clone());
             online_runtime.remote_logical_track = Some(path);
@@ -3469,9 +3537,8 @@ fn ensure_remote_track(
     online_runtime: &mut OnlineRuntime,
     path: &Path,
 ) -> bool {
-    if online_runtime.remote_logical_track.as_ref() == Some(&path.to_path_buf())
-        && audio.current_track().is_some()
-    {
+    if current_track_matches_remote_logical_path(audio, online_runtime, path) {
+        online_runtime.remote_logical_track = Some(path.to_path_buf());
         return true;
     }
 
@@ -3491,8 +3558,7 @@ fn ensure_remote_track(
         Err(err) => {
             if online_runtime.pending_stream_path.as_ref() != Some(&path.to_path_buf()) {
                 if let Some(network) = online_runtime.network.as_ref() {
-                    let source_nickname =
-                        preferred_stream_source(core, online_runtime, network.role(), path);
+                    let source_nickname = preferred_stream_source(core, online_runtime, path);
                     network.request_track_stream(path.to_path_buf(), source_nickname.clone());
                     online_runtime.pending_stream_path = Some(path.to_path_buf());
                     online_runtime.remote_logical_track = Some(path.to_path_buf());
@@ -3510,15 +3576,28 @@ fn ensure_remote_track(
     }
 }
 
+fn current_track_matches_remote_logical_path(
+    audio: &dyn AudioEngine,
+    online_runtime: &OnlineRuntime,
+    path: &Path,
+) -> bool {
+    let Some(current) = audio.current_track() else {
+        return false;
+    };
+    if current == path {
+        return true;
+    }
+    online_runtime
+        .streamed_track_cache
+        .get(path)
+        .is_some_and(|cached| cached.as_path() == current)
+}
+
 fn preferred_stream_source(
     core: &TuneCore,
     online_runtime: &OnlineRuntime,
-    role: &NetworkRole,
     path: &Path,
 ) -> Option<String> {
-    if !matches!(role, NetworkRole::Host) {
-        return None;
-    }
     let session = core.online.session.as_ref()?;
     let local_nickname = session
         .local_participant()
@@ -5909,6 +5988,35 @@ mod tests {
     }
 
     #[test]
+    fn preferred_stream_source_uses_queue_owner_for_client_roles() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("alice");
+
+        let mut session = crate::online::OnlineSession::join("ROOM22", "alice");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("bob"),
+            is_local: false,
+            is_host: true,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("shared.mp3"),
+            title: String::from("shared"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("bob")),
+        });
+        core.online.session = Some(session);
+
+        assert_eq!(
+            preferred_stream_source(&core, &runtime, Path::new("shared.mp3")),
+            Some(String::from("bob"))
+        );
+    }
+
+    #[test]
     fn root_action_search_executes_selected_filtered_action() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
@@ -6682,6 +6790,41 @@ mod tests {
     }
 
     #[test]
+    fn remote_sync_switches_track_when_current_track_differs() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(crate::online::OnlineSession::join("ROOM22", "listener"));
+        let mut runtime = test_online_runtime();
+        runtime.remote_logical_track = Some(PathBuf::from("remote.mp3"));
+
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("local.mp3"));
+        audio.position = Some(Duration::from_millis(1_000));
+
+        apply_remote_transport(
+            &mut core,
+            &mut audio,
+            &mut runtime,
+            &TransportCommand::SetPlaybackState {
+                path: PathBuf::from("remote.mp3"),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 1_200,
+                paused: false,
+            },
+        );
+
+        assert_eq!(audio.current.as_deref(), Some(Path::new("remote.mp3")));
+        assert!(
+            audio
+                .played
+                .iter()
+                .any(|entry| entry == Path::new("remote.mp3"))
+        );
+    }
+
+    #[test]
     fn remote_stop_transport_stops_playback() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut runtime = test_online_runtime();
@@ -7406,6 +7549,95 @@ mod tests {
     }
 
     #[test]
+    fn pending_stream_ready_publish_allowed_for_local_authority() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(crate::online::OnlineSession::host("listener"));
+        let runtime = test_online_runtime();
+
+        assert!(should_publish_after_pending_stream_ready(&core, &runtime));
+    }
+
+    #[test]
+    fn pending_stream_ready_publish_blocked_for_non_authority() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut session = crate::online::OnlineSession::join("ROOM22", "listener");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("dj-host"),
+            is_local: false,
+            is_host: true,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        core.online.session = Some(session);
+        let runtime = test_online_runtime();
+
+        assert!(!should_publish_after_pending_stream_ready(&core, &runtime));
+    }
+
+    #[test]
+    fn periodic_sync_allowed_for_client_authority() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut session = crate::online::OnlineSession::join("ROOM22", "listener");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("host"),
+            is_local: false,
+            is_host: true,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        session.last_transport = Some(TransportEnvelope {
+            seq: 7,
+            origin_nickname: String::from("listener"),
+            command: TransportCommand::SetPlaybackState {
+                path: PathBuf::from("song.mp3"),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 1_200,
+                paused: false,
+            },
+        });
+        core.online.session = Some(session);
+
+        let runtime = test_online_runtime();
+        assert!(can_publish_online_playback_sync(&core, &runtime));
+    }
+
+    #[test]
+    fn periodic_sync_blocked_for_non_authority_client() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut session = crate::online::OnlineSession::join("ROOM22", "listener");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("host"),
+            is_local: false,
+            is_host: true,
+            ping_ms: 0,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        session.last_transport = Some(TransportEnvelope {
+            seq: 7,
+            origin_nickname: String::from("host"),
+            command: TransportCommand::SetPlaybackState {
+                path: PathBuf::from("song.mp3"),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 1_200,
+                paused: false,
+            },
+        });
+        core.online.session = Some(session);
+
+        let runtime = test_online_runtime();
+        assert!(!can_publish_online_playback_sync(&core, &runtime));
+    }
+
+    #[test]
     fn online_auto_advance_falls_back_to_host_when_last_origin_missing() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.tracks = vec![
@@ -7511,6 +7743,98 @@ mod tests {
     }
 
     #[test]
+    fn play_shared_queue_now_starts_head_while_local_queue_is_playing() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(crate::online::OnlineSession::host("host"));
+        if let Some(session) = core.online.session.as_mut() {
+            session.push_shared_track(
+                Path::new("shared.mp3"),
+                String::from("shared"),
+                Some(String::from("listener")),
+            );
+        }
+
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("host");
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("local.mp3"));
+        audio.position = Some(Duration::from_millis(400));
+
+        play_shared_queue_now(&mut core, &mut audio, &mut runtime);
+
+        assert_eq!(audio.current.as_deref(), Some(Path::new("shared.mp3")));
+        assert_eq!(audio.played, vec![PathBuf::from("shared.mp3")]);
+        assert_eq!(
+            runtime.online_playback_source,
+            OnlinePlaybackSource::SharedQueue
+        );
+        assert_eq!(
+            core.online
+                .session
+                .as_ref()
+                .map(|session| session.shared_queue.len()),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn play_shared_queue_now_respects_host_only_listener_lockdown() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut session = host_only_listener_session();
+        session.push_shared_track(
+            Path::new("shared.mp3"),
+            String::from("shared"),
+            Some(String::from("listener")),
+        );
+        core.online.session = Some(session);
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("listener");
+        let mut audio = TestAudioEngine::new();
+
+        play_shared_queue_now(&mut core, &mut audio, &mut runtime);
+
+        assert!(audio.played.is_empty());
+        assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
+        assert_eq!(
+            core.online
+                .session
+                .as_ref()
+                .map(|session| session.shared_queue.len()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn online_tab_ctrl_n_triggers_play_shared_queue_now() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        core.online.session = Some(crate::online::OnlineSession::host("host"));
+        if let Some(session) = core.online.session.as_mut() {
+            session.push_shared_track(
+                Path::new("shared.mp3"),
+                String::from("shared"),
+                Some(String::from("listener")),
+            );
+        }
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("local.mp3"));
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("host");
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &mut runtime,
+        ));
+        assert_eq!(audio.current.as_deref(), Some(Path::new("shared.mp3")));
+        assert_eq!(
+            runtime.online_playback_source,
+            OnlinePlaybackSource::SharedQueue
+        );
+    }
+
+    #[test]
     fn inferred_tunetui_config_dir_uses_home_when_userprofile_missing() {
         let inferred = inferred_tunetui_config_dir(None, Some("/home/tune"), None);
         assert_eq!(inferred, Some(PathBuf::from("/home/tune/.config/tunetui")));
@@ -7581,19 +7905,19 @@ mod tests {
     fn online_tab_consumes_library_navigation_keys() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
 
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
             &mut runtime,
         ));
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
             &mut runtime,
         ));
@@ -7603,13 +7927,13 @@ mod tests {
     fn online_tab_does_not_consume_ctrl_c() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
 
         assert!(!handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
             &mut runtime,
         ));
@@ -7619,13 +7943,13 @@ mod tests {
     fn online_tab_consumes_ctrl_s() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
 
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
             &mut runtime,
         ));
@@ -7635,19 +7959,19 @@ mod tests {
     fn online_tab_does_not_consume_volume_keys() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
 
         assert!(!handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('='), KeyModifiers::NONE),
             &mut runtime,
         ));
         assert!(!handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE),
             &mut runtime,
         ));
@@ -7657,7 +7981,7 @@ mod tests {
     fn join_prompt_allows_typing_v_without_triggering_paste() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
         runtime.join_prompt_active = true;
@@ -7665,7 +7989,7 @@ mod tests {
 
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
             &mut runtime,
         ));
@@ -7676,14 +8000,14 @@ mod tests {
     fn online_tab_uppercase_l_leaves_room() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
         core.online_host_room("tester");
 
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE),
             &mut runtime,
         ));
@@ -7695,13 +8019,13 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
         core.online_host_room("tester");
-        let audio = NullAudioEngine::new();
+        let mut audio = NullAudioEngine::new();
         let mut runtime = test_online_runtime();
         runtime.local_nickname = String::from("tester");
 
         assert!(handle_online_inline_input(
             &mut core,
-            &audio,
+            &mut audio,
             KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
             &mut runtime,
         ));

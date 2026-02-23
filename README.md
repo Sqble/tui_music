@@ -80,6 +80,11 @@ A public server is available at **tunetui.online** — anyone can use it to host
 3. Enter server (`tunetui.online`) or room link
 4. Enter invite code (and password if needed)
 
+**Online quick control:**
+- `Ctrl+n` starts shared queue playback immediately (or jumps to the next shared item)
+
+Remote users can stream to each other through the room host connection; only the host server ports need to be exposed.
+
 ### Lyrics
 
 - `.lrc` sidecar files in config `lyrics/` folder take precedence over embedded

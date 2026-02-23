@@ -557,7 +557,7 @@ pub fn draw(
     } else if core.header_section == HeaderSection::Lyrics {
         "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: Enter select/join, l leave room, o mode, q quality, t hide/show code, 2 copy code, Tab tabs"
+        "Keys: Enter select/join, Ctrl+n shared now, l leave room, o mode, q quality, t hide/show code, 2 copy code, Tab tabs"
     } else {
         "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
     };
@@ -1054,12 +1054,39 @@ fn draw_online_section(
         .wrap(Wrap { trim: true });
     frame.render_widget(left, horizontal[0]);
 
-    let mut right_lines = vec![Line::from(Span::styled(
+    let mut right_lines = Vec::new();
+    if let Some(now_playing_line) = online_now_playing_line(session) {
+        right_lines.push(Line::from(Span::styled(
+            "Now Playing",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )));
+        right_lines.push(Line::from(Span::styled(
+            now_playing_line,
+            Style::default().fg(colors.muted),
+        )));
+        right_lines.push(Line::from(""));
+    }
+
+    if let Some(waiting_message) = shared_queue_waiting_message(session) {
+        right_lines.push(Line::from(Span::styled(
+            waiting_message,
+            Style::default().fg(colors.alert),
+        )));
+        right_lines.push(Line::from(Span::styled(
+            "Shared queue starts when current song ends.",
+            Style::default().fg(colors.muted),
+        )));
+        right_lines.push(Line::from(""));
+    }
+
+    right_lines.push(Line::from(Span::styled(
         "Shared Queue",
         Style::default()
             .fg(colors.text)
             .add_modifier(Modifier::BOLD),
-    ))];
+    )));
     for (index, item) in session.shared_queue.iter().rev().take(10).enumerate() {
         let owner_suffix = item
             .owner_nickname
@@ -1084,6 +1111,10 @@ fn draw_online_section(
             Style::default().fg(colors.muted),
         )));
     }
+    right_lines.push(Line::from(Span::styled(
+        "Ctrl+n: play shared now / next shared",
+        Style::default().fg(colors.muted),
+    )));
     right_lines.push(Line::from(""));
     right_lines.push(Line::from(Span::styled(
         "Networking",
@@ -1131,6 +1162,50 @@ fn participant_line(participant: &crate::online::Participant, session: &OnlineSe
         "- {}{}  ping {}ms",
         participant.nickname, tags, participant.ping_ms
     )
+}
+
+fn shared_queue_waiting_message(session: &OnlineSession) -> Option<String> {
+    let next_shared_path = session
+        .shared_queue
+        .first()
+        .map(|item| item.path.as_path())?;
+    let last_transport = session.last_transport.as_ref()?;
+    let current_path = match &last_transport.command {
+        crate::online::TransportCommand::PlayTrack { path, .. }
+        | crate::online::TransportCommand::SetPlaybackState { path, .. } => path.as_path(),
+        crate::online::TransportCommand::StopPlayback
+        | crate::online::TransportCommand::SetPaused { .. } => return None,
+    };
+
+    if current_path == next_shared_path {
+        return None;
+    }
+
+    Some(format!(
+        "Now playing @{} local queue.",
+        truncate_for_line(&last_transport.origin_nickname, 14)
+    ))
+}
+
+fn online_now_playing_line(session: &OnlineSession) -> Option<String> {
+    let last_transport = session.last_transport.as_ref()?;
+    let path = match &last_transport.command {
+        crate::online::TransportCommand::PlayTrack { path, .. }
+        | crate::online::TransportCommand::SetPlaybackState { path, .. } => path,
+        crate::online::TransportCommand::StopPlayback
+        | crate::online::TransportCommand::SetPaused { .. } => return None,
+    };
+    let track_label = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(|name| truncate_for_line(name, 28))
+        .unwrap_or_else(|| truncate_for_line(&path.display().to_string(), 28));
+    Some(format!(
+        "{} @{}",
+        track_label,
+        truncate_for_line(&last_transport.origin_nickname, 14)
+    ))
 }
 
 fn draw_lyrics_section(
@@ -2478,6 +2553,7 @@ fn control_line(audio: &dyn AudioEngine, volume_bar_width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::online::{OnlineSession, TransportCommand, TransportEnvelope};
     use image::{ImageBuffer, ImageFormat, Rgba};
     use std::io::Cursor;
 
@@ -2626,5 +2702,94 @@ mod tests {
         let first = fallback_cover_template_bytes(CoverArtTemplate::Aurora).expect("first");
         let second = fallback_cover_template_bytes(CoverArtTemplate::Aurora).expect("second");
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn shared_queue_waiting_message_shows_for_local_queue_playback() {
+        let mut session = OnlineSession::host("host");
+        session.push_shared_track(
+            Path::new("shared.mp3"),
+            String::from("shared"),
+            Some(String::from("guest")),
+        );
+        session.last_transport = Some(TransportEnvelope {
+            seq: 2,
+            origin_nickname: String::from("host"),
+            command: TransportCommand::SetPlaybackState {
+                path: Path::new("local.mp3").to_path_buf(),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 5_000,
+                paused: false,
+            },
+        });
+
+        let message = shared_queue_waiting_message(&session);
+        assert_eq!(message.as_deref(), Some("Now playing @host local queue."));
+    }
+
+    #[test]
+    fn shared_queue_waiting_message_hidden_when_current_is_shared_head() {
+        let mut session = OnlineSession::host("host");
+        session.push_shared_track(
+            Path::new("shared.mp3"),
+            String::from("shared"),
+            Some(String::from("guest")),
+        );
+        session.last_transport = Some(TransportEnvelope {
+            seq: 2,
+            origin_nickname: String::from("host"),
+            command: TransportCommand::PlayTrack {
+                path: Path::new("shared.mp3").to_path_buf(),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+            },
+        });
+
+        assert_eq!(shared_queue_waiting_message(&session), None);
+    }
+
+    #[test]
+    fn online_now_playing_line_shows_transport_track_and_origin() {
+        let mut session = OnlineSession::host("host");
+        session.last_transport = Some(TransportEnvelope {
+            seq: 3,
+            origin_nickname: String::from("host"),
+            command: TransportCommand::SetPlaybackState {
+                path: Path::new("folder/live.mp3").to_path_buf(),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 1_000,
+                paused: false,
+            },
+        });
+
+        let line = online_now_playing_line(&session).expect("now playing line");
+        assert!(line.contains("live.mp3"));
+        assert!(line.contains("@host"));
+    }
+
+    #[test]
+    fn online_now_playing_line_hidden_for_pause_and_stop_commands() {
+        let mut session = OnlineSession::host("host");
+        session.last_transport = Some(TransportEnvelope {
+            seq: 1,
+            origin_nickname: String::from("host"),
+            command: TransportCommand::SetPaused { paused: true },
+        });
+        assert_eq!(online_now_playing_line(&session), None);
+
+        session.last_transport = Some(TransportEnvelope {
+            seq: 2,
+            origin_nickname: String::from("host"),
+            command: TransportCommand::StopPlayback,
+        });
+        assert_eq!(online_now_playing_line(&session), None);
     }
 }
