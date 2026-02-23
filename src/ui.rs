@@ -1055,6 +1055,20 @@ fn draw_online_section(
     frame.render_widget(left, horizontal[0]);
 
     let mut right_lines = Vec::new();
+    if let Some(now_playing_line) = online_now_playing_line(session) {
+        right_lines.push(Line::from(Span::styled(
+            "Now Playing",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )));
+        right_lines.push(Line::from(Span::styled(
+            now_playing_line,
+            Style::default().fg(colors.muted),
+        )));
+        right_lines.push(Line::from(""));
+    }
+
     if let Some(waiting_message) = shared_queue_waiting_message(session) {
         right_lines.push(Line::from(Span::styled(
             waiting_message,
@@ -1165,6 +1179,27 @@ fn shared_queue_waiting_message(session: &OnlineSession) -> Option<String> {
 
     Some(format!(
         "Now playing @{} local queue.",
+        truncate_for_line(&last_transport.origin_nickname, 14)
+    ))
+}
+
+fn online_now_playing_line(session: &OnlineSession) -> Option<String> {
+    let last_transport = session.last_transport.as_ref()?;
+    let path = match &last_transport.command {
+        crate::online::TransportCommand::PlayTrack { path, .. }
+        | crate::online::TransportCommand::SetPlaybackState { path, .. } => path,
+        crate::online::TransportCommand::StopPlayback
+        | crate::online::TransportCommand::SetPaused { .. } => return None,
+    };
+    let track_label = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(|name| truncate_for_line(name, 28))
+        .unwrap_or_else(|| truncate_for_line(&path.display().to_string(), 28));
+    Some(format!(
+        "{} @{}",
+        track_label,
         truncate_for_line(&last_transport.origin_nickname, 14)
     ))
 }
@@ -2712,5 +2747,45 @@ mod tests {
         });
 
         assert_eq!(shared_queue_waiting_message(&session), None);
+    }
+
+    #[test]
+    fn online_now_playing_line_shows_transport_track_and_origin() {
+        let mut session = OnlineSession::host("host");
+        session.last_transport = Some(TransportEnvelope {
+            seq: 3,
+            origin_nickname: String::from("host"),
+            command: TransportCommand::SetPlaybackState {
+                path: Path::new("folder/live.mp3").to_path_buf(),
+                title: None,
+                artist: None,
+                album: None,
+                provider_track_id: None,
+                position_ms: 1_000,
+                paused: false,
+            },
+        });
+
+        let line = online_now_playing_line(&session).expect("now playing line");
+        assert!(line.contains("live.mp3"));
+        assert!(line.contains("@host"));
+    }
+
+    #[test]
+    fn online_now_playing_line_hidden_for_pause_and_stop_commands() {
+        let mut session = OnlineSession::host("host");
+        session.last_transport = Some(TransportEnvelope {
+            seq: 1,
+            origin_nickname: String::from("host"),
+            command: TransportCommand::SetPaused { paused: true },
+        });
+        assert_eq!(online_now_playing_line(&session), None);
+
+        session.last_transport = Some(TransportEnvelope {
+            seq: 2,
+            origin_nickname: String::from("host"),
+            command: TransportCommand::StopPlayback,
+        });
+        assert_eq!(online_now_playing_line(&session), None);
     }
 }
