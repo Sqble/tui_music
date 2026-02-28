@@ -4661,7 +4661,8 @@ fn handle_action_panel_input_with_recent(
                     }
                     RootActionId::RemoveSelectedFromQueue => {
                         if core.viewing_shared_queue() {
-                            if let Some((index, expected_path)) = core.remove_selected_from_shared_queue()
+                            if let Some((index, expected_path)) =
+                                core.remove_selected_from_shared_queue()
                                 && let Some(network) = online_runtime
                                     .as_deref()
                                     .and_then(|runtime| runtime.network.as_ref())

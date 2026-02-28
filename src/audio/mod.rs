@@ -293,6 +293,7 @@ impl AudioEngine for WasapiAudioEngine {
         self.sink.stop();
         self.clear_next();
         self.sink = Sink::connect_new(self.stream.mixer());
+        self.sink.set_volume(self.volume.clamp(0.0, MAX_VOLUME));
 
         let file =
             File::open(path).with_context(|| format!("failed to open track {}", path.display()))?;
