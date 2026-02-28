@@ -327,6 +327,7 @@ impl AudioEngine for WasapiAudioEngine {
 
         self.clear_next();
         let next_sink = Sink::connect_new(self.stream.mixer());
+        next_sink.set_volume(0.0);
 
         let file =
             File::open(path).with_context(|| format!("failed to open track {}", path.display()))?;
@@ -344,7 +345,6 @@ impl AudioEngine for WasapiAudioEngine {
         } else {
             1.0
         };
-        next_sink.set_volume(0.0);
 
         if self.sink.is_paused() {
             next_sink.pause();
