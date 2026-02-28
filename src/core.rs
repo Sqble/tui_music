@@ -848,6 +848,9 @@ impl TuneCore {
 
         if !added.is_empty() {
             self.set_status("added to queue");
+            if self.browser_shared_queue {
+                self.refresh_browser_entries();
+            }
         }
 
         added
@@ -1171,6 +1174,9 @@ impl TuneCore {
         let count = added.len();
         self.queue.extend(added);
         self.rebuild_shuffle_order();
+        if self.browser_local_queue {
+            self.refresh_browser_entries();
+        }
         self.dirty = true;
         self.set_status(&format!("Queued {count} track(s)"));
     }
@@ -1190,6 +1196,9 @@ impl TuneCore {
             .min(self.queue.len());
         self.queue.splice(insert_at..insert_at, added);
         self.rebuild_shuffle_order();
+        if self.browser_local_queue {
+            self.refresh_browser_entries();
+        }
         self.dirty = true;
         self.set_status(&format!("Queued next {count} track(s)"));
     }
@@ -1199,7 +1208,7 @@ impl TuneCore {
             self.set_status("Open local queue to remove item");
             return;
         }
-        let Some(selected_pos) = self.selected_track_position_in_browser() else {
+        let Some(selected_pos) = self.selected_local_queue_position_in_browser() else {
             self.set_status("Select a queue item to remove");
             return;
         };
@@ -1235,7 +1244,7 @@ impl TuneCore {
             self.set_status("Need at least 2 queue items");
             return;
         }
-        let Some(from_index) = self.selected_track_position_in_browser() else {
+        let Some(from_index) = self.selected_local_queue_position_in_browser() else {
             self.set_status("Select a queue item to move");
             return;
         };
@@ -1290,7 +1299,11 @@ impl TuneCore {
 
     pub fn add_selected_to_shared_queue_end(&mut self) -> Vec<crate::online::SharedQueueItem> {
         let paths = self.selected_paths_for_browser_selection();
-        self.online_queue_paths(&paths)
+        let added = self.online_queue_paths(&paths);
+        if self.browser_shared_queue {
+            self.refresh_browser_entries();
+        }
+        added
     }
 
     pub fn add_selected_to_shared_queue_next(&mut self) -> Vec<crate::online::SharedQueueItem> {
@@ -1744,6 +1757,36 @@ impl TuneCore {
         )
     }
 
+    fn selected_local_queue_position_in_browser(&self) -> Option<usize> {
+        let selected_display_index = self.selected_track_position_in_browser()?;
+        let display_positions = self.local_queue_display_positions();
+        display_positions.get(selected_display_index).copied()
+    }
+
+    fn local_queue_display_positions(&self) -> Vec<usize> {
+        if self.playback_mode != PlaybackMode::Shuffle
+            || self.shuffle_order.len() != self.queue.len()
+            || self.queue.is_empty()
+        {
+            return (0..self.queue.len()).collect();
+        }
+
+        let mut ordered = Vec::with_capacity(self.queue.len());
+        let start = self
+            .current_queue_index
+            .and_then(|current| {
+                self.shuffle_order
+                    .iter()
+                    .position(|entry| *entry == current)
+            })
+            .unwrap_or(0);
+        for offset in 0..self.shuffle_order.len() {
+            let idx = (start + offset) % self.shuffle_order.len();
+            ordered.push(self.shuffle_order[idx]);
+        }
+        ordered
+    }
+
     fn browser_track_paths(&self) -> Vec<PathBuf> {
         self.browser_entries
             .iter()
@@ -1797,9 +1840,11 @@ impl TuneCore {
                 path: PathBuf::new(),
                 label: String::from("[..] Back"),
             });
-            entries.reserve_exact(self.queue.len());
-            for idx in &self.queue {
-                if let Some(track) = self.tracks.get(*idx) {
+            let display_positions = self.local_queue_display_positions();
+            entries.reserve_exact(display_positions.len());
+            for queue_pos in display_positions {
+                let track_idx = self.queue[queue_pos];
+                if let Some(track) = self.tracks.get(track_idx) {
                     entries.push(BrowserEntry {
                         kind: BrowserEntryKind::Track,
                         label: config::sanitize_display_text(&track.title),
@@ -2788,6 +2833,74 @@ mod tests {
         assert!(core.browser_entries.iter().any(|entry| {
             entry.kind == BrowserEntryKind::Track && entry.label.contains("@alice")
         }));
+    }
+
+    #[test]
+    fn adding_to_local_queue_updates_queue_view_immediately() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![Track {
+            path: PathBuf::from("a.mp3"),
+            title: String::from("a"),
+            artist: None,
+            album: None,
+        }];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.queue = vec![0];
+        core.open_local_queue_view();
+        core.selected_browser = 1;
+
+        core.add_selected_to_local_queue_next();
+
+        assert_eq!(core.queue.len(), 2);
+        let visible_tracks = core
+            .browser_entries
+            .iter()
+            .filter(|entry| entry.kind == BrowserEntryKind::Track)
+            .count();
+        assert_eq!(visible_tracks, 2);
+    }
+
+    #[test]
+    fn local_queue_view_uses_shuffle_play_order() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("a"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("b.mp3"),
+                title: String::from("b"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("c.mp3"),
+                title: String::from("c"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.queue = vec![0, 1, 2];
+        core.playback_mode = PlaybackMode::Shuffle;
+        core.current_queue_index = Some(2);
+        core.shuffle_order = vec![2, 0, 1];
+
+        core.open_local_queue_view();
+
+        let labels: Vec<String> = core
+            .browser_entries
+            .iter()
+            .filter(|entry| entry.kind == BrowserEntryKind::Track)
+            .map(|entry| entry.label.clone())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![String::from("c"), String::from("a"), String::from("b")]
+        );
     }
 
     #[test]
