@@ -645,7 +645,17 @@ impl TuneCore {
     }
 
     pub fn cycle_mode(&mut self) {
-        self.playback_mode = self.playback_mode.next();
+        self.set_playback_mode(self.playback_mode.next());
+    }
+
+    pub fn set_playback_mode(&mut self, mode: PlaybackMode) {
+        self.playback_mode = mode;
+        if self.playback_mode == PlaybackMode::Shuffle {
+            self.rebuild_shuffle_order();
+        }
+        if self.browser_local_queue {
+            self.refresh_browser_entries();
+        }
         self.set_status("Playback mode updated");
     }
 
@@ -1124,6 +1134,23 @@ impl TuneCore {
 
     pub fn selected_browser_entry(&self) -> Option<BrowserEntry> {
         self.browser_entries.get(self.selected_browser).cloned()
+    }
+
+    pub fn refresh_browser_view(&mut self) {
+        self.refresh_browser_entries();
+    }
+
+    pub fn selected_shared_queue_item(&self) -> Option<(usize, crate::online::SharedQueueItem)> {
+        if !self.browser_shared_queue {
+            return None;
+        }
+        let selected_pos = self.selected_track_position_in_browser()?;
+        let session = self.online.session.as_ref()?;
+        session
+            .shared_queue
+            .get(selected_pos)
+            .cloned()
+            .map(|item| (selected_pos, item))
     }
 
     pub fn selected_paths_for_browser_selection(&self) -> Vec<PathBuf> {
@@ -2900,6 +2927,50 @@ mod tests {
         assert_eq!(
             labels,
             vec![String::from("c"), String::from("a"), String::from("b")]
+        );
+    }
+
+    #[test]
+    fn switching_shuffle_off_updates_local_queue_view_live() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("a"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("b.mp3"),
+                title: String::from("b"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("c.mp3"),
+                title: String::from("c"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.queue = vec![0, 1, 2];
+        core.playback_mode = PlaybackMode::Shuffle;
+        core.current_queue_index = Some(2);
+        core.shuffle_order = vec![2, 0, 1];
+        core.open_local_queue_view();
+
+        core.set_playback_mode(PlaybackMode::Normal);
+
+        let labels: Vec<String> = core
+            .browser_entries
+            .iter()
+            .filter(|entry| entry.kind == BrowserEntryKind::Track)
+            .map(|entry| entry.label.clone())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![String::from("a"), String::from("b"), String::from("c")]
         );
     }
 

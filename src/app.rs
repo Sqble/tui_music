@@ -1402,6 +1402,9 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                     core.dirty = true;
                     continue;
                 }
+                if play_selected_shared_queue_item(&mut core, &mut *audio, &mut online_runtime) {
+                    continue;
+                }
                 if let Some(path) = core.activate_selected() {
                     if let Err(err) = audio.play(&path) {
                         core.status = concise_audio_error(&err);
@@ -1846,6 +1849,69 @@ fn play_shared_queue_now(
             core.dirty = true;
         }
     }
+}
+
+fn play_selected_shared_queue_item(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    online_runtime: &mut OnlineRuntime,
+) -> bool {
+    if !core.viewing_shared_queue() {
+        return false;
+    }
+    if !matches!(
+        core.selected_browser_entry()
+            .as_ref()
+            .map(|entry| entry.kind),
+        Some(BrowserEntryKind::Track)
+    ) {
+        return false;
+    }
+
+    let Some((index, shared_item)) = core.selected_shared_queue_item() else {
+        core.status = String::from("Shared queue item not found");
+        core.dirty = true;
+        return true;
+    };
+
+    let switched = ensure_remote_track(core, audio, online_runtime, &shared_item.path);
+    let stream_pending = online_runtime.pending_stream_path.as_ref() == Some(&shared_item.path);
+    if switched || stream_pending {
+        if let Some(network) = online_runtime.network.as_ref() {
+            network.send_local_action(NetworkLocalAction::QueueRemoveAt {
+                index,
+                expected_path: Some(shared_item.path.clone()),
+            });
+        } else if let Some(session) = core.online.session.as_mut()
+            && session
+                .shared_queue
+                .get(index)
+                .is_some_and(|item| item.path == shared_item.path)
+        {
+            session.shared_queue.remove(index);
+        }
+        if core.viewing_shared_queue() {
+            core.refresh_browser_view();
+        }
+
+        online_runtime.online_playback_source = OnlinePlaybackSource::SharedQueue;
+        if switched {
+            audio.resume();
+            publish_current_playback_state(core, audio, online_runtime);
+        }
+
+        core.status = format!(
+            "Shared queue now: {}",
+            shared_item
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("track")
+        );
+        core.dirty = true;
+    }
+
+    true
 }
 
 fn online_authority_nickname(session: &OnlineSession) -> Option<&str> {
@@ -4808,14 +4874,12 @@ fn handle_action_panel_input_with_recent(
                     panel.close();
                     return;
                 }
-                core.playback_mode = match selected {
+                core.set_playback_mode(match selected {
                     0 => PlaybackMode::Normal,
                     1 => PlaybackMode::Shuffle,
                     2 => PlaybackMode::Loop,
                     _ => PlaybackMode::LoopOne,
-                };
-                core.status = String::from("Playback mode updated");
-                core.dirty = true;
+                });
                 auto_save_state(core, &*audio);
                 panel.close();
             }
@@ -7905,6 +7969,56 @@ mod tests {
                 .map(|session| session.shared_queue.len()),
             Some(1)
         );
+    }
+
+    #[test]
+    fn play_selected_shared_queue_item_plays_selected_and_consumes_it() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online.session = Some(crate::online::OnlineSession::host("host"));
+        if let Some(session) = core.online.session.as_mut() {
+            session.push_shared_track(
+                Path::new("first.mp3"),
+                String::from("first"),
+                Some(String::from("listener")),
+            );
+            session.push_shared_track(
+                Path::new("second.mp3"),
+                String::from("second"),
+                Some(String::from("listener")),
+            );
+        }
+        core.open_shared_queue_view();
+        core.selected_browser = 2;
+
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("host");
+        let mut audio = TestAudioEngine::new();
+
+        assert!(play_selected_shared_queue_item(
+            &mut core,
+            &mut audio,
+            &mut runtime
+        ));
+
+        assert_eq!(audio.current.as_deref(), Some(Path::new("second.mp3")));
+        assert_eq!(audio.played, vec![PathBuf::from("second.mp3")]);
+        assert_eq!(
+            runtime.online_playback_source,
+            OnlinePlaybackSource::SharedQueue
+        );
+        let remaining: Vec<PathBuf> = core
+            .online
+            .session
+            .as_ref()
+            .map(|session| {
+                session
+                    .shared_queue
+                    .iter()
+                    .map(|item| item.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(remaining, vec![PathBuf::from("first.mp3")]);
     }
 
     #[test]

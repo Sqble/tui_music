@@ -2115,6 +2115,7 @@ fn disconnect_peer(
 
     let changed = if let Some(name) = nickname.as_deref() {
         let before = session.participants.len();
+        let queue_before = session.shared_queue.len();
         let mut removed_host = false;
         session.participants.retain(|participant| {
             let matches = participant.nickname.eq_ignore_ascii_case(name);
@@ -2123,6 +2124,13 @@ fn disconnect_peer(
             }
             !matches
         });
+        session.shared_queue.retain(|item| {
+            !item
+                .owner_nickname
+                .as_deref()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(name))
+        });
+        let removed_queue_items = queue_before.saturating_sub(session.shared_queue.len());
 
         let mut promoted_new_host = false;
         let mut promoted_nickname = String::new();
@@ -2145,7 +2153,13 @@ fn disconnect_peer(
             }
         }
 
-        session.participants.len() != before || promoted_new_host
+        if removed_queue_items > 0 {
+            let _ = event_tx.send(NetworkEvent::Status(format!(
+                "Removed {removed_queue_items} shared queue item(s) from disconnected user {name}"
+            )));
+        }
+
+        session.participants.len() != before || promoted_new_host || removed_queue_items > 0
     } else {
         false
     };
@@ -4329,6 +4343,80 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("Peer disconnected: listenera"))
         );
+    }
+
+    #[test]
+    fn disconnect_peer_removes_owned_shared_queue_items_case_insensitive() {
+        let mut session = OnlineSession::host("host");
+        session.participants.push(crate::online::Participant {
+            nickname: String::from("ListenerA"),
+            is_local: false,
+            is_host: false,
+            ping_ms: 25,
+            manual_extra_delay_ms: 0,
+            auto_ping_delay: true,
+        });
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("a.flac"),
+            title: String::from("a"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("listenera")),
+        });
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("b.flac"),
+            title: String::from("b"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("someoneelse")),
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let client_stream = TcpStream::connect(addr).expect("connect client stream");
+        let (server_stream, _) = listener.accept().expect("accept server stream");
+
+        let mut peers = HashMap::new();
+        peers.insert(
+            9,
+            PeerConnection {
+                nickname: String::from("ListenerA"),
+                writer: Arc::new(Mutex::new(server_stream)),
+            },
+        );
+        drop(client_stream);
+
+        let mut pending_pull_requests = HashMap::new();
+        let mut pending_relay_requests = HashMap::new();
+        let mut inbound_streams = HashMap::new();
+        let mut pending_pings = HashMap::new();
+        let (event_tx, event_rx) = mpsc::channel();
+
+        disconnect_peer(
+            9,
+            &mut session,
+            &mut InboundState {
+                peers: &mut peers,
+                pending_pull_requests: &mut pending_pull_requests,
+                pending_relay_requests: &mut pending_relay_requests,
+                inbound_streams: &mut inbound_streams,
+                pending_pings: &mut pending_pings,
+            },
+            "Peer disconnected",
+            &event_tx,
+        );
+
+        assert_eq!(session.shared_queue.len(), 1);
+        assert_eq!(session.shared_queue[0].path, PathBuf::from("b.flac"));
+
+        let statuses: Vec<String> = event_rx
+            .try_iter()
+            .filter_map(|event| match event {
+                NetworkEvent::Status(message) => Some(message),
+                _ => None,
+            })
+            .collect();
+        assert!(statuses.iter().any(|line| {
+            line.contains("Removed 1 shared queue item(s) from disconnected user ListenerA")
+        }));
     }
 
     #[test]
