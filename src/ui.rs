@@ -312,6 +312,9 @@ pub fn draw(
                     BrowserEntryKind::Folder => Style::default().fg(colors.accent),
                     BrowserEntryKind::Playlist => Style::default().fg(colors.playlist),
                     BrowserEntryKind::AllSongs => Style::default().fg(colors.all_songs),
+                    BrowserEntryKind::QueueLocal | BrowserEntryKind::QueueShared => {
+                        Style::default().fg(colors.accent)
+                    }
                     BrowserEntryKind::Track => Style::default().fg(colors.text),
                 };
                 ListItem::new(Line::from(vec![
@@ -328,6 +331,10 @@ pub fn draw(
             format!("Library / Playlist / {name}")
         } else if core.browser_all_songs {
             String::from("Library / All Songs")
+        } else if core.browser_local_queue {
+            String::from("Library / Local Queue")
+        } else if core.browser_shared_queue {
+            String::from("Library / Shared Queue")
         } else if let Some(path) = &core.browser_path {
             format!("Library / {}", path.display())
         } else {

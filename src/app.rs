@@ -604,6 +604,12 @@ enum RootActionId {
     AddDirectory,
     AddSelectedToPlaylist,
     AddNowPlayingToPlaylist,
+    OpenLocalQueue,
+    OpenSharedQueue,
+    AddSelectedToQueueEnd,
+    AddSelectedToQueueNext,
+    RemoveSelectedFromQueue,
+    MoveSelectedQueueItemToNext,
     SetPlaybackMode,
     PlaybackSettings,
     PlayPlaylist,
@@ -622,10 +628,16 @@ enum RootActionId {
     ClosePanel,
 }
 
-const ROOT_ACTIONS: [RootActionId; 19] = [
+const ROOT_ACTIONS: [RootActionId; 25] = [
     RootActionId::AddDirectory,
     RootActionId::AddSelectedToPlaylist,
     RootActionId::AddNowPlayingToPlaylist,
+    RootActionId::OpenLocalQueue,
+    RootActionId::OpenSharedQueue,
+    RootActionId::AddSelectedToQueueEnd,
+    RootActionId::AddSelectedToQueueNext,
+    RootActionId::RemoveSelectedFromQueue,
+    RootActionId::MoveSelectedQueueItemToNext,
     RootActionId::SetPlaybackMode,
     RootActionId::PlaybackSettings,
     RootActionId::PlayPlaylist,
@@ -702,6 +714,12 @@ fn root_action_label(action: RootActionId) -> &'static str {
         RootActionId::AddDirectory => "Add directory",
         RootActionId::AddSelectedToPlaylist => "Add selected item to playlist",
         RootActionId::AddNowPlayingToPlaylist => "Add now playing song to playlist",
+        RootActionId::OpenLocalQueue => "Open local queue",
+        RootActionId::OpenSharedQueue => "Open shared queue",
+        RootActionId::AddSelectedToQueueEnd => "Add selection to queue end",
+        RootActionId::AddSelectedToQueueNext => "Add selection to queue next",
+        RootActionId::RemoveSelectedFromQueue => "Remove selected queue item",
+        RootActionId::MoveSelectedQueueItemToNext => "Move selected queue item to next",
         RootActionId::SetPlaybackMode => "Set playback mode",
         RootActionId::PlaybackSettings => "Playback settings",
         RootActionId::PlayPlaylist => "Play playlist",
@@ -3982,6 +4000,7 @@ fn metadata_editor_state_for_selection(core: &TuneCore) -> Option<MetadataEditor
             album_input: String::new(),
             confirm_all_songs_cover_copy: true,
         }),
+        BrowserEntryKind::QueueLocal | BrowserEntryKind::QueueShared => None,
         BrowserEntryKind::Back => None,
     }
 }
@@ -4594,6 +4613,89 @@ fn handle_action_panel_input_with_recent(
                             *panel = ActionPanelState::PlaylistAddNowPlaying { selected: 0 };
                             core.dirty = true;
                         }
+                    }
+                    RootActionId::OpenLocalQueue => {
+                        core.open_local_queue_view();
+                        panel.close();
+                    }
+                    RootActionId::OpenSharedQueue => {
+                        core.open_shared_queue_view();
+                        panel.close();
+                    }
+                    RootActionId::AddSelectedToQueueEnd => {
+                        if core.viewing_shared_queue() {
+                            let added = core.add_selected_to_shared_queue_end();
+                            if let Some(network) = online_runtime
+                                .as_deref()
+                                .and_then(|runtime| runtime.network.as_ref())
+                            {
+                                for item in added {
+                                    network.send_local_action(NetworkLocalAction::QueueAdd(item));
+                                }
+                            }
+                        } else {
+                            core.add_selected_to_local_queue_end();
+                        }
+                        auto_save_state(core, &*audio);
+                        panel.close();
+                    }
+                    RootActionId::AddSelectedToQueueNext => {
+                        if core.viewing_shared_queue() {
+                            let added = core.add_selected_to_shared_queue_next();
+                            if let Some(network) = online_runtime
+                                .as_deref()
+                                .and_then(|runtime| runtime.network.as_ref())
+                            {
+                                for item in added {
+                                    network.send_local_action(NetworkLocalAction::QueueInsertAt {
+                                        index: 0,
+                                        item,
+                                    });
+                                }
+                            }
+                        } else {
+                            core.add_selected_to_local_queue_next();
+                        }
+                        auto_save_state(core, &*audio);
+                        panel.close();
+                    }
+                    RootActionId::RemoveSelectedFromQueue => {
+                        if core.viewing_shared_queue() {
+                            if let Some((index, expected_path)) = core.remove_selected_from_shared_queue()
+                                && let Some(network) = online_runtime
+                                    .as_deref()
+                                    .and_then(|runtime| runtime.network.as_ref())
+                            {
+                                network.send_local_action(NetworkLocalAction::QueueRemoveAt {
+                                    index,
+                                    expected_path: Some(expected_path),
+                                });
+                            }
+                        } else {
+                            core.remove_selected_from_local_queue();
+                        }
+                        auto_save_state(core, &*audio);
+                        panel.close();
+                    }
+                    RootActionId::MoveSelectedQueueItemToNext => {
+                        if core.viewing_shared_queue() {
+                            if let Some((from_index, to_index, expected_path)) =
+                                core.move_selected_shared_queue_item_to_next()
+                                && let Some(network) = online_runtime
+                                    .as_deref()
+                                    .and_then(|runtime| runtime.network.as_ref())
+                            {
+                                network.send_local_action(NetworkLocalAction::QueueMove {
+                                    from_index,
+                                    to_index,
+                                    expected_path: Some(expected_path),
+                                });
+                            }
+                        } else {
+                            core.move_selected_local_queue_item_to_next();
+                        }
+                        auto_save_state(core, &*audio);
+                        panel.close();
                     }
                     RootActionId::SetPlaybackMode => {
                         *panel = ActionPanelState::Mode { selected: 0 };

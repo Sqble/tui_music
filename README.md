@@ -14,6 +14,7 @@ Full documentation available at **https://tunetui.online**
 - Playback modes: normal, shuffle, loop playlist, loop single track
 - Main library queue order uses metadata titles (not file names)
 - Queue scope follows where you start playback (folder, playlist, or All Songs)
+- Queue tools in Library actions: open local/shared queue, add to end/next, remove item, move item to next
 - Single-instance behavior on Windows (new launches focus/restore existing app)
 - Automatic track advance when a song ends, including while minimized to tray (Windows)
 - Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\.config\tunetui\state.json` on Windows)
@@ -63,6 +64,8 @@ Download `tune.exe` from releases and run. No installation required.
 | `/` | Open actions panel |
 | `Tab` | Cycle tabs (Library/Lyrics/Stats/Online) |
 | `Ctrl+c` | Quit |
+
+Queue tools are available from the actions panel in Library (`/`), including root entries for `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online).
 
 ### Online / Listen Together
 
