@@ -63,6 +63,7 @@ Download `tune.exe` from releases and run. No installation required.
 | `-` `_` | Volume down |
 | `/` | Open actions panel |
 | `Tab` | Cycle tabs (Library/Lyrics/Stats/Online) |
+| `Ctrl+n` | In Online tab, start shared queue playback / next shared item |
 | `Ctrl+c` | Quit |
 
 Queue tools are available from the actions panel in Library (`/`), including root entries for `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online).
@@ -84,7 +85,7 @@ A public server is available at **tunetui.online** — anyone can use it to host
 4. Enter invite code (and password if needed)
 
 **Online quick control:**
-- `Ctrl+n` starts shared queue playback immediately (or jumps to the next shared item)
+- In Online tab, `Ctrl+n` starts shared queue playback immediately (or jumps to the next shared item)
 
 Remote users can stream to each other through the room host connection; only the host server ports need to be exposed.
 
