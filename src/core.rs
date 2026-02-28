@@ -21,6 +21,8 @@ pub enum BrowserEntryKind {
     Folder,
     Playlist,
     AllSongs,
+    QueueLocal,
+    QueueShared,
     Track,
 }
 
@@ -104,6 +106,8 @@ pub struct TuneCore {
     pub browser_path: Option<PathBuf>,
     pub browser_playlist: Option<String>,
     pub browser_all_songs: bool,
+    pub browser_local_queue: bool,
+    pub browser_shared_queue: bool,
     pub browser_entries: Vec<BrowserEntry>,
     pub selected_browser: usize,
     pub dirty: bool,
@@ -157,6 +161,8 @@ impl TuneCore {
             browser_path: None,
             browser_playlist: None,
             browser_all_songs: false,
+            browser_local_queue: false,
+            browser_shared_queue: false,
             browser_entries: Vec::new(),
             selected_browser: 0,
             dirty: true,
@@ -449,6 +455,8 @@ impl TuneCore {
             BrowserEntryKind::Folder => {
                 self.browser_playlist = None;
                 self.browser_all_songs = false;
+                self.browser_local_queue = false;
+                self.browser_shared_queue = false;
                 self.browser_path = Some(entry.path);
                 self.selected_browser = 0;
                 self.refresh_browser_entries();
@@ -458,6 +466,8 @@ impl TuneCore {
             BrowserEntryKind::Playlist => {
                 self.browser_path = None;
                 self.browser_all_songs = false;
+                self.browser_local_queue = false;
+                self.browser_shared_queue = false;
                 self.browser_playlist = Some(entry.path.to_string_lossy().to_string());
                 self.selected_browser = 0;
                 self.refresh_browser_entries();
@@ -468,9 +478,37 @@ impl TuneCore {
                 self.browser_path = None;
                 self.browser_playlist = None;
                 self.browser_all_songs = true;
+                self.browser_local_queue = false;
+                self.browser_shared_queue = false;
                 self.selected_browser = 0;
                 self.refresh_browser_entries();
                 self.set_status("Opened all songs");
+                None
+            }
+            BrowserEntryKind::QueueLocal => {
+                self.browser_path = None;
+                self.browser_playlist = None;
+                self.browser_all_songs = false;
+                self.browser_local_queue = true;
+                self.browser_shared_queue = false;
+                self.selected_browser = 0;
+                self.refresh_browser_entries();
+                self.set_status("Opened local queue");
+                None
+            }
+            BrowserEntryKind::QueueShared => {
+                if self.online.session.is_none() {
+                    self.set_status("Join or host a room first");
+                    return None;
+                }
+                self.browser_path = None;
+                self.browser_playlist = None;
+                self.browser_all_songs = false;
+                self.browser_local_queue = false;
+                self.browser_shared_queue = true;
+                self.selected_browser = 0;
+                self.refresh_browser_entries();
+                self.set_status("Opened shared queue");
                 None
             }
             BrowserEntryKind::Track => {
@@ -565,6 +603,22 @@ impl TuneCore {
             return;
         }
 
+        if self.browser_local_queue {
+            self.browser_local_queue = false;
+            self.selected_browser = 0;
+            self.refresh_browser_entries();
+            self.set_status("Went back");
+            return;
+        }
+
+        if self.browser_shared_queue {
+            self.browser_shared_queue = false;
+            self.selected_browser = 0;
+            self.refresh_browser_entries();
+            self.set_status("Went back");
+            return;
+        }
+
         match &self.browser_path {
             Some(current) => {
                 if let Some(root) = self
@@ -619,6 +673,7 @@ impl TuneCore {
 
     pub fn online_host_room(&mut self, nickname: &str) {
         self.online.host_room(nickname);
+        self.refresh_browser_entries();
         if let Some(session) = self.online.session.as_ref() {
             self.set_status(&format!("Hosting room {}", session.room_code));
         }
@@ -626,6 +681,7 @@ impl TuneCore {
 
     pub fn online_join_room(&mut self, room_code: &str, nickname: &str) {
         self.online.join_room(room_code, nickname);
+        self.refresh_browser_entries();
         if let Some(session) = self.online.session.as_ref() {
             self.set_status(&format!("Joined room {}", session.room_code));
         }
@@ -634,6 +690,10 @@ impl TuneCore {
     pub fn online_leave_room(&mut self) {
         if self.online.session.is_some() {
             self.online.leave_room();
+            if self.browser_shared_queue {
+                self.browser_shared_queue = false;
+            }
+            self.refresh_browser_entries();
             self.set_status("Left online room");
         } else {
             self.set_status("Not connected to an online room");
@@ -1067,6 +1127,301 @@ impl TuneCore {
         self.selected_paths_for_playlist_action()
     }
 
+    pub fn viewing_local_queue(&self) -> bool {
+        self.browser_local_queue
+    }
+
+    pub fn viewing_shared_queue(&self) -> bool {
+        self.browser_shared_queue
+    }
+
+    pub fn open_local_queue_view(&mut self) {
+        self.browser_path = None;
+        self.browser_playlist = None;
+        self.browser_all_songs = false;
+        self.browser_local_queue = true;
+        self.browser_shared_queue = false;
+        self.selected_browser = 0;
+        self.refresh_browser_entries();
+        self.set_status("Opened local queue");
+    }
+
+    pub fn open_shared_queue_view(&mut self) {
+        if self.online.session.is_none() {
+            self.set_status("Join or host a room first");
+            return;
+        }
+        self.browser_path = None;
+        self.browser_playlist = None;
+        self.browser_all_songs = false;
+        self.browser_local_queue = false;
+        self.browser_shared_queue = true;
+        self.selected_browser = 0;
+        self.refresh_browser_entries();
+        self.set_status("Opened shared queue");
+    }
+
+    pub fn add_selected_to_local_queue_end(&mut self) {
+        let paths = self.selected_paths_for_browser_selection();
+        if paths.is_empty() {
+            self.set_status("No selection to add to queue");
+            return;
+        }
+        let added = self.queue_from_paths(&paths);
+        let count = added.len();
+        self.queue.extend(added);
+        self.rebuild_shuffle_order();
+        self.dirty = true;
+        self.set_status(&format!("Queued {count} track(s)"));
+    }
+
+    pub fn add_selected_to_local_queue_next(&mut self) {
+        let paths = self.selected_paths_for_browser_selection();
+        if paths.is_empty() {
+            self.set_status("No selection to add to queue");
+            return;
+        }
+        let added = self.queue_from_paths(&paths);
+        let count = added.len();
+        let insert_at = self
+            .current_queue_index
+            .map(|idx| idx.saturating_add(1))
+            .unwrap_or(0)
+            .min(self.queue.len());
+        self.queue.splice(insert_at..insert_at, added);
+        self.rebuild_shuffle_order();
+        self.dirty = true;
+        self.set_status(&format!("Queued next {count} track(s)"));
+    }
+
+    pub fn remove_selected_from_local_queue(&mut self) {
+        if !self.browser_local_queue {
+            self.set_status("Open local queue to remove item");
+            return;
+        }
+        let Some(selected_pos) = self.selected_track_position_in_browser() else {
+            self.set_status("Select a queue item to remove");
+            return;
+        };
+        if selected_pos >= self.queue.len() {
+            self.set_status("Queue item not found");
+            return;
+        }
+        self.queue.remove(selected_pos);
+
+        if let Some(current) = self.current_queue_index {
+            self.current_queue_index = if self.queue.is_empty() {
+                None
+            } else if selected_pos < current {
+                Some(current - 1)
+            } else if selected_pos == current {
+                Some(current.min(self.queue.len() - 1))
+            } else {
+                Some(current)
+            };
+        }
+
+        self.rebuild_shuffle_order();
+        self.refresh_browser_entries();
+        self.set_status("Removed queue item");
+    }
+
+    pub fn move_selected_local_queue_item_to_next(&mut self) {
+        if !self.browser_local_queue {
+            self.set_status("Open local queue to move item");
+            return;
+        }
+        if self.queue.len() < 2 {
+            self.set_status("Need at least 2 queue items");
+            return;
+        }
+        let Some(from_index) = self.selected_track_position_in_browser() else {
+            self.set_status("Select a queue item to move");
+            return;
+        };
+        if from_index >= self.queue.len() {
+            self.set_status("Queue item not found");
+            return;
+        }
+
+        let mut target = self
+            .current_queue_index
+            .map(|idx| idx.saturating_add(1))
+            .unwrap_or(0)
+            .min(self.queue.len());
+        if target == from_index || target == from_index.saturating_add(1) {
+            self.set_status("Queue item already next");
+            return;
+        }
+
+        let mut current = self.current_queue_index;
+        let moving_current = current == Some(from_index);
+        let item = self.queue.remove(from_index);
+
+        if let Some(current_idx) = current {
+            if from_index < current_idx {
+                current = Some(current_idx - 1);
+            }
+        }
+
+        if from_index < target {
+            target = target.saturating_sub(1);
+        }
+        target = target.min(self.queue.len());
+        self.queue.insert(target, item);
+
+        current = if moving_current {
+            Some(target)
+        } else if let Some(current_idx) = current {
+            if current_idx >= target {
+                Some(current_idx + 1)
+            } else {
+                Some(current_idx)
+            }
+        } else {
+            None
+        };
+        self.current_queue_index = current;
+
+        self.rebuild_shuffle_order();
+        self.refresh_browser_entries();
+        self.set_status("Moved queue item to next");
+    }
+
+    pub fn add_selected_to_shared_queue_end(&mut self) -> Vec<crate::online::SharedQueueItem> {
+        let paths = self.selected_paths_for_browser_selection();
+        self.online_queue_paths(&paths)
+    }
+
+    pub fn add_selected_to_shared_queue_next(&mut self) -> Vec<crate::online::SharedQueueItem> {
+        let paths = self.selected_paths_for_browser_selection();
+        if paths.is_empty() {
+            self.set_status("No selection to add to shared queue");
+            return Vec::new();
+        }
+
+        let queue_items: Vec<(PathBuf, String)> = paths
+            .iter()
+            .map(|path| {
+                let title = self
+                    .title_for_path(path)
+                    .or_else(|| {
+                        path.file_stem()
+                            .map(|name| name.to_string_lossy().to_string())
+                    })
+                    .unwrap_or_else(|| String::from("unknown"));
+                (path.clone(), title)
+            })
+            .collect();
+
+        let Some(session) = self.online.session.as_mut() else {
+            self.set_status("Join or host a room first");
+            return Vec::new();
+        };
+
+        if !session.can_local_control_playback() {
+            self.set_status("Room is host-only. Listener cannot edit queue");
+            return Vec::new();
+        }
+
+        let owner_nickname = session
+            .local_participant()
+            .map(|entry| entry.nickname.clone());
+        let mut added = Vec::with_capacity(queue_items.len());
+
+        for (path, title) in queue_items.into_iter().rev() {
+            let delivery = if path.exists() {
+                crate::online::QueueDelivery::PreferLocalWithStreamFallback
+            } else {
+                crate::online::QueueDelivery::HostStreamOnly
+            };
+            let item = crate::online::SharedQueueItem {
+                path,
+                title,
+                delivery,
+                owner_nickname: owner_nickname.clone(),
+            };
+            session.shared_queue.insert(0, item.clone());
+            if session.shared_queue.len() > 512 {
+                session.shared_queue.pop();
+            }
+            added.push(item);
+        }
+        added.reverse();
+        if !added.is_empty() {
+            self.set_status("added to shared queue next");
+        }
+        if self.browser_shared_queue {
+            self.refresh_browser_entries();
+        }
+        added
+    }
+
+    pub fn remove_selected_from_shared_queue(&mut self) -> Option<(usize, PathBuf)> {
+        if !self.browser_shared_queue {
+            self.set_status("Open shared queue to remove item");
+            return None;
+        }
+        let Some(selected_pos) = self.selected_track_position_in_browser() else {
+            self.set_status("Select a shared queue item to remove");
+            return None;
+        };
+        let Some(session) = self.online.session.as_mut() else {
+            self.set_status("Join or host a room first");
+            return None;
+        };
+        if !session.can_local_control_playback() {
+            self.set_status("Room is host-only. Listener cannot edit queue");
+            return None;
+        }
+        if selected_pos >= session.shared_queue.len() {
+            self.set_status("Shared queue item not found");
+            return None;
+        }
+        let removed = session.shared_queue.remove(selected_pos);
+        self.refresh_browser_entries();
+        self.set_status("Removed shared queue item");
+        Some((selected_pos, removed.path))
+    }
+
+    pub fn move_selected_shared_queue_item_to_next(&mut self) -> Option<(usize, usize, PathBuf)> {
+        if !self.browser_shared_queue {
+            self.set_status("Open shared queue to move item");
+            return None;
+        }
+        let Some(from_index) = self.selected_track_position_in_browser() else {
+            self.set_status("Select a shared queue item to move");
+            return None;
+        };
+        let Some(session) = self.online.session.as_mut() else {
+            self.set_status("Join or host a room first");
+            return None;
+        };
+        if !session.can_local_control_playback() {
+            self.set_status("Room is host-only. Listener cannot edit queue");
+            return None;
+        }
+        if session.shared_queue.len() < 2 {
+            self.set_status("Need at least 2 shared queue items");
+            return None;
+        }
+        if from_index >= session.shared_queue.len() {
+            self.set_status("Shared queue item not found");
+            return None;
+        }
+        let to_index = 0usize;
+        if from_index == to_index {
+            self.set_status("Shared queue item already next");
+            return None;
+        }
+        let item = session.shared_queue.remove(from_index);
+        let expected_path = item.path.clone();
+        session.shared_queue.insert(to_index, item);
+        self.refresh_browser_entries();
+        self.set_status("Moved shared queue item to next");
+        Some((from_index, to_index, expected_path))
+    }
+
     pub fn queue_position_for_path(&self, path: &Path) -> Option<usize> {
         self.queue.iter().position(|idx| {
             self.tracks
@@ -1353,6 +1708,23 @@ impl TuneCore {
                 .into_iter()
                 .filter_map(|idx| self.tracks.get(idx).map(|track| track.path.clone()))
                 .collect(),
+            BrowserEntryKind::QueueLocal => self
+                .queue
+                .iter()
+                .filter_map(|idx| self.tracks.get(*idx).map(|track| track.path.clone()))
+                .collect(),
+            BrowserEntryKind::QueueShared => self
+                .online
+                .session
+                .as_ref()
+                .map(|session| {
+                    session
+                        .shared_queue
+                        .iter()
+                        .map(|item| item.path.clone())
+                        .collect()
+                })
+                .unwrap_or_default(),
             BrowserEntryKind::Back => Vec::new(),
         }
     }
@@ -1419,6 +1791,48 @@ impl TuneCore {
                     });
                 }
             }
+        } else if self.browser_local_queue {
+            entries.push(BrowserEntry {
+                kind: BrowserEntryKind::Back,
+                path: PathBuf::new(),
+                label: String::from("[..] Back"),
+            });
+            entries.reserve_exact(self.queue.len());
+            for idx in &self.queue {
+                if let Some(track) = self.tracks.get(*idx) {
+                    entries.push(BrowserEntry {
+                        kind: BrowserEntryKind::Track,
+                        label: config::sanitize_display_text(&track.title),
+                        path: track.path.clone(),
+                    });
+                }
+            }
+        } else if self.browser_shared_queue {
+            entries.push(BrowserEntry {
+                kind: BrowserEntryKind::Back,
+                path: PathBuf::new(),
+                label: String::from("[..] Back"),
+            });
+            if let Some(session) = self.online.session.as_ref() {
+                entries.reserve_exact(session.shared_queue.len());
+                for item in &session.shared_queue {
+                    let owner_suffix = item
+                        .owner_nickname
+                        .as_deref()
+                        .filter(|owner| !owner.trim().is_empty())
+                        .map(|owner| format!(" @{}", config::sanitize_display_text(owner)))
+                        .unwrap_or_default();
+                    entries.push(BrowserEntry {
+                        kind: BrowserEntryKind::Track,
+                        label: format!(
+                            "{}{}",
+                            config::sanitize_display_text(&item.title),
+                            owner_suffix
+                        ),
+                        path: item.path.clone(),
+                    });
+                }
+            }
         } else if let Some(current) = &self.browser_path {
             let cleaned_current = config::strip_windows_verbatim_prefix(current);
             entries.push(BrowserEntry {
@@ -1476,6 +1890,20 @@ impl TuneCore {
                 path: PathBuf::new(),
                 label: String::from("[ALL] All Songs"),
             });
+
+            entries.push(BrowserEntry {
+                kind: BrowserEntryKind::QueueLocal,
+                path: PathBuf::new(),
+                label: String::from("[QUEUE] Local Queue"),
+            });
+
+            if self.online.session.is_some() {
+                entries.push(BrowserEntry {
+                    kind: BrowserEntryKind::QueueShared,
+                    path: PathBuf::new(),
+                    label: String::from("[QUEUE] Shared Queue"),
+                });
+            }
 
             for name in self.playlists.keys() {
                 entries.push(BrowserEntry {
@@ -1824,6 +2252,35 @@ mod tests {
             core.browser_entries
                 .iter()
                 .any(|entry| entry.kind == BrowserEntryKind::AllSongs)
+        );
+    }
+
+    #[test]
+    fn root_browser_includes_local_queue_entry() {
+        let core = TuneCore::from_persisted(PersistedState::default());
+        assert!(
+            core.browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::QueueLocal)
+        );
+    }
+
+    #[test]
+    fn root_browser_includes_shared_queue_entry_when_online() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        assert!(
+            !core
+                .browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::QueueShared)
+        );
+
+        core.online_host_room("dj");
+
+        assert!(
+            core.browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::QueueShared)
         );
     }
 
@@ -2292,6 +2749,45 @@ mod tests {
                 .iter()
                 .any(|entry| entry.kind == BrowserEntryKind::Playlist && entry.label == "[PL] mix")
         );
+    }
+
+    #[test]
+    fn remove_selected_from_local_queue_only_removes_selected_occurrence() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![Track {
+            path: PathBuf::from("a.mp3"),
+            title: String::from("a"),
+            artist: None,
+            album: None,
+        }];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.queue = vec![0, 0, 0];
+        core.open_local_queue_view();
+        core.selected_browser = 2;
+
+        core.remove_selected_from_local_queue();
+
+        assert_eq!(core.queue, vec![0, 0]);
+    }
+
+    #[test]
+    fn shared_queue_view_includes_owner_in_label() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online_host_room("host");
+        if let Some(session) = core.online.session.as_mut() {
+            session.shared_queue.push(crate::online::SharedQueueItem {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("Song A"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("alice")),
+            });
+        }
+
+        core.open_shared_queue_view();
+
+        assert!(core.browser_entries.iter().any(|entry| {
+            entry.kind == BrowserEntryKind::Track && entry.label.contains("@alice")
+        }));
     }
 
     #[test]

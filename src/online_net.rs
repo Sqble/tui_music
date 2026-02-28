@@ -129,6 +129,19 @@ pub enum LocalAction {
         nickname: String,
     },
     QueueAdd(SharedQueueItem),
+    QueueInsertAt {
+        index: usize,
+        item: SharedQueueItem,
+    },
+    QueueRemoveAt {
+        index: usize,
+        expected_path: Option<PathBuf>,
+    },
+    QueueMove {
+        from_index: usize,
+        to_index: usize,
+        expected_path: Option<PathBuf>,
+    },
     QueueConsume {
         expected_path: Option<PathBuf>,
     },
@@ -2260,6 +2273,48 @@ fn apply_action_to_session(
                 session.shared_queue.drain(0..remove);
             }
         }
+        LocalAction::QueueInsertAt { index, item } => {
+            let insert_at = index.min(session.shared_queue.len());
+            session.shared_queue.insert(insert_at, item);
+            if session.shared_queue.len() > 512 {
+                session.shared_queue.pop();
+            }
+        }
+        LocalAction::QueueRemoveAt {
+            index,
+            expected_path,
+        } => {
+            let can_remove = session
+                .shared_queue
+                .get(index)
+                .map(|item| {
+                    expected_path
+                        .as_ref()
+                        .is_none_or(|expected| item.path.as_path() == expected)
+                })
+                .unwrap_or(false);
+            if can_remove {
+                session.shared_queue.remove(index);
+            }
+        }
+        LocalAction::QueueMove {
+            from_index,
+            to_index,
+            expected_path,
+        } => {
+            if from_index >= session.shared_queue.len() {
+                return;
+            }
+            let can_move = expected_path
+                .as_ref()
+                .is_none_or(|expected| session.shared_queue[from_index].path.as_path() == expected);
+            if !can_move {
+                return;
+            }
+            let item = session.shared_queue.remove(from_index);
+            let insert_at = to_index.min(session.shared_queue.len());
+            session.shared_queue.insert(insert_at, item);
+        }
         LocalAction::QueueConsume { expected_path } => {
             let can_consume = match (session.shared_queue.first(), expected_path.as_ref()) {
                 (Some(_), None) => true,
@@ -3536,6 +3591,19 @@ enum WireAction {
         nickname: String,
     },
     QueueAdd(SharedQueueItem),
+    QueueInsertAt {
+        index: usize,
+        item: SharedQueueItem,
+    },
+    QueueRemoveAt {
+        index: usize,
+        expected_path: Option<PathBuf>,
+    },
+    QueueMove {
+        from_index: usize,
+        to_index: usize,
+        expected_path: Option<PathBuf>,
+    },
     QueueConsume {
         expected_path: Option<PathBuf>,
     },
@@ -3552,6 +3620,23 @@ fn action_to_wire(action: LocalAction) -> WireAction {
         LocalAction::SetQuality(quality) => WireAction::SetQuality(quality),
         LocalAction::SetNickname { nickname } => WireAction::SetNickname { nickname },
         LocalAction::QueueAdd(item) => WireAction::QueueAdd(item),
+        LocalAction::QueueInsertAt { index, item } => WireAction::QueueInsertAt { index, item },
+        LocalAction::QueueRemoveAt {
+            index,
+            expected_path,
+        } => WireAction::QueueRemoveAt {
+            index,
+            expected_path,
+        },
+        LocalAction::QueueMove {
+            from_index,
+            to_index,
+            expected_path,
+        } => WireAction::QueueMove {
+            from_index,
+            to_index,
+            expected_path,
+        },
         LocalAction::QueueConsume { expected_path } => WireAction::QueueConsume { expected_path },
         LocalAction::DelayUpdate {
             manual_extra_delay_ms,
@@ -3570,6 +3655,23 @@ fn wire_to_action(action: WireAction) -> LocalAction {
         WireAction::SetQuality(quality) => LocalAction::SetQuality(quality),
         WireAction::SetNickname { nickname } => LocalAction::SetNickname { nickname },
         WireAction::QueueAdd(item) => LocalAction::QueueAdd(item),
+        WireAction::QueueInsertAt { index, item } => LocalAction::QueueInsertAt { index, item },
+        WireAction::QueueRemoveAt {
+            index,
+            expected_path,
+        } => LocalAction::QueueRemoveAt {
+            index,
+            expected_path,
+        },
+        WireAction::QueueMove {
+            from_index,
+            to_index,
+            expected_path,
+        } => LocalAction::QueueMove {
+            from_index,
+            to_index,
+            expected_path,
+        },
         WireAction::QueueConsume { expected_path } => LocalAction::QueueConsume { expected_path },
         WireAction::DelayUpdate {
             manual_extra_delay_ms,
@@ -3899,6 +4001,112 @@ mod tests {
 
         assert_eq!(session.shared_queue.len(), 1);
         assert_eq!(session.shared_queue[0].path, PathBuf::from("a.flac"));
+    }
+
+    #[test]
+    fn queue_insert_at_places_item_at_requested_index() {
+        let mut session = OnlineSession::host("host");
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("a.flac"),
+            title: String::from("a"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("host")),
+        });
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("b.flac"),
+            title: String::from("b"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("host")),
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::QueueInsertAt {
+                index: 0,
+                item: crate::online::SharedQueueItem {
+                    path: PathBuf::from("next.flac"),
+                    title: String::from("next"),
+                    delivery: crate::online::QueueDelivery::HostStreamOnly,
+                    owner_nickname: Some(String::from("host")),
+                },
+            },
+            "host",
+        );
+
+        let queued_paths: Vec<PathBuf> = session
+            .shared_queue
+            .iter()
+            .map(|item| item.path.clone())
+            .collect();
+        assert_eq!(
+            queued_paths,
+            vec![
+                PathBuf::from("next.flac"),
+                PathBuf::from("a.flac"),
+                PathBuf::from("b.flac")
+            ]
+        );
+    }
+
+    #[test]
+    fn queue_remove_at_requires_matching_path_when_expected() {
+        let mut session = OnlineSession::host("host");
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("a.flac"),
+            title: String::from("a"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("host")),
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::QueueRemoveAt {
+                index: 0,
+                expected_path: Some(PathBuf::from("b.flac")),
+            },
+            "host",
+        );
+        assert_eq!(session.shared_queue.len(), 1);
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::QueueRemoveAt {
+                index: 0,
+                expected_path: Some(PathBuf::from("a.flac")),
+            },
+            "host",
+        );
+        assert!(session.shared_queue.is_empty());
+    }
+
+    #[test]
+    fn queue_move_reorders_item_when_expected_matches() {
+        let mut session = OnlineSession::host("host");
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("a.flac"),
+            title: String::from("a"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("host")),
+        });
+        session.shared_queue.push(crate::online::SharedQueueItem {
+            path: PathBuf::from("b.flac"),
+            title: String::from("b"),
+            delivery: crate::online::QueueDelivery::HostStreamOnly,
+            owner_nickname: Some(String::from("host")),
+        });
+
+        apply_action_to_session(
+            &mut session,
+            LocalAction::QueueMove {
+                from_index: 1,
+                to_index: 0,
+                expected_path: Some(PathBuf::from("b.flac")),
+            },
+            "host",
+        );
+
+        assert_eq!(session.shared_queue[0].path, PathBuf::from("b.flac"));
+        assert_eq!(session.shared_queue[1].path, PathBuf::from("a.flac"));
     }
 
     #[test]
