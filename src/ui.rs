@@ -2165,7 +2165,7 @@ fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemeP
     let items: Vec<ListItem> = panel
         .options
         .iter()
-        .map(|item| ListItem::new(Span::styled(item, Style::default().fg(colors.text))))
+        .map(|item| ListItem::new(action_panel_option_line(item, colors)))
         .collect();
 
     let mut state = ListState::default()
@@ -2213,6 +2213,100 @@ fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemeP
         )),
         hint_area,
     );
+}
+
+fn action_panel_option_line(item: &str, colors: &ThemePalette) -> Line<'static> {
+    let Some((prefix, body, suffix)) = parse_spectro_line(item) else {
+        return Line::from(Span::styled(
+            item.to_string(),
+            Style::default().fg(colors.text),
+        ));
+    };
+
+    let mut spans = Vec::with_capacity(
+        prefix
+            .len()
+            .saturating_add(body.len())
+            .saturating_add(suffix.len()),
+    );
+    spans.push(Span::styled(
+        prefix.to_string(),
+        Style::default().fg(colors.muted),
+    ));
+    for ch in body.chars() {
+        spans.push(Span::styled(
+            ch.to_string(),
+            spectro_style_for_char(ch, colors),
+        ));
+    }
+    spans.push(Span::styled(
+        suffix.to_string(),
+        Style::default().fg(colors.muted),
+    ));
+    Line::from(spans)
+}
+
+fn parse_spectro_line(item: &str) -> Option<(&str, &str, &str)> {
+    let left = item.find('|')?;
+    let right = item.rfind('|')?;
+    if right <= left {
+        return None;
+    }
+    let body = item.get(left + 1..right)?;
+    if body.is_empty() {
+        return None;
+    }
+    if !body.chars().all(|ch| {
+        matches!(
+            ch,
+            ' ' | '.' | ':' | '-' | '=' | '+' | '*' | '#' | '%' | '@'
+        )
+    }) {
+        return None;
+    }
+
+    let prefix = item.get(..=left)?;
+    let suffix = item.get(right..)?;
+    Some((prefix, body, suffix))
+}
+
+fn spectro_style_for_char(ch: char, colors: &ThemePalette) -> Style {
+    let level = match ch {
+        ' ' => 0,
+        '.' => 1,
+        ':' => 2,
+        '-' => 3,
+        '=' => 4,
+        '+' => 5,
+        '*' => 6,
+        '#' => 7,
+        '%' => 8,
+        '@' => 9,
+        _ => 0,
+    };
+
+    let palette = [
+        Color::Rgb(14, 24, 52),
+        Color::Rgb(18, 39, 92),
+        Color::Rgb(24, 64, 141),
+        Color::Rgb(31, 94, 181),
+        Color::Rgb(24, 134, 170),
+        Color::Rgb(42, 164, 110),
+        Color::Rgb(117, 180, 58),
+        Color::Rgb(205, 181, 49),
+        Color::Rgb(219, 128, 42),
+        Color::Rgb(206, 61, 34),
+    ];
+    let fg = palette[level.min(palette.len() - 1)];
+
+    let mut style = Style::default().fg(fg);
+    if level >= 7 {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if level == 0 {
+        style = style.fg(colors.muted);
+    }
+    style
 }
 
 fn list_overflows(total_items: usize, viewport_height: usize) -> bool {

@@ -623,12 +623,13 @@ enum RootActionId {
     SaveState,
     ClearListenHistory,
     MetadataEditor,
+    AudioQualityInspector,
     MinimizeToTray,
     ImportTxtToLyrics,
     ClosePanel,
 }
 
-const ROOT_ACTIONS: [RootActionId; 25] = [
+const ROOT_ACTIONS: [RootActionId; 26] = [
     RootActionId::AddDirectory,
     RootActionId::AddSelectedToPlaylist,
     RootActionId::AddNowPlayingToPlaylist,
@@ -651,6 +652,7 @@ const ROOT_ACTIONS: [RootActionId; 25] = [
     RootActionId::SaveState,
     RootActionId::ClearListenHistory,
     RootActionId::MetadataEditor,
+    RootActionId::AudioQualityInspector,
     RootActionId::MinimizeToTray,
     RootActionId::ImportTxtToLyrics,
     RootActionId::ClosePanel,
@@ -709,6 +711,32 @@ impl MetadataEditorState {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioQualityPanelState {
+    target_path: PathBuf,
+    target_title: String,
+    summary_lines: Vec<String>,
+    spectrograph_rows: Vec<String>,
+}
+
+impl AudioQualityPanelState {
+    fn options(&self) -> Vec<String> {
+        let mut options =
+            Vec::with_capacity(self.summary_lines.len() + self.spectrograph_rows.len() + 4);
+        options.extend(self.summary_lines.iter().cloned());
+        options.push(String::from(""));
+        options.push(String::from("Spectrograph"));
+        options.extend(self.spectrograph_rows.iter().cloned());
+        options.push(String::from(""));
+        options.push(String::from("Back"));
+        options
+    }
+
+    fn back_index(&self) -> usize {
+        self.options().len().saturating_sub(1)
+    }
+}
+
 fn root_action_label(action: RootActionId) -> &'static str {
     match action {
         RootActionId::AddDirectory => "Add directory",
@@ -733,6 +761,7 @@ fn root_action_label(action: RootActionId) -> &'static str {
         RootActionId::SaveState => "Save state",
         RootActionId::ClearListenHistory => "Clear listen history (backup)",
         RootActionId::MetadataEditor => "Edit selected track metadata",
+        RootActionId::AudioQualityInspector => "View audio quality + spectrograph",
         RootActionId::MinimizeToTray => "Minimize to tray",
         RootActionId::ImportTxtToLyrics => "Import TXT to lyrics",
         RootActionId::ClosePanel => "Close panel",
@@ -864,6 +893,10 @@ enum ActionPanelState {
     MetadataEditor {
         selected: usize,
         state: MetadataEditorState,
+    },
+    AudioQualityInspector {
+        selected: usize,
+        state: AudioQualityPanelState,
     },
     AddDirectory {
         selected: usize,
@@ -1073,6 +1106,13 @@ impl ActionPanelState {
             Self::MetadataEditor { selected, state } => Some(crate::ui::ActionPanelView {
                 title: String::from("Edit Metadata"),
                 hint: String::from("Type fields  Enter save/select  Backspace back"),
+                search_query: None,
+                options: state.options(),
+                selected: *selected,
+            }),
+            Self::AudioQualityInspector { selected, state } => Some(crate::ui::ActionPanelView {
+                title: format!("Audio Quality / {}", state.target_title),
+                hint: String::from("Static analysis for selected song  Enter/Backspace return"),
                 search_query: None,
                 options: state.options(),
                 selected: *selected,
@@ -4071,6 +4111,68 @@ fn metadata_editor_state_for_selection(core: &TuneCore) -> Option<MetadataEditor
     }
 }
 
+fn audio_quality_state_for_selection(
+    core: &TuneCore,
+    audio: &dyn AudioEngine,
+) -> Option<AudioQualityPanelState> {
+    let selected_path = core
+        .selected_browser_track_path()
+        .or_else(|| audio.current_track().map(Path::to_path_buf))
+        .or_else(|| core.current_path().map(Path::to_path_buf))?;
+
+    let snapshot = library::audio_quality_snapshot(&selected_path);
+    let title = core.title_for_path(&selected_path).unwrap_or_else(|| {
+        selected_path
+            .file_stem()
+            .map(|value| crate::config::sanitize_display_text(&value.to_string_lossy()))
+            .unwrap_or_else(|| String::from("unknown"))
+    });
+
+    let bitrate_label = snapshot
+        .bitrate_kbps
+        .map(|value| format!("{value} kbps"))
+        .unwrap_or_else(|| String::from("(missing)"));
+    let sample_rate_label = snapshot
+        .sample_rate_hz
+        .map(|value| format!("{value} Hz"))
+        .unwrap_or_else(|| String::from("unknown"));
+    let channels_label = snapshot
+        .channels
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| String::from("unknown"));
+    let duration_label = snapshot
+        .duration_seconds
+        .map(|total| {
+            let minutes = total / 60;
+            let seconds = total % 60;
+            format!("{minutes:02}:{seconds:02}")
+        })
+        .unwrap_or_else(|| String::from("unknown"));
+
+    let summary_lines = vec![
+        format!("Track: {}", crate::config::sanitize_display_text(&title)),
+        format!(
+            "Path: {}",
+            crate::config::sanitize_display_text(&selected_path.display().to_string())
+        ),
+        format!("Format: {}", snapshot.format_label),
+        format!("Duration: {duration_label}"),
+        format!("Bitrate (reported avg): {bitrate_label}"),
+        format!("Sample rate: {sample_rate_label}"),
+        format!("Channels: {channels_label}"),
+        format!("Quality rating: {}", snapshot.rating.label()),
+        String::from("Thresholds: <128 Red, <256 Yellow, 256-319 Green, >=320/lossless Gold"),
+        String::from("Unavailable if bitrate metadata is missing"),
+    ];
+
+    Some(AudioQualityPanelState {
+        target_path: selected_path,
+        target_title: title,
+        summary_lines,
+        spectrograph_rows: snapshot.spectrograph_rows,
+    })
+}
+
 fn now_playing_cover_source_path(core: &TuneCore, audio: &dyn AudioEngine) -> Option<PathBuf> {
     audio
         .current_track()
@@ -4343,6 +4445,7 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
         | ActionPanelState::OnlineNickname { selected, .. }
         | ActionPanelState::LyricsImportTxt { selected, .. }
         | ActionPanelState::MetadataEditor { selected, .. }
+        | ActionPanelState::AudioQualityInspector { selected, .. }
         | ActionPanelState::AddDirectory { selected, .. }
         | ActionPanelState::RemoveDirectory { selected } => advance(selected),
         ActionPanelState::Closed => {}
@@ -4510,6 +4613,7 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::OnlineNickname { .. } => 1,
         ActionPanelState::LyricsImportTxt { .. } => 3,
         ActionPanelState::MetadataEditor { state, .. } => state.options().len(),
+        ActionPanelState::AudioQualityInspector { state, .. } => state.options().len(),
         ActionPanelState::AddDirectory { .. } => 2,
         ActionPanelState::RemoveDirectory { .. } => sorted_folder_paths(core).len().max(1),
     };
@@ -4623,6 +4727,13 @@ fn handle_action_panel_input_with_recent(
                 ActionPanelState::MetadataEditor { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
                         RootActionId::MetadataEditor,
+                        recent_root_actions,
+                    ),
+                    query: String::new(),
+                },
+                ActionPanelState::AudioQualityInspector { .. } => ActionPanelState::Root {
+                    selected: root_selected_for_action(
+                        RootActionId::AudioQualityInspector,
                         recent_root_actions,
                     ),
                     query: String::new(),
@@ -4845,6 +4956,21 @@ fn handle_action_panel_input_with_recent(
                             return;
                         };
                         *panel = ActionPanelState::MetadataEditor { selected: 0, state };
+                        core.dirty = true;
+                    }
+                    RootActionId::AudioQualityInspector => {
+                        let Some(state) = audio_quality_state_for_selection(core, &*audio) else {
+                            core.status = String::from(
+                                "Select a track or start playback to inspect audio quality",
+                            );
+                            core.dirty = true;
+                            panel.close();
+                            return;
+                        };
+                        *panel = ActionPanelState::AudioQualityInspector {
+                            selected: state.back_index(),
+                            state,
+                        };
                         core.dirty = true;
                     }
                     RootActionId::MinimizeToTray => {
@@ -5287,6 +5413,18 @@ fn handle_action_panel_input_with_recent(
                 }
                 _ => {}
             },
+            ActionPanelState::AudioQualityInspector { selected, state } => {
+                if selected == state.back_index() {
+                    *panel = ActionPanelState::Root {
+                        selected: root_selected_for_action(
+                            RootActionId::AudioQualityInspector,
+                            recent_root_actions,
+                        ),
+                        query: String::new(),
+                    };
+                    core.dirty = true;
+                }
+            }
             ActionPanelState::AddDirectory { selected, input } => {
                 if selected == 1 {
                     let trimmed = input.trim();
@@ -6309,6 +6447,53 @@ mod tests {
             }
             _ => panic!("expected metadata editor"),
         }
+    }
+
+    #[test]
+    fn audio_quality_action_requires_track_or_now_playing() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.browser_entries = vec![crate::core::BrowserEntry {
+            kind: crate::core::BrowserEntryKind::Back,
+            path: PathBuf::new(),
+            label: String::from("[..] Back"),
+        }];
+        core.selected_browser = 0;
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Root {
+            selected: root_selected(RootActionId::AudioQualityInspector),
+            query: String::new(),
+        };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert_eq!(
+            core.status,
+            "Select a track or start playback to inspect audio quality"
+        );
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn audio_quality_action_opens_for_selected_track() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.browser_entries = vec![crate::core::BrowserEntry {
+            kind: crate::core::BrowserEntryKind::Track,
+            path: PathBuf::from("song.mp3"),
+            label: String::from("song"),
+        }];
+        core.selected_browser = 0;
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::Root {
+            selected: root_selected(RootActionId::AudioQualityInspector),
+            query: String::new(),
+        };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        assert!(matches!(
+            panel,
+            ActionPanelState::AudioQualityInspector { .. }
+        ));
     }
 
     #[test]

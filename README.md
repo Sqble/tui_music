@@ -28,6 +28,7 @@ Full documentation available at **https://tunetui.online**
 - Split-pane lyrics editor (`Ctrl+e` toggle) with per-line timestamp stamping
 - `.txt` to `.lrc` import with fixed-interval timestamp seeding
 - Metadata editor for title/artist/album with cover-art copy flows
+- Audio quality inspector action with static spectrograph and bitrate-based rating (Unavailable/Red/Yellow/Green/Gold*)
 - Audio driver recovery and output speaker selection
 - Selected output speaker persists across launches with fallback to default
 - Volume level persists across launches
@@ -67,6 +68,7 @@ Download `tune.exe` from releases and run. No installation required.
 | `Ctrl+c` | Quit |
 
 Queue tools are available from the actions panel in Library (`/`), including root entries for `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online).
+Use the actions panel entry "View audio quality + spectrograph" to run one-time analysis for the selected track (or now playing).
 
 ### Online / Listen Together
 
