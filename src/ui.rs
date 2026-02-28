@@ -629,7 +629,7 @@ fn draw_room_directory_inline(
         } else {
             Style::default().fg(colors.text)
         };
-        left_lines.push(Line::from(Span::styled(room_line.as_str(), style)));
+        left_lines.push(room_directory_line(room_line, style, &colors));
     }
 
     if dir.rooms.is_empty() {
@@ -702,6 +702,28 @@ fn draw_room_directory_inline(
         ))
         .wrap(Wrap { trim: true });
     frame.render_widget(right, horizontal[1]);
+}
+
+fn room_directory_line(room_line: &str, base_style: Style, colors: &ThemePalette) -> Line<'static> {
+    if let Some(rest) = room_line.strip_prefix("[lock]") {
+        return Line::from(vec![
+            Span::styled("[lock]", base_style.fg(colors.alert)),
+            Span::styled(rest.to_string(), base_style),
+        ]);
+    }
+    if let Some(rest) = room_line.strip_prefix("[open]") {
+        return Line::from(vec![
+            Span::styled("[open]", base_style.fg(colors.text)),
+            Span::styled(rest.to_string(), base_style),
+        ]);
+    }
+    if let Some(rest) = room_line.strip_prefix("[+]") {
+        return Line::from(vec![
+            Span::styled("[+]", base_style.fg(colors.accent)),
+            Span::styled(rest.to_string(), base_style),
+        ]);
+    }
+    Line::from(Span::styled(room_line.to_string(), base_style))
 }
 
 fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &ThemePalette) {
@@ -2758,6 +2780,14 @@ mod tests {
         });
 
         assert_eq!(shared_queue_waiting_message(&session), None);
+    }
+
+    #[test]
+    fn room_directory_lock_prefix_uses_alert_color() {
+        let colors = palette(Theme::Dark);
+        let line = room_directory_line("[lock] demo 1/8", Style::default(), &colors);
+        assert_eq!(line.spans[0].content.as_ref(), "[lock]");
+        assert_eq!(line.spans[0].style.fg, Some(colors.alert));
     }
 
     #[test]

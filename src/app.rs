@@ -5922,6 +5922,13 @@ mod tests {
         session
     }
 
+    fn root_selected(action: RootActionId) -> usize {
+        root_visible_actions("", &[])
+            .iter()
+            .position(|entry| entry.action == action)
+            .expect("root action should exist")
+    }
+
     impl AudioEngine for TestAudioEngine {
         fn play(&mut self, path: &Path) -> Result<()> {
             if self.fail_play {
@@ -6068,7 +6075,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 3,
+            selected: root_selected(RootActionId::SetPlaybackMode),
             query: String::new(),
         };
 
@@ -6261,7 +6268,7 @@ mod tests {
         core.selected_browser = 0;
         let mut audio = NullAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 15,
+            selected: root_selected(RootActionId::MetadataEditor),
             query: String::new(),
         };
 
@@ -6285,7 +6292,7 @@ mod tests {
         core.selected_browser = 0;
         let mut audio = NullAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 15,
+            selected: root_selected(RootActionId::MetadataEditor),
             query: String::new(),
         };
 
@@ -6434,7 +6441,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(state);
         let mut audio = NullAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 9,
+            selected: root_selected(RootActionId::RemoveDirectory),
             query: String::new(),
         };
 
@@ -6451,7 +6458,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 7,
+            selected: root_selected(RootActionId::CreatePlaylist),
             query: String::new(),
         };
 
@@ -6482,7 +6489,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(state);
         let mut audio = NullAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 8,
+            selected: root_selected(RootActionId::RemovePlaylist),
             query: String::new(),
         };
 
@@ -6500,7 +6507,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 11,
+            selected: root_selected(RootActionId::AudioDriverSettings),
             query: String::new(),
         };
 
@@ -6522,7 +6529,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 11,
+            selected: root_selected(RootActionId::AudioDriverSettings),
             query: String::new(),
         };
 
@@ -6551,7 +6558,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 4,
+            selected: root_selected(RootActionId::PlaybackSettings),
             query: String::new(),
         };
 
@@ -6794,7 +6801,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 12,
+            selected: root_selected(RootActionId::Theme),
             query: String::new(),
         };
 

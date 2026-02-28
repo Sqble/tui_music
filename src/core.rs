@@ -1294,10 +1294,10 @@ impl TuneCore {
         let moving_current = current == Some(from_index);
         let item = self.queue.remove(from_index);
 
-        if let Some(current_idx) = current {
-            if from_index < current_idx {
-                current = Some(current_idx - 1);
-            }
+        if let Some(current_idx) = current
+            && from_index < current_idx
+        {
+            current = Some(current_idx - 1);
         }
 
         if from_index < target {
