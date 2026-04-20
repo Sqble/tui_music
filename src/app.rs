@@ -125,10 +125,27 @@ struct OnlineRuntime {
 }
 
 impl OnlineRuntime {
+    fn clear_streamed_track_cache(&mut self) {
+        for cached in self.streamed_track_cache.drain().map(|(_, cached)| cached) {
+            let _ = fs::remove_file(cached);
+        }
+    }
+
+    fn cache_streamed_track(&mut self, requested_path: PathBuf, local_temp_path: PathBuf) {
+        if let Some(previous) = self
+            .streamed_track_cache
+            .insert(requested_path, local_temp_path.clone())
+            && previous != local_temp_path
+        {
+            let _ = fs::remove_file(previous);
+        }
+    }
+
     fn shutdown(&mut self) {
         if let Some(network) = self.network.take() {
             network.shutdown();
         }
+        self.clear_streamed_track_cache();
         self.pending_stream_path = None;
         self.remote_logical_track = None;
         self.remote_track_title = None;
@@ -1761,7 +1778,7 @@ fn maybe_auto_advance_online_track(
         .online
         .session
         .as_ref()
-        .and_then(|session| session.shared_queue.first().cloned());
+        .and_then(|session| session.shared_queue.front().cloned());
     if let Some(shared_item) = next_shared {
         if online_runtime.pending_stream_path.as_ref() == Some(&shared_item.path) {
             return;
@@ -1831,7 +1848,7 @@ fn maybe_start_online_shared_queue_if_idle(
         .online
         .session
         .as_ref()
-        .and_then(|session| session.shared_queue.first().cloned());
+        .and_then(|session| session.shared_queue.front().cloned());
     let Some(shared_item) = next_shared else {
         return;
     };
@@ -1863,7 +1880,7 @@ fn play_shared_queue_now(
         .online
         .session
         .as_ref()
-        .and_then(|session| session.shared_queue.first().cloned());
+        .and_then(|session| session.shared_queue.front().cloned());
     let Some(shared_item) = next_shared else {
         core.status = String::from("Shared queue is empty");
         core.dirty = true;
@@ -1883,7 +1900,7 @@ fn play_shared_queue_now(
                 shared_item
                     .path
                     .file_name()
-                    .and_then(|name| name.to_str())
+                    .and_then(|name: &std::ffi::OsStr| name.to_str())
                     .unwrap_or("track")
             );
             core.dirty = true;
@@ -1928,7 +1945,7 @@ fn play_selected_shared_queue_item(
                 .get(index)
                 .is_some_and(|item| item.path == shared_item.path)
         {
-            session.shared_queue.remove(index);
+            let _ = session.shared_queue.remove(index);
         }
         if core.viewing_shared_queue() {
             core.refresh_browser_view();
@@ -1981,13 +1998,13 @@ fn consume_shared_queue_item(
         return;
     }
     if let Some(session) = core.online.session.as_mut() {
-        let can_consume = match (session.shared_queue.first(), expected_path.as_ref()) {
+        let can_consume = match (session.shared_queue.front(), expected_path.as_ref()) {
             (Some(_), None) => true,
             (Some(next), Some(expected)) => next.path == *expected,
             _ => false,
         };
         if can_consume {
-            session.shared_queue.remove(0);
+            session.shared_queue.pop_front();
         }
     }
 }
@@ -3338,8 +3355,7 @@ fn drain_online_network_events(
                 format,
             } => {
                 online_runtime
-                    .streamed_track_cache
-                    .insert(requested_path.clone(), local_temp_path.clone());
+                    .cache_streamed_track(requested_path.clone(), local_temp_path.clone());
                 if online_runtime.pending_stream_path.as_ref() == Some(&requested_path) {
                     match audio.play(&local_temp_path) {
                         Ok(()) => {
@@ -3371,7 +3387,8 @@ fn drain_online_network_events(
                     online_runtime.pending_stream_path = None;
                 }
             }
-            NetworkEvent::SessionSync(mut session) => {
+            NetworkEvent::SessionSync(session) => {
+                let mut session = *session;
                 let previous_quality = core.online.session.as_ref().map(|entry| entry.quality);
                 let was_listener_locked = core
                     .online
@@ -3454,10 +3471,7 @@ fn handle_stream_quality_change(
             .is_some_and(|current| current != logical_path.as_path())
     });
 
-    for cached in online_runtime.streamed_track_cache.values() {
-        let _ = fs::remove_file(cached);
-    }
-    online_runtime.streamed_track_cache.clear();
+    online_runtime.clear_streamed_track_cache();
 
     if active_streamed && let Some(path) = remote_path {
         audio.stop();
@@ -6046,6 +6060,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shutdown_clears_stream_cache_files() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let cached_a = temp.path().join("cache-a.flac");
+        let cached_b = temp.path().join("cache-b.flac");
+        std::fs::write(&cached_a, b"a").expect("write cache a");
+        std::fs::write(&cached_b, b"b").expect("write cache b");
+
+        let mut runtime = test_online_runtime();
+        runtime
+            .streamed_track_cache
+            .insert(PathBuf::from("logical-a.flac"), cached_a.clone());
+        runtime
+            .streamed_track_cache
+            .insert(PathBuf::from("logical-b.flac"), cached_b.clone());
+
+        runtime.shutdown();
+
+        assert!(runtime.streamed_track_cache.is_empty());
+        assert!(!cached_a.exists());
+        assert!(!cached_b.exists());
+    }
+
+    #[test]
+    fn cache_streamed_track_replaces_old_temp_file() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let first = temp.path().join("first.flac");
+        let second = temp.path().join("second.flac");
+        std::fs::write(&first, b"old").expect("write old cache");
+        std::fs::write(&second, b"new").expect("write new cache");
+
+        let mut runtime = test_online_runtime();
+        let logical = PathBuf::from("logical.flac");
+
+        runtime.cache_streamed_track(logical.clone(), first.clone());
+        runtime.cache_streamed_track(logical.clone(), second.clone());
+
+        assert!(!first.exists());
+        assert!(second.exists());
+        assert_eq!(runtime.streamed_track_cache.get(&logical), Some(&second));
+    }
+
     fn host_only_listener_session() -> crate::online::OnlineSession {
         let mut session = crate::online::OnlineSession::join("ROOM22", "listener");
         session.mode = crate::online::OnlineRoomMode::HostOnly;
@@ -6314,12 +6370,14 @@ mod tests {
             manual_extra_delay_ms: 0,
             auto_ping_delay: true,
         });
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("shared.mp3"),
-            title: String::from("shared"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("bob")),
-        });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("shared.mp3"),
+                title: String::from("shared"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("bob")),
+            });
         core.online.session = Some(session);
 
         assert_eq!(

@@ -1196,7 +1196,7 @@ fn participant_line(participant: &crate::online::Participant, session: &OnlineSe
 fn shared_queue_waiting_message(session: &OnlineSession) -> Option<String> {
     let next_shared_path = session
         .shared_queue
-        .first()
+        .front()
         .map(|item| item.path.as_path())?;
     let last_transport = session.last_transport.as_ref()?;
     let current_path = match &last_transport.command {

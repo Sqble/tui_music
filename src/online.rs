@@ -1,9 +1,10 @@
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 
 const ROOM_CODE_LEN: usize = 6;
-const MAX_SHARED_QUEUE_ITEMS: usize = 512;
+pub(crate) const MAX_SHARED_QUEUE_ITEMS: usize = 512;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnlineRoomMode {
@@ -138,7 +139,7 @@ pub struct OnlineSession {
     pub mode: OnlineRoomMode,
     pub quality: StreamQuality,
     pub participants: Vec<Participant>,
-    pub shared_queue: Vec<SharedQueueItem>,
+    pub shared_queue: VecDeque<SharedQueueItem>,
     pub last_sync_drift_ms: i32,
     pub last_transport: Option<TransportEnvelope>,
 }
@@ -157,7 +158,7 @@ impl OnlineSession {
                 manual_extra_delay_ms: 0,
                 auto_ping_delay: true,
             }],
-            shared_queue: Vec::new(),
+            shared_queue: VecDeque::new(),
             last_sync_drift_ms: 0,
             last_transport: None,
         }
@@ -180,7 +181,7 @@ impl OnlineSession {
                 manual_extra_delay_ms: 0,
                 auto_ping_delay: true,
             }],
-            shared_queue: Vec::new(),
+            shared_queue: VecDeque::new(),
             last_sync_drift_ms: 0,
             last_transport: None,
         }
@@ -245,7 +246,7 @@ impl OnlineSession {
         } else {
             QueueDelivery::HostStreamOnly
         };
-        self.shared_queue.push(SharedQueueItem {
+        self.shared_queue.push_back(SharedQueueItem {
             path: path.to_path_buf(),
             title,
             delivery,
@@ -256,7 +257,9 @@ impl OnlineSession {
                 .shared_queue
                 .len()
                 .saturating_sub(MAX_SHARED_QUEUE_ITEMS);
-            self.shared_queue.drain(0..remove);
+            for _ in 0..remove {
+                self.shared_queue.pop_front();
+            }
         }
     }
 }

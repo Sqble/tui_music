@@ -851,7 +851,7 @@ impl TuneCore {
 
         for (path, title) in queue_items {
             session.push_shared_track(&path, title, owner_nickname.clone());
-            if let Some(item) = session.shared_queue.last().cloned() {
+            if let Some(item) = session.shared_queue.back().cloned() {
                 added.push(item);
             }
         }
@@ -1382,8 +1382,8 @@ impl TuneCore {
                 owner_nickname: owner_nickname.clone(),
             };
             session.shared_queue.insert(0, item.clone());
-            if session.shared_queue.len() > 512 {
-                session.shared_queue.pop();
+            if session.shared_queue.len() > crate::online::MAX_SHARED_QUEUE_ITEMS {
+                session.shared_queue.pop_back();
             }
             added.push(item);
         }
@@ -1418,7 +1418,10 @@ impl TuneCore {
             self.set_status("Shared queue item not found");
             return None;
         }
-        let removed = session.shared_queue.remove(selected_pos);
+        let removed = session
+            .shared_queue
+            .remove(selected_pos)
+            .expect("selected shared queue item should exist");
         self.refresh_browser_entries();
         self.set_status("Removed shared queue item");
         Some((selected_pos, removed.path))
@@ -1454,7 +1457,10 @@ impl TuneCore {
             self.set_status("Shared queue item already next");
             return None;
         }
-        let item = session.shared_queue.remove(from_index);
+        let item = session
+            .shared_queue
+            .remove(from_index)
+            .expect("shared queue item should exist");
         let expected_path = item.path.clone();
         session.shared_queue.insert(to_index, item);
         self.refresh_browser_entries();
@@ -2847,12 +2853,14 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.online_host_room("host");
         if let Some(session) = core.online.session.as_mut() {
-            session.shared_queue.push(crate::online::SharedQueueItem {
-                path: PathBuf::from("a.mp3"),
-                title: String::from("Song A"),
-                delivery: crate::online::QueueDelivery::HostStreamOnly,
-                owner_nickname: Some(String::from("alice")),
-            });
+            session
+                .shared_queue
+                .push_back(crate::online::SharedQueueItem {
+                    path: PathBuf::from("a.mp3"),
+                    title: String::from("Song A"),
+                    delivery: crate::online::QueueDelivery::HostStreamOnly,
+                    owner_nickname: Some(String::from("alice")),
+                });
         }
 
         core.open_shared_queue_view();

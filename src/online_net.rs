@@ -1,4 +1,6 @@
-use crate::online::{OnlineSession, SharedQueueItem, StreamQuality, TransportEnvelope};
+use crate::online::{
+    MAX_SHARED_QUEUE_ITEMS, OnlineSession, SharedQueueItem, StreamQuality, TransportEnvelope,
+};
 use anyhow::Context;
 use base64::Engine;
 use rand::Rng;
@@ -106,7 +108,7 @@ pub enum NetworkRole {
 
 #[derive(Debug)]
 pub enum NetworkEvent {
-    SessionSync(OnlineSession),
+    SessionSync(Box<OnlineSession>),
     StreamTrackReady {
         requested_path: PathBuf,
         local_temp_path: PathBuf,
@@ -278,11 +280,20 @@ impl OnlineNetwork {
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
-        if let Some(session) = initial_session {
-            let _ = event_tx.send(NetworkEvent::SessionSync(session));
+        if let Some(session) = initial_session.as_ref().cloned() {
+            let _ = event_tx.send(NetworkEvent::SessionSync(Box::new(session)));
         }
         let local_nickname = nickname.to_string();
-        thread::spawn(move || client_loop(stream, reader, local_nickname, cmd_rx, event_tx));
+        thread::spawn(move || {
+            client_loop(
+                stream,
+                reader,
+                local_nickname,
+                initial_session,
+                cmd_rx,
+                event_tx,
+            )
+        });
 
         Ok(Self {
             role: NetworkRole::Client,
@@ -1126,6 +1137,7 @@ fn client_loop(
     stream: TcpStream,
     handshake_reader: BufReader<TcpStream>,
     local_nickname: String,
+    initial_session: Option<OnlineSession>,
     cmd_rx: Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
 ) {
@@ -1144,6 +1156,17 @@ fn client_loop(
         let mut reader = handshake_reader;
         let mut line = String::new();
         let mut inbound_streams: HashMap<u64, InboundStreamDownload> = HashMap::new();
+        let mut current_session = initial_session;
+        if let Some(session) = current_session.as_ref()
+            && let Ok(mut guard) = read_upload_guard.lock()
+        {
+            refresh_upload_guard_from_session(&mut guard, session);
+        }
+        if let Some(session) = current_session.as_ref()
+            && let Ok(mut quality) = read_stream_quality.lock()
+        {
+            *quality = session.quality;
+        }
         loop {
             line.clear();
             match reader.read_line(&mut line) {
@@ -1157,16 +1180,39 @@ fn client_loop(
                     let parsed = serde_json::from_str::<WireServerMessage>(line.trim_end());
                     match parsed {
                         Ok(WireServerMessage::Session(session)) => {
+                            current_session = Some(session.clone());
                             if let Ok(mut guard) = read_upload_guard.lock() {
-                                let local_nickname = guard.local_nickname.clone();
-                                let allowed_paths =
-                                    allowed_upload_paths_for_client(&session, &local_nickname);
-                                guard.allowed_paths = allowed_paths;
+                                refresh_upload_guard_from_session(&mut guard, &session);
                             }
                             if let Ok(mut quality) = read_stream_quality.lock() {
                                 *quality = session.quality;
                             }
-                            let _ = read_event_tx.send(NetworkEvent::SessionSync(session));
+                            let _ =
+                                read_event_tx.send(NetworkEvent::SessionSync(Box::new(session)));
+                        }
+                        Ok(WireServerMessage::ActionSync {
+                            action,
+                            origin_nickname,
+                        }) => {
+                            let Some(session) = current_session.as_mut() else {
+                                continue;
+                            };
+                            let action = wire_to_action(action);
+                            if let Ok(mut guard) = read_upload_guard.lock() {
+                                apply_action_to_client_session(
+                                    session,
+                                    action,
+                                    &origin_nickname,
+                                    &mut guard,
+                                );
+                            } else {
+                                apply_action_to_session(session, action, &origin_nickname);
+                            }
+                            if let Ok(mut quality) = read_stream_quality.lock() {
+                                *quality = session.quality;
+                            }
+                            let _ = read_event_tx
+                                .send(NetworkEvent::SessionSync(Box::new(session.clone())));
                         }
                         Ok(WireServerMessage::Ping { nonce }) => {
                             let _ = send_json_line_shared(
@@ -1414,7 +1460,7 @@ fn host_loop(
     let mut last_ping_sweep_at = Instant::now();
     let mut next_peer_id: u32 = 1;
 
-    let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
+    let _ = event_tx.send(NetworkEvent::SessionSync(Box::new(session.clone())));
     loop {
         loop {
             match listener.accept() {
@@ -1475,9 +1521,10 @@ fn host_loop(
                         .local_participant()
                         .map(|participant| participant.nickname.clone())
                         .unwrap_or_else(|| String::from("host"));
+                    let action_to_broadcast = action.clone();
                     apply_action_to_session(session, action, &origin);
-                    broadcast_state(&mut peers, session);
-                    let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
+                    broadcast_action(&mut peers, &action_to_broadcast, &origin);
+                    let _ = event_tx.send(NetworkEvent::SessionSync(Box::new(session.clone())));
                 }
                 Ok(NetworkCommand::RequestTrackStream {
                     path,
@@ -1695,7 +1742,7 @@ fn handle_inbound(
                 },
             );
             broadcast_state(peers, session);
-            let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
+            let _ = event_tx.send(NetworkEvent::SessionSync(Box::new(session.clone())));
         }
         Inbound::Action { peer_id, action } => {
             let origin = peers
@@ -1707,6 +1754,7 @@ fn handle_inbound(
                 LocalAction::SetNickname { nickname } => Some(nickname.trim().to_string()),
                 _ => None,
             };
+            let action_to_broadcast = local_action.clone();
             apply_action_to_session(session, local_action, &origin);
             if let Some(updated) = requested_nickname.filter(|name| !name.is_empty())
                 && session
@@ -1717,8 +1765,8 @@ fn handle_inbound(
             {
                 peer.nickname = updated;
             }
-            broadcast_state(peers, session);
-            let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
+            broadcast_action(peers, &action_to_broadcast, &origin);
+            let _ = event_tx.send(NetworkEvent::SessionSync(Box::new(session.clone())));
         }
         Inbound::Pong { peer_id, nonce } => {
             let Some(pending) = pending_pings.get(&peer_id) else {
@@ -2166,7 +2214,7 @@ fn disconnect_peer(
 
     if changed {
         broadcast_state(peers, session);
-        let _ = event_tx.send(NetworkEvent::SessionSync(session.clone()));
+        let _ = event_tx.send(NetworkEvent::SessionSync(Box::new(session.clone())));
     }
 
     let suffix = nickname.unwrap_or_else(|| format!("peer-{peer_id}"));
@@ -2281,17 +2329,19 @@ fn apply_action_to_session(
             }
         }
         LocalAction::QueueAdd(item) => {
-            session.shared_queue.push(item);
-            if session.shared_queue.len() > 512 {
-                let remove = session.shared_queue.len() - 512;
-                session.shared_queue.drain(0..remove);
+            session.shared_queue.push_back(item);
+            if session.shared_queue.len() > MAX_SHARED_QUEUE_ITEMS {
+                let remove = session.shared_queue.len() - MAX_SHARED_QUEUE_ITEMS;
+                for _ in 0..remove {
+                    session.shared_queue.pop_front();
+                }
             }
         }
         LocalAction::QueueInsertAt { index, item } => {
             let insert_at = index.min(session.shared_queue.len());
             session.shared_queue.insert(insert_at, item);
-            if session.shared_queue.len() > 512 {
-                session.shared_queue.pop();
+            if session.shared_queue.len() > MAX_SHARED_QUEUE_ITEMS {
+                session.shared_queue.pop_back();
             }
         }
         LocalAction::QueueRemoveAt {
@@ -2308,7 +2358,7 @@ fn apply_action_to_session(
                 })
                 .unwrap_or(false);
             if can_remove {
-                session.shared_queue.remove(index);
+                let _ = session.shared_queue.remove(index);
             }
         }
         LocalAction::QueueMove {
@@ -2325,18 +2375,21 @@ fn apply_action_to_session(
             if !can_move {
                 return;
             }
-            let item = session.shared_queue.remove(from_index);
+            let item = session
+                .shared_queue
+                .remove(from_index)
+                .expect("shared queue item should exist");
             let insert_at = to_index.min(session.shared_queue.len());
             session.shared_queue.insert(insert_at, item);
         }
         LocalAction::QueueConsume { expected_path } => {
-            let can_consume = match (session.shared_queue.first(), expected_path.as_ref()) {
+            let can_consume = match (session.shared_queue.front(), expected_path.as_ref()) {
                 (Some(_), None) => true,
                 (Some(next), Some(expected)) => next.path == *expected,
                 _ => false,
             };
             if can_consume {
-                session.shared_queue.remove(0);
+                session.shared_queue.pop_front();
             }
         }
         LocalAction::DelayUpdate {
@@ -2422,6 +2475,109 @@ fn allowed_upload_paths_for_client(
     allowed_paths
 }
 
+fn refresh_upload_guard_from_session(guard: &mut ClientUploadGuard, session: &OnlineSession) {
+    guard.allowed_paths = allowed_upload_paths_for_client(session, &guard.local_nickname);
+}
+
+fn local_transport_path_for_client<'a>(
+    session: &'a OnlineSession,
+    local_nickname: &str,
+) -> Option<&'a Path> {
+    session
+        .last_transport
+        .as_ref()
+        .filter(|transport| {
+            transport
+                .origin_nickname
+                .eq_ignore_ascii_case(local_nickname)
+        })
+        .and_then(|transport| transport_path(&transport.command))
+}
+
+fn path_allowed_for_client(session: &OnlineSession, local_nickname: &str, path: &Path) -> bool {
+    session.shared_queue.iter().any(|item| {
+        item.path == path
+            && item
+                .owner_nickname
+                .as_deref()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(local_nickname))
+    }) || local_transport_path_for_client(session, local_nickname)
+        .is_some_and(|transport_path| transport_path == path)
+}
+
+fn apply_action_to_client_session(
+    session: &mut OnlineSession,
+    action: LocalAction,
+    origin_nickname: &str,
+    guard: &mut ClientUploadGuard,
+) {
+    let local_nickname_before = guard.local_nickname.clone();
+    let previous_local_transport_path =
+        local_transport_path_for_client(session, &local_nickname_before).map(Path::to_path_buf);
+    let removed_path = match &action {
+        LocalAction::QueueRemoveAt {
+            index,
+            expected_path,
+        } => session.shared_queue.get(*index).and_then(|item| {
+            expected_path
+                .as_ref()
+                .is_none_or(|expected| item.path.as_path() == expected)
+                .then(|| item.path.clone())
+        }),
+        LocalAction::QueueConsume { expected_path } => {
+            session.shared_queue.front().and_then(|item| {
+                expected_path
+                    .as_ref()
+                    .is_none_or(|expected| item.path.as_path() == expected)
+                    .then(|| item.path.clone())
+            })
+        }
+        _ => None,
+    };
+
+    apply_action_to_session(session, action.clone(), origin_nickname);
+
+    match action {
+        LocalAction::SetMode(_) | LocalAction::SetQuality(_) | LocalAction::DelayUpdate { .. } => {}
+        LocalAction::SetNickname { nickname } => {
+            if origin_nickname.eq_ignore_ascii_case(&local_nickname_before) {
+                let trimmed = nickname.trim();
+                if !trimmed.is_empty() {
+                    guard.local_nickname = trimmed.to_string();
+                }
+            }
+            refresh_upload_guard_from_session(guard, session);
+        }
+        LocalAction::QueueAdd(item) | LocalAction::QueueInsertAt { item, .. } => {
+            if item
+                .owner_nickname
+                .as_deref()
+                .is_some_and(|owner| owner.eq_ignore_ascii_case(&guard.local_nickname))
+            {
+                guard.allowed_paths.insert(item.path);
+            }
+        }
+        LocalAction::QueueRemoveAt { .. } | LocalAction::QueueConsume { .. } => {
+            if let Some(path) = removed_path
+                && !path_allowed_for_client(session, &guard.local_nickname, &path)
+            {
+                guard.allowed_paths.remove(&path);
+            }
+        }
+        LocalAction::QueueMove { .. } => {}
+        LocalAction::Transport(_) => {
+            if let Some(path) = previous_local_transport_path
+                && !path_allowed_for_client(session, &guard.local_nickname, &path)
+            {
+                guard.allowed_paths.remove(&path);
+            }
+            if let Some(path) = local_transport_path_for_client(session, &guard.local_nickname) {
+                guard.allowed_paths.insert(path.to_path_buf());
+            }
+        }
+    }
+}
+
 fn transport_path(command: &crate::online::TransportCommand) -> Option<&Path> {
     match command {
         crate::online::TransportCommand::PlayTrack { path, .. }
@@ -2439,6 +2595,20 @@ fn origin_is_host(session: &OnlineSession, origin_nickname: &str) -> bool {
 
 fn broadcast_state(peers: &mut HashMap<u32, PeerConnection>, session: &OnlineSession) {
     broadcast(peers, &WireServerMessage::Session(session.clone()));
+}
+
+fn broadcast_action(
+    peers: &mut HashMap<u32, PeerConnection>,
+    action: &LocalAction,
+    origin_nickname: &str,
+) {
+    broadcast(
+        peers,
+        &WireServerMessage::ActionSync {
+            action: action_to_wire(action.clone()),
+            origin_nickname: origin_nickname.to_string(),
+        },
+    );
 }
 
 fn broadcast(peers: &mut HashMap<u32, PeerConnection>, message: &WireServerMessage) {
@@ -3361,6 +3531,10 @@ enum WireServerMessage {
         session: Option<OnlineSession>,
     },
     Session(OnlineSession),
+    ActionSync {
+        action: WireAction,
+        origin_nickname: String,
+    },
     Ping {
         nonce: u64,
     },
@@ -3840,6 +4014,28 @@ mod tests {
     }
 
     #[test]
+    fn action_sync_round_trip_preserves_origin_and_payload() {
+        let msg = WireServerMessage::ActionSync {
+            action: WireAction::QueueConsume {
+                expected_path: Some(PathBuf::from("track.flac")),
+            },
+            origin_nickname: String::from("dj"),
+        };
+        let encoded = serde_json::to_string(&msg).expect("serialize");
+        let decoded: WireServerMessage = serde_json::from_str(&encoded).expect("deserialize");
+        match decoded {
+            WireServerMessage::ActionSync {
+                action: WireAction::QueueConsume { expected_path },
+                origin_nickname,
+            } => {
+                assert_eq!(expected_path, Some(PathBuf::from("track.flac")));
+                assert_eq!(origin_nickname, "dj");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
     fn upload_guard_allows_local_last_transport_path() {
         let mut session = OnlineSession::join("ROOM22", "alice");
         session.last_transport = Some(crate::online::TransportEnvelope {
@@ -3877,6 +4073,41 @@ mod tests {
 
         let allowed = allowed_upload_paths_for_client(&session, "alice");
         assert!(!allowed.contains(&PathBuf::from("other.flac")));
+    }
+
+    #[test]
+    fn client_action_sync_updates_upload_guard_incrementally() {
+        let mut session = OnlineSession::join("ROOM22", "alice");
+        let mut guard = ClientUploadGuard {
+            local_nickname: String::from("alice"),
+            allowed_paths: HashSet::new(),
+        };
+        let owned_path = PathBuf::from("owned.flac");
+
+        apply_action_to_client_session(
+            &mut session,
+            LocalAction::QueueAdd(crate::online::SharedQueueItem {
+                path: owned_path.clone(),
+                title: String::from("owned"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("alice")),
+            }),
+            "alice",
+            &mut guard,
+        );
+
+        assert!(guard.allowed_paths.contains(&owned_path));
+
+        apply_action_to_client_session(
+            &mut session,
+            LocalAction::QueueConsume {
+                expected_path: Some(owned_path.clone()),
+            },
+            "alice",
+            &mut guard,
+        );
+
+        assert!(!guard.allowed_paths.contains(&owned_path));
     }
 
     #[test]
@@ -3970,18 +4201,22 @@ mod tests {
     #[test]
     fn queue_consume_removes_front_when_expected_matches() {
         let mut session = OnlineSession::host("host");
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("a.flac"),
-            title: String::from("a"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("host")),
-        });
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("b.flac"),
-            title: String::from("b"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("host")),
-        });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("a.flac"),
+                title: String::from("a"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("host")),
+            });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("b.flac"),
+                title: String::from("b"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("host")),
+            });
 
         apply_action_to_session(
             &mut session,
@@ -3998,12 +4233,14 @@ mod tests {
     #[test]
     fn queue_consume_keeps_queue_when_expected_mismatch() {
         let mut session = OnlineSession::host("host");
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("a.flac"),
-            title: String::from("a"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("host")),
-        });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("a.flac"),
+                title: String::from("a"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("host")),
+            });
 
         apply_action_to_session(
             &mut session,
@@ -4020,18 +4257,22 @@ mod tests {
     #[test]
     fn queue_insert_at_places_item_at_requested_index() {
         let mut session = OnlineSession::host("host");
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("a.flac"),
-            title: String::from("a"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("host")),
-        });
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("b.flac"),
-            title: String::from("b"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("host")),
-        });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("a.flac"),
+                title: String::from("a"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("host")),
+            });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("b.flac"),
+                title: String::from("b"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("host")),
+            });
 
         apply_action_to_session(
             &mut session,
@@ -4065,12 +4306,14 @@ mod tests {
     #[test]
     fn queue_remove_at_requires_matching_path_when_expected() {
         let mut session = OnlineSession::host("host");
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("a.flac"),
-            title: String::from("a"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("host")),
-        });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("a.flac"),
+                title: String::from("a"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("host")),
+            });
 
         apply_action_to_session(
             &mut session,
@@ -4096,18 +4339,22 @@ mod tests {
     #[test]
     fn queue_move_reorders_item_when_expected_matches() {
         let mut session = OnlineSession::host("host");
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("a.flac"),
-            title: String::from("a"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("host")),
-        });
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("b.flac"),
-            title: String::from("b"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("host")),
-        });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("a.flac"),
+                title: String::from("a"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("host")),
+            });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("b.flac"),
+                title: String::from("b"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("host")),
+            });
 
         apply_action_to_session(
             &mut session,
@@ -4184,12 +4431,14 @@ mod tests {
     #[test]
     fn nickname_update_renames_participant_and_owned_queue_items() {
         let mut session = OnlineSession::host("host");
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("a.flac"),
-            title: String::from("a"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("host")),
-        });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("a.flac"),
+                title: String::from("a"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("host")),
+            });
 
         apply_action_to_session(
             &mut session,
@@ -4356,18 +4605,22 @@ mod tests {
             manual_extra_delay_ms: 0,
             auto_ping_delay: true,
         });
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("a.flac"),
-            title: String::from("a"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("listenera")),
-        });
-        session.shared_queue.push(crate::online::SharedQueueItem {
-            path: PathBuf::from("b.flac"),
-            title: String::from("b"),
-            delivery: crate::online::QueueDelivery::HostStreamOnly,
-            owner_nickname: Some(String::from("someoneelse")),
-        });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("a.flac"),
+                title: String::from("a"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("listenera")),
+            });
+        session
+            .shared_queue
+            .push_back(crate::online::SharedQueueItem {
+                path: PathBuf::from("b.flac"),
+                title: String::from("b"),
+                delivery: crate::online::QueueDelivery::HostStreamOnly,
+                owner_nickname: Some(String::from("someoneelse")),
+            });
 
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
