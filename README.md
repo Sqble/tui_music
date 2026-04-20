@@ -10,6 +10,8 @@ Full documentation available at **https://tunetui.online**
 
 - Minimal redraw strategy (renders only on dirty state or timed tick)
 - Folder-based music library with recursive scan
+- Background library scan on startup/add-folder/rescan so the TUI opens without waiting for full tag parsing
+- Persistent library index cache in config dir (`library_index.json`) for warm-start metadata reuse
 - Playlist create/add/play flows
 - Playback modes: normal, shuffle, loop playlist, loop single track
 - Main library queue order uses metadata titles (not file names)
@@ -145,6 +147,7 @@ Config directory:
 
 Files:
 - `state.json` — Playback state, library, playlists
+- `library_index.json` — Cached library metadata/fingerprints used to warm-start the library
 - `stats.json` — Listen history and statistics
 - `lyrics/` — LRC sidecar files
 

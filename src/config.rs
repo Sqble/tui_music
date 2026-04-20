@@ -1,3 +1,4 @@
+use crate::library::LibraryIndex;
 use crate::model::PersistedState;
 use anyhow::{Context, Result};
 use std::env;
@@ -10,6 +11,7 @@ use std::sync::OnceLock;
 const APP_DIR: &str = "tunetui";
 const STATE_FILE: &str = "state.json";
 const STATS_FILE: &str = "stats.json";
+const LIBRARY_INDEX_FILE: &str = "library_index.json";
 const LYRICS_DIR: &str = "lyrics";
 
 pub fn config_root() -> Result<PathBuf> {
@@ -84,6 +86,10 @@ pub fn stats_path() -> Result<PathBuf> {
     Ok(config_root()?.join(STATS_FILE))
 }
 
+pub fn library_index_path() -> Result<PathBuf> {
+    Ok(config_root()?.join(LIBRARY_INDEX_FILE))
+}
+
 pub fn lyrics_root() -> Result<PathBuf> {
     Ok(config_root()?.join(LYRICS_DIR))
 }
@@ -144,6 +150,34 @@ pub fn save_state(state: &PersistedState) -> Result<()> {
     ensure_config_dir()?;
     let path = state_path()?;
     save_state_to_path(&path, state)
+}
+
+pub fn load_library_index() -> Result<LibraryIndex> {
+    let path = library_index_path()?;
+    load_library_index_from_path(&path)
+}
+
+fn load_library_index_from_path(path: &Path) -> Result<LibraryIndex> {
+    if !path.exists() {
+        return Ok(LibraryIndex::default());
+    }
+
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("failed to read library index {}", path.display()))?;
+    serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse library index {}", path.display()))
+}
+
+pub fn save_library_index(index: &LibraryIndex) -> Result<()> {
+    ensure_config_dir()?;
+    let path = library_index_path()?;
+    save_library_index_to_path(&path, index)
+}
+
+fn save_library_index_to_path(path: &Path, index: &LibraryIndex) -> Result<()> {
+    let json = serde_json::to_string_pretty(index)?;
+    fs::write(path, json).with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
 }
 
 fn save_state_to_path(path: &Path, state: &PersistedState) -> Result<()> {
@@ -434,6 +468,28 @@ mod tests {
         save_state_to_path(&path, &state).expect("save");
         let loaded = load_state_from_path(&path).expect("load");
         assert_eq!(loaded.playback_mode, crate::model::PlaybackMode::Loop);
+    }
+
+    #[test]
+    fn save_and_load_library_index_round_trip() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(LIBRARY_INDEX_FILE);
+        let index = LibraryIndex {
+            tracks: vec![crate::library::LibraryIndexEntry {
+                path: PathBuf::from("/music/song.flac"),
+                title: String::from("Song"),
+                artist: Some(String::from("Artist")),
+                album: Some(String::from("Album")),
+                fingerprint: Some(crate::library::LibraryTrackFingerprint {
+                    file_size_bytes: 123,
+                    modified_unix_seconds: 456,
+                }),
+            }],
+        };
+
+        save_library_index_to_path(&path, &index).expect("save index");
+        let loaded = load_library_index_from_path(&path).expect("load index");
+        assert_eq!(loaded, index);
     }
 
     #[cfg(windows)]

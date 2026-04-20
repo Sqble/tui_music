@@ -1,7 +1,7 @@
 use crate::audio::{AudioEngine, NullAudioEngine, WasapiAudioEngine};
 use crate::config;
 use crate::core::{BrowserEntryKind, HeaderSection, LyricsMode, StatsFilterFocus, TuneCore};
-use crate::library::{self, MetadataEdit};
+use crate::library::{self, LibraryIndex, LibraryScanEvent, LibraryScanKind, MetadataEdit};
 use crate::model::{CoverArtTemplate, PlaybackMode, Theme};
 use crate::online::{
     OnlineSession, Participant, StreamQuality, TransportCommand, TransportEnvelope,
@@ -80,6 +80,20 @@ enum OnlinePlaybackSource {
 enum HomeServerVerifyResult {
     Success { server_addr: String },
     Failure { error: String },
+}
+
+struct ActiveLibraryScan {
+    scan_id: u64,
+    kind: LibraryScanKind,
+    rx: Receiver<LibraryScanEvent>,
+    roots: Vec<PathBuf>,
+}
+
+#[derive(Default)]
+struct LibraryRuntime {
+    active_scan: Option<ActiveLibraryScan>,
+    next_scan_id: u64,
+    index: LibraryIndex,
 }
 
 struct OnlineRuntime {
@@ -1175,6 +1189,271 @@ pub fn run() -> Result<()> {
     run_with_startup(AppStartupOptions::default())
 }
 
+fn start_full_library_scan(
+    core: &mut TuneCore,
+    library_runtime: &mut LibraryRuntime,
+    status: &str,
+) {
+    start_library_scan(
+        core,
+        library_runtime,
+        LibraryScanKind::FullRefresh,
+        core.folders.clone(),
+        status,
+    );
+}
+
+fn start_folder_import_scan(
+    core: &mut TuneCore,
+    library_runtime: &mut LibraryRuntime,
+    folder: PathBuf,
+) {
+    let display = crate::config::sanitize_display_text(&folder.display().to_string());
+    start_library_scan(
+        core,
+        library_runtime,
+        LibraryScanKind::AddFolder,
+        vec![folder],
+        &format!("Importing folder in background: {display}"),
+    );
+}
+
+fn start_library_scan(
+    core: &mut TuneCore,
+    library_runtime: &mut LibraryRuntime,
+    kind: LibraryScanKind,
+    roots: Vec<PathBuf>,
+    status: &str,
+) {
+    if roots.is_empty() {
+        return;
+    }
+    if library_runtime.active_scan.is_some() {
+        core.status = String::from("Library scan already running");
+        core.dirty = true;
+        return;
+    }
+
+    let scan_id = library_runtime.next_scan_id;
+    library_runtime.next_scan_id = library_runtime.next_scan_id.saturating_add(1);
+    let (tx, rx) = mpsc::channel();
+    library::spawn_library_scan(
+        scan_id,
+        kind,
+        roots.clone(),
+        library_runtime.index.clone(),
+        tx,
+    );
+    library_runtime.active_scan = Some(ActiveLibraryScan {
+        scan_id,
+        kind,
+        rx,
+        roots,
+    });
+    core.status = String::from(status);
+    core.dirty = true;
+}
+
+fn poll_library_scan(core: &mut TuneCore, library_runtime: &mut LibraryRuntime) {
+    loop {
+        let Some((scan_id, kind)) = library_runtime
+            .active_scan
+            .as_ref()
+            .map(|active| (active.scan_id, active.kind))
+        else {
+            return;
+        };
+
+        let event = match library_runtime
+            .active_scan
+            .as_ref()
+            .expect("active scan should exist")
+            .rx
+            .try_recv()
+        {
+            Ok(event) => event,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                library_runtime.active_scan = None;
+                core.status = format!("{} failed unexpectedly", kind.label());
+                core.dirty = true;
+                return;
+            }
+        };
+
+        match event {
+            LibraryScanEvent::DiscoveryBatch {
+                scan_id: event_scan_id,
+                kind: event_kind,
+                tracks,
+            }
+            | LibraryScanEvent::MetadataBatch {
+                scan_id: event_scan_id,
+                kind: event_kind,
+                tracks,
+            } if event_scan_id == scan_id && event_kind == kind => {
+                core.upsert_library_tracks(tracks);
+            }
+            LibraryScanEvent::Finished {
+                scan_id: event_scan_id,
+                kind: event_kind,
+                index,
+                discovered_tracks,
+                refreshed_metadata_tracks,
+            } if event_scan_id == scan_id && event_kind == kind => {
+                let active = library_runtime
+                    .active_scan
+                    .take()
+                    .expect("active library scan should exist");
+                apply_finished_library_scan(
+                    core,
+                    library_runtime,
+                    active,
+                    index,
+                    discovered_tracks,
+                    refreshed_metadata_tracks,
+                );
+                return;
+            }
+            LibraryScanEvent::Failed {
+                scan_id: event_scan_id,
+                kind: event_kind,
+                error,
+            } if event_scan_id == scan_id && event_kind == kind => {
+                library_runtime.active_scan = None;
+                core.status = format!("{} failed: {error}", kind.label());
+                core.dirty = true;
+                return;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn request_library_rescan(core: &mut TuneCore, library_runtime: &mut LibraryRuntime) {
+    start_full_library_scan(core, library_runtime, "Rescanning library in background...");
+}
+
+fn try_add_folder_async(
+    core: &mut TuneCore,
+    audio: &dyn AudioEngine,
+    library_runtime: Option<&mut LibraryRuntime>,
+    input: &Path,
+) {
+    match library_runtime {
+        Some(library_runtime) => {
+            if library_runtime.active_scan.is_some() {
+                core.status = String::from("Wait for the current library scan to finish");
+                core.dirty = true;
+                return;
+            }
+
+            match core.resolve_folder_for_addition(input) {
+                Ok(normalized) => {
+                    core.insert_folder_reference(normalized.clone());
+                    auto_save_state(core, audio);
+                    start_folder_import_scan(core, library_runtime, normalized);
+                }
+                Err(message) => {
+                    core.status = String::from(message);
+                    core.dirty = true;
+                }
+            }
+        }
+        None => core.add_folder(input),
+    }
+}
+
+fn try_remove_folder_async(
+    core: &mut TuneCore,
+    audio: &dyn AudioEngine,
+    library_runtime: Option<&mut LibraryRuntime>,
+    input: &Path,
+) {
+    match library_runtime {
+        Some(library_runtime) => {
+            if library_runtime.active_scan.is_some() {
+                core.status = String::from("Wait for the current library scan to finish");
+                core.dirty = true;
+                return;
+            }
+            let Some(removed) = core.remove_folder_reference(input) else {
+                return;
+            };
+            core.remove_tracks_in_folder(&removed);
+            auto_save_state(core, audio);
+            library::remove_index_entries_in_folder(&mut library_runtime.index, &removed);
+            core.status = match config::save_library_index(&library_runtime.index) {
+                Ok(()) => String::from("Folder removed"),
+                Err(err) => format!("Folder removed, but index save failed: {err}"),
+            };
+            core.dirty = true;
+        }
+        None => core.remove_folder(input),
+    }
+}
+
+fn sync_library_index_track_from_core(
+    core: &TuneCore,
+    library_runtime: &mut LibraryRuntime,
+    path: &Path,
+) {
+    let Some(title) = core.title_for_path(path) else {
+        return;
+    };
+    let track = crate::model::Track {
+        path: path.to_path_buf(),
+        title,
+        artist: core.artist_for_path(path).map(str::to_string),
+        album: core.album_for_path(path).map(str::to_string),
+    };
+    library::upsert_index_entry(&mut library_runtime.index, &track);
+    let _ = config::save_library_index(&library_runtime.index);
+}
+
+fn apply_finished_library_scan(
+    core: &mut TuneCore,
+    library_runtime: &mut LibraryRuntime,
+    active: ActiveLibraryScan,
+    index: LibraryIndex,
+    discovered_tracks: usize,
+    refreshed_metadata_tracks: usize,
+) {
+    match active.kind {
+        LibraryScanKind::FullRefresh => {
+            let tracks = library::tracks_from_index(&index, &active.roots);
+            core.replace_library_tracks(tracks);
+            library_runtime.index = index;
+        }
+        LibraryScanKind::AddFolder => {
+            for root in &active.roots {
+                library::remove_index_entries_in_folder(&mut library_runtime.index, root);
+            }
+            library_runtime.index.tracks.extend(index.tracks);
+            library_runtime
+                .index
+                .tracks
+                .sort_by(|a, b| a.path.cmp(&b.path));
+            library_runtime
+                .index
+                .tracks
+                .dedup_by(|a, b| a.path == b.path);
+        }
+    }
+
+    core.status = match config::save_library_index(&library_runtime.index) {
+        Ok(()) => format!(
+            "{} complete: {discovered_tracks} track(s), {refreshed_metadata_tracks} refreshed",
+            active.kind.label()
+        ),
+        Err(err) => format!(
+            "{} complete, but index save failed: {err}",
+            active.kind.label()
+        ),
+    };
+    core.dirty = true;
+}
+
 pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
     prepare_runtime_environment();
 
@@ -1186,9 +1465,16 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
     };
 
     let state = config::load_state()?;
+    let library_index = config::load_library_index().unwrap_or_default();
+    let indexed_tracks = library::tracks_from_index(&library_index, &state.folders);
     let preferred_output = state.selected_output_device.clone();
     let saved_volume = state.saved_volume;
-    let mut core = TuneCore::from_persisted(state);
+    let mut core = TuneCore::from_persisted_with_tracks(state, indexed_tracks);
+    let mut library_runtime = LibraryRuntime {
+        active_scan: None,
+        next_scan_id: 1,
+        index: library_index,
+    };
     let mut stats_store = stats::load_stats().unwrap_or_default();
     let mut listen_tracker = ListenTracker::default();
 
@@ -1207,6 +1493,14 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
     let backend = CrosstermBackend::new(out);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
+
+    if !core.folders.is_empty() {
+        start_full_library_scan(
+            &mut core,
+            &mut library_runtime,
+            "Scanning library in background...",
+        );
+    }
 
     let mut action_panel = ActionPanelState::Closed;
     let mut recent_root_actions: Vec<RootActionId> = Vec::new();
@@ -1264,6 +1558,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
 
     let result: Result<()> = loop {
         pump_tray_events(&mut core);
+        poll_library_scan(&mut core, &mut library_runtime);
         drain_online_network_events(&mut core, &mut *audio, &mut online_runtime);
         poll_home_server_verification(&mut core, &mut online_runtime);
         audio.tick();
@@ -1408,6 +1703,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 &mut action_panel,
                 &mut recent_root_actions,
                 Some(&mut online_runtime),
+                Some(&mut library_runtime),
                 key.code,
             );
             continue;
@@ -1599,7 +1895,9 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 core.status = format!("Volume: {}%", (next * 100.0).round() as u16);
                 core.dirty = true;
             }
-            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'r') => core.rescan(),
+            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'r') => {
+                request_library_rescan(&mut core, &mut library_runtime)
+            }
             KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'s') => {
                 if let Err(err) = save_state_with_audio(&mut core, &*audio) {
                     core.status = format!("save error: {err:#}");
@@ -4028,6 +4326,7 @@ fn handle_mouse_with_panel(
                     panel,
                     recent_root_actions,
                     Some(online_runtime),
+                    None,
                     KeyCode::Down,
                 );
                 return;
@@ -4039,6 +4338,7 @@ fn handle_mouse_with_panel(
                     panel,
                     recent_root_actions,
                     Some(online_runtime),
+                    None,
                     KeyCode::Up,
                 );
                 return;
@@ -4196,6 +4496,7 @@ fn now_playing_cover_source_path(core: &TuneCore, audio: &dyn AudioEngine) -> Op
 
 fn copy_now_playing_cover_to_paths(
     core: &mut TuneCore,
+    library_runtime: Option<&mut LibraryRuntime>,
     source_path: &Path,
     targets: &[PathBuf],
     target_label: &str,
@@ -4209,10 +4510,14 @@ fn copy_now_playing_cover_to_paths(
     let mut copied = 0usize;
     let mut failed = 0usize;
     let mut first_error = None;
+    let mut library_runtime = library_runtime;
     for target in targets {
         match library::write_embedded_cover_art(target, &image_data) {
             Ok(()) => {
                 core.reload_track_metadata(target);
+                if let Some(runtime) = library_runtime.as_mut() {
+                    sync_library_index_track_from_core(core, runtime, target);
+                }
                 copied += 1;
             }
             Err(err) => {
@@ -4474,7 +4779,15 @@ fn handle_action_panel_input(
     key: KeyCode,
 ) {
     let mut recent_root_actions = Vec::new();
-    handle_action_panel_input_with_recent(core, audio, panel, &mut recent_root_actions, None, key);
+    handle_action_panel_input_with_recent(
+        core,
+        audio,
+        panel,
+        &mut recent_root_actions,
+        None,
+        None,
+        key,
+    );
 }
 
 fn handle_action_panel_input_with_recent(
@@ -4483,6 +4796,7 @@ fn handle_action_panel_input_with_recent(
     panel: &mut ActionPanelState,
     recent_root_actions: &mut Vec<RootActionId>,
     mut online_runtime: Option<&mut OnlineRuntime>,
+    mut library_runtime: Option<&mut LibraryRuntime>,
     key: KeyCode,
 ) {
     if let ActionPanelState::Root { selected, query } = panel {
@@ -4928,7 +5242,11 @@ fn handle_action_panel_input_with_recent(
                         core.dirty = true;
                     }
                     RootActionId::RescanLibrary => {
-                        core.rescan();
+                        if let Some(runtime) = library_runtime.as_mut() {
+                            request_library_rescan(core, runtime);
+                        } else {
+                            core.rescan();
+                        }
                         panel.close();
                     }
                     RootActionId::AudioDriverSettings => {
@@ -5247,7 +5565,7 @@ fn handle_action_panel_input_with_recent(
                     core.dirty = true;
                     return;
                 }
-                if let Some(runtime) = online_runtime.as_deref_mut() {
+                if let Some(runtime) = online_runtime.as_mut() {
                     apply_online_nickname(core, runtime, nickname);
                     auto_save_state(core, &*audio);
                 } else {
@@ -5348,6 +5666,7 @@ fn handle_action_panel_input_with_recent(
 
                     copy_now_playing_cover_to_paths(
                         core,
+                        library_runtime.as_deref_mut(),
                         &source_path,
                         &state.copy_target_paths,
                         &state.copy_target_label,
@@ -5371,6 +5690,9 @@ fn handle_action_panel_input_with_recent(
                     match library::write_embedded_metadata(path, &state.metadata_edit()) {
                         Ok(()) => {
                             core.reload_track_metadata(path);
+                            if let Some(runtime) = library_runtime.as_mut() {
+                                sync_library_index_track_from_core(core, runtime, path);
+                            }
                             core.status = String::from("Metadata saved");
                             core.dirty = true;
                         }
@@ -5389,6 +5711,9 @@ fn handle_action_panel_input_with_recent(
                     match library::clear_embedded_metadata(path) {
                         Ok(()) => {
                             core.reload_track_metadata(path);
+                            if let Some(runtime) = library_runtime.as_mut() {
+                                sync_library_index_track_from_core(core, runtime, path);
+                            }
                             core.status = String::from("Metadata cleared");
                             core.dirty = true;
                         }
@@ -5409,6 +5734,7 @@ fn handle_action_panel_input_with_recent(
 
                     copy_now_playing_cover_to_paths(
                         core,
+                        library_runtime.as_deref_mut(),
                         &source_path,
                         &state.copy_target_paths,
                         &state.copy_target_label,
@@ -5447,14 +5773,22 @@ fn handle_action_panel_input_with_recent(
                         core.dirty = true;
                         return;
                     }
-                    core.add_folder(Path::new(trimmed));
-                    auto_save_state(core, &*audio);
+                    try_add_folder_async(
+                        core,
+                        &*audio,
+                        library_runtime.as_deref_mut(),
+                        Path::new(trimmed),
+                    );
                     panel.close();
                 } else {
                     match choose_folder_externally() {
                         Ok(Some(path)) => {
-                            core.add_folder(&path);
-                            auto_save_state(core, &*audio);
+                            try_add_folder_async(
+                                core,
+                                &*audio,
+                                library_runtime.as_deref_mut(),
+                                &path,
+                            );
                             panel.close();
                         }
                         Ok(None) => {
@@ -5471,8 +5805,7 @@ fn handle_action_panel_input_with_recent(
             ActionPanelState::RemoveDirectory { selected } => {
                 let folders = sorted_folder_paths(core);
                 if let Some(path) = folders.get(selected) {
-                    core.remove_folder(path);
-                    auto_save_state(core, &*audio);
+                    try_remove_folder_async(core, &*audio, library_runtime, path);
                 } else {
                     core.status = String::from("No folders available");
                     core.dirty = true;
@@ -6403,6 +6736,7 @@ mod tests {
                 &mut panel,
                 &mut recent_root_actions,
                 None,
+                None,
                 KeyCode::Char(ch),
             );
         }
@@ -6411,6 +6745,7 @@ mod tests {
             &mut audio,
             &mut panel,
             &mut recent_root_actions,
+            None,
             None,
             KeyCode::Enter,
         );

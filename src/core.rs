@@ -143,6 +143,10 @@ pub struct TuneCore {
 impl TuneCore {
     pub fn from_persisted(state: PersistedState) -> Self {
         let tracks = library::scan_many(&state.folders);
+        Self::from_persisted_with_tracks(state, tracks)
+    }
+
+    pub fn from_persisted_with_tracks(state: PersistedState, tracks: Vec<Track>) -> Self {
         let track_lookup = build_track_lookup(&tracks);
         let mut core = Self {
             folders: state.folders,
@@ -201,6 +205,131 @@ impl TuneCore {
         core
     }
 
+    pub fn replace_library_tracks(&mut self, mut tracks: Vec<Track>) {
+        tracks.sort_by(|a, b| a.path.cmp(&b.path));
+        tracks.dedup_by(|a, b| a.path == b.path);
+        self.capture_library_update(|core| {
+            core.tracks = tracks;
+        });
+    }
+
+    pub fn upsert_library_tracks(&mut self, tracks: Vec<Track>) -> usize {
+        if tracks.is_empty() {
+            return 0;
+        }
+
+        let mut changed = 0usize;
+        self.capture_library_update(|core| {
+            for track in tracks {
+                match core.track_index(&track.path) {
+                    Some(idx) if core.tracks.get(idx) != Some(&track) => {
+                        core.tracks[idx] = track;
+                        changed = changed.saturating_add(1);
+                    }
+                    Some(_) => {}
+                    None => {
+                        core.tracks.push(track);
+                        changed = changed.saturating_add(1);
+                    }
+                }
+            }
+        });
+        changed
+    }
+
+    pub fn remove_tracks_in_folder(&mut self, root: &Path) -> usize {
+        let root = config::normalize_path(root);
+        let before = self.tracks.len();
+        self.capture_library_update(|core| {
+            core.tracks
+                .retain(|track| !path_is_within(&track.path, &root));
+        });
+        before.saturating_sub(self.tracks.len())
+    }
+
+    pub fn resolve_folder_for_addition(&self, input: &Path) -> Result<PathBuf, &'static str> {
+        let sanitized = config::sanitize_user_folder_path(input);
+        if sanitized.as_os_str().is_empty() {
+            return Err("Invalid folder path");
+        }
+
+        let resolved = if input.exists() {
+            input.to_path_buf()
+        } else {
+            config::resolve_existing_path(input)
+        };
+
+        if !resolved.exists() {
+            return Err("Folder not found");
+        }
+
+        if !resolved.is_dir() {
+            return Err("Path is not a folder");
+        }
+
+        let normalized = config::normalize_path(&resolved);
+        if self.folders.iter().any(|folder| folder == &normalized) {
+            return Err("Folder already added");
+        }
+
+        Ok(normalized)
+    }
+
+    pub fn insert_folder_reference(&mut self, folder: PathBuf) {
+        if self.folders.iter().any(|existing| existing == &folder) {
+            return;
+        }
+        self.folders.push(folder);
+        self.folders
+            .sort_by_cached_key(|path| path.to_string_lossy().to_ascii_lowercase());
+        self.refresh_browser_entries();
+        self.dirty = true;
+    }
+
+    pub fn remove_folder_reference(&mut self, input: &Path) -> Option<PathBuf> {
+        if input.as_os_str().is_empty() {
+            self.set_status("Invalid folder path");
+            return None;
+        }
+
+        let sanitized = config::sanitize_user_folder_path(input);
+        let display_clean = PathBuf::from(config::sanitize_display_text(&input.to_string_lossy()));
+        let recovered = config::resolve_existing_path(input);
+
+        let mut candidates = vec![config::normalize_path(input)];
+        if !sanitized.as_os_str().is_empty() {
+            candidates.push(config::normalize_path(&sanitized));
+        }
+        if !display_clean.as_os_str().is_empty() {
+            candidates.push(config::normalize_path(&display_clean));
+        }
+        if recovered.exists() {
+            candidates.push(config::normalize_path(&recovered));
+        }
+
+        let removed = self
+            .folders
+            .iter()
+            .find(|folder| {
+                candidates
+                    .iter()
+                    .any(|candidate| path_eq(folder, candidate))
+            })
+            .cloned();
+        let Some(removed) = removed else {
+            self.set_status("Folder not found");
+            return None;
+        };
+
+        self.folders.retain(|folder| !path_eq(folder, &removed));
+        self.browser_path = None;
+        self.browser_all_songs = false;
+        self.selected_browser = 0;
+        self.refresh_browser_entries();
+        self.dirty = true;
+        Some(removed)
+    }
+
     pub fn persisted_state(&self) -> PersistedState {
         PersistedState {
             folders: self.folders.clone(),
@@ -235,93 +364,28 @@ impl TuneCore {
     }
 
     pub fn add_folder(&mut self, input: &Path) {
-        let sanitized = config::sanitize_user_folder_path(input);
-        if sanitized.as_os_str().is_empty() {
-            self.set_status("Invalid folder path");
-            return;
+        match self.resolve_folder_for_addition(input) {
+            Ok(normalized) => {
+                self.insert_folder_reference(normalized.clone());
+                let mut found = library::scan_folder(&normalized);
+                let count = found.len();
+                self.upsert_library_tracks(std::mem::take(&mut found));
+                self.set_status(&format!("Added folder with {count} tracks"));
+            }
+            Err(message) => self.set_status(message),
         }
-
-        let resolved = if input.exists() {
-            input.to_path_buf()
-        } else {
-            config::resolve_existing_path(input)
-        };
-
-        if !resolved.exists() {
-            self.set_status("Folder not found");
-            return;
-        }
-
-        if !resolved.is_dir() {
-            self.set_status("Path is not a folder");
-            return;
-        }
-
-        let normalized = config::normalize_path(&resolved);
-        if self.folders.iter().any(|f| f == &normalized) {
-            self.set_status("Folder already added");
-            return;
-        }
-
-        self.folders.push(normalized.clone());
-        let mut found = library::scan_folder(&normalized);
-        let count = found.len();
-        self.invalidate_library_caches();
-        self.tracks.append(&mut found);
-        self.tracks.sort_by(|a, b| a.path.cmp(&b.path));
-        self.tracks.dedup_by(|a, b| a.path == b.path);
-        self.rebuild_main_queue();
-        self.refresh_browser_entries();
-        self.set_status(&format!("Added folder with {count} tracks"));
     }
 
     pub fn remove_folder(&mut self, input: &Path) {
-        if input.as_os_str().is_empty() {
-            self.set_status("Invalid folder path");
+        let Some(removed) = self.remove_folder_reference(input) else {
             return;
-        }
-
-        let sanitized = config::sanitize_user_folder_path(input);
-        let display_clean = PathBuf::from(config::sanitize_display_text(&input.to_string_lossy()));
-        let recovered = config::resolve_existing_path(input);
-
-        let mut candidates = vec![config::normalize_path(input)];
-        if !sanitized.as_os_str().is_empty() {
-            candidates.push(config::normalize_path(&sanitized));
-        }
-        if !display_clean.as_os_str().is_empty() {
-            candidates.push(config::normalize_path(&display_clean));
-        }
-        if recovered.exists() {
-            candidates.push(config::normalize_path(&recovered));
-        }
-
-        let before = self.folders.len();
-        self.folders.retain(|folder| {
-            !candidates
-                .iter()
-                .any(|candidate| path_eq(folder, candidate))
-        });
-        if self.folders.len() == before {
-            self.set_status("Folder not found");
-            return;
-        }
-
-        self.browser_path = None;
-        self.browser_all_songs = false;
-        self.selected_browser = 0;
-        self.invalidate_library_caches();
-        self.tracks = library::scan_many(&self.folders);
-        self.rebuild_main_queue();
-        self.refresh_browser_entries();
+        };
+        self.remove_tracks_in_folder(&removed);
         self.set_status("Folder removed");
     }
 
     pub fn rescan(&mut self) {
-        self.invalidate_library_caches();
-        self.tracks = library::scan_many(&self.folders);
-        self.rebuild_main_queue();
-        self.refresh_browser_entries();
+        self.replace_library_tracks(library::scan_many(&self.folders));
         self.set_status("Library rescanned");
     }
 
@@ -1703,6 +1767,34 @@ impl TuneCore {
         self.track_lookup = build_track_lookup(&self.tracks);
         self.queue = self.metadata_sorted_library_queue();
         self.rebuild_shuffle_order();
+        self.dirty = true;
+    }
+
+    fn capture_library_update(&mut self, apply: impl FnOnce(&mut Self)) {
+        let queue_was_main_library = self.queue_matches_main_library_order();
+        let previous_queue_paths: Vec<PathBuf> = self
+            .queue
+            .iter()
+            .filter_map(|idx| self.tracks.get(*idx).map(|track| track.path.clone()))
+            .collect();
+        let current_path = self.current_path().map(Path::to_path_buf);
+
+        apply(self);
+
+        self.invalidate_library_caches();
+        self.track_lookup = build_track_lookup(&self.tracks);
+        if queue_was_main_library {
+            self.queue = self.metadata_sorted_library_queue();
+        } else {
+            self.queue = previous_queue_paths
+                .iter()
+                .filter_map(|path| self.track_index(path))
+                .collect();
+        }
+        self.current_queue_index =
+            current_path.and_then(|path| self.queue_position_for_path(&path));
+        self.rebuild_shuffle_order();
+        self.refresh_browser_entries();
         self.dirty = true;
     }
 

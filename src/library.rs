@@ -7,10 +7,15 @@ use lofty::prelude::ItemKey;
 use lofty::probe::Probe;
 use lofty::tag::{Tag, TagType};
 use rodio::{Decoder, Source};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::Sender;
+use std::thread;
+use std::time::UNIX_EPOCH;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
 use symphonia::core::meta::{MetadataOptions, StandardTagKey};
@@ -39,6 +44,68 @@ pub struct MetadataSnapshot {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LibraryTrackFingerprint {
+    pub file_size_bytes: u64,
+    pub modified_unix_seconds: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LibraryIndexEntry {
+    pub path: PathBuf,
+    pub title: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub fingerprint: Option<LibraryTrackFingerprint>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LibraryIndex {
+    #[serde(default)]
+    pub tracks: Vec<LibraryIndexEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryScanKind {
+    FullRefresh,
+    AddFolder,
+}
+
+impl LibraryScanKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::FullRefresh => "Library refresh",
+            Self::AddFolder => "Folder import",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum LibraryScanEvent {
+    DiscoveryBatch {
+        scan_id: u64,
+        kind: LibraryScanKind,
+        tracks: Vec<Track>,
+    },
+    MetadataBatch {
+        scan_id: u64,
+        kind: LibraryScanKind,
+        tracks: Vec<Track>,
+    },
+    Finished {
+        scan_id: u64,
+        kind: LibraryScanKind,
+        index: LibraryIndex,
+        discovered_tracks: usize,
+        refreshed_metadata_tracks: usize,
+    },
+    Failed {
+        scan_id: u64,
+        kind: LibraryScanKind,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,6 +174,280 @@ pub fn scan_folder(root: &Path) -> Vec<Track> {
 
     tracks.sort_by(|a, b| a.path.cmp(&b.path));
     tracks
+}
+
+pub fn spawn_library_scan(
+    scan_id: u64,
+    kind: LibraryScanKind,
+    roots: Vec<PathBuf>,
+    existing_index: LibraryIndex,
+    tx: Sender<LibraryScanEvent>,
+) {
+    thread::spawn(move || run_library_scan(scan_id, kind, roots, existing_index, tx));
+}
+
+pub fn tracks_from_index(index: &LibraryIndex, roots: &[PathBuf]) -> Vec<Track> {
+    let mut tracks = Vec::new();
+    for entry in &index.tracks {
+        if roots.iter().any(|root| path_is_within(&entry.path, root)) {
+            tracks.push(entry.to_track());
+        }
+    }
+    tracks.sort_by(|a, b| a.path.cmp(&b.path));
+    tracks.dedup_by(|a, b| a.path == b.path);
+    tracks
+}
+
+pub fn upsert_index_entry(index: &mut LibraryIndex, track: &Track) {
+    let entry = LibraryIndexEntry::from_track(track);
+    if let Some(existing) = index
+        .tracks
+        .iter_mut()
+        .find(|candidate| candidate.path == entry.path)
+    {
+        *existing = entry;
+    } else {
+        index.tracks.push(entry);
+        index.tracks.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+}
+
+pub fn remove_index_entries_in_folder(index: &mut LibraryIndex, root: &Path) -> usize {
+    let before = index.tracks.len();
+    index
+        .tracks
+        .retain(|entry| !path_is_within(&entry.path, root));
+    before.saturating_sub(index.tracks.len())
+}
+
+fn run_library_scan(
+    scan_id: u64,
+    kind: LibraryScanKind,
+    roots: Vec<PathBuf>,
+    existing_index: LibraryIndex,
+    tx: Sender<LibraryScanEvent>,
+) {
+    const DISCOVERY_BATCH_SIZE: usize = 64;
+    const METADATA_BATCH_SIZE: usize = 32;
+
+    let mut cached_entries = HashMap::with_capacity(existing_index.tracks.len());
+    for entry in existing_index.tracks {
+        cached_entries.insert(normalized_path_key(&entry.path), entry);
+    }
+
+    let mut next_index = Vec::new();
+    let mut discovery_batch = Vec::new();
+    let mut metadata_batch = Vec::new();
+    let mut discovered_tracks = 0usize;
+    let mut refreshed_metadata_tracks = 0usize;
+
+    for root in roots {
+        for path in audio_file_paths(&root) {
+            discovered_tracks = discovered_tracks.saturating_add(1);
+            let key = normalized_path_key(&path);
+            let fingerprint = track_fingerprint(&path);
+            let cached = cached_entries.get(&key);
+
+            if let Some(cached_entry) = cached
+                && cached_entry.fingerprint == fingerprint
+            {
+                next_index.push(cached_entry.clone());
+                continue;
+            }
+
+            if cached.is_none() {
+                discovery_batch.push(shallow_track_for_path(&path));
+                if discovery_batch.len() >= DISCOVERY_BATCH_SIZE {
+                    let tracks = std::mem::take(&mut discovery_batch);
+                    if tx
+                        .send(LibraryScanEvent::DiscoveryBatch {
+                            scan_id,
+                            kind,
+                            tracks,
+                        })
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+
+            let track = track_for_path(&path);
+            refreshed_metadata_tracks = refreshed_metadata_tracks.saturating_add(1);
+            metadata_batch.push(track.clone());
+            next_index.push(LibraryIndexEntry::from_track_with_fingerprint(
+                &track,
+                fingerprint,
+            ));
+
+            if metadata_batch.len() >= METADATA_BATCH_SIZE {
+                let tracks = std::mem::take(&mut metadata_batch);
+                if tx
+                    .send(LibraryScanEvent::MetadataBatch {
+                        scan_id,
+                        kind,
+                        tracks,
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        }
+    }
+
+    if !discovery_batch.is_empty()
+        && tx
+            .send(LibraryScanEvent::DiscoveryBatch {
+                scan_id,
+                kind,
+                tracks: discovery_batch,
+            })
+            .is_err()
+    {
+        return;
+    }
+
+    if !metadata_batch.is_empty()
+        && tx
+            .send(LibraryScanEvent::MetadataBatch {
+                scan_id,
+                kind,
+                tracks: metadata_batch,
+            })
+            .is_err()
+    {
+        return;
+    }
+
+    next_index.sort_by(|a, b| a.path.cmp(&b.path));
+    next_index.dedup_by(|a, b| a.path == b.path);
+    let _ = tx.send(LibraryScanEvent::Finished {
+        scan_id,
+        kind,
+        index: LibraryIndex { tracks: next_index },
+        discovered_tracks,
+        refreshed_metadata_tracks,
+    });
+}
+
+fn audio_file_paths(root: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for entry in WalkDir::new(root)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        let path = crate::config::normalize_path(entry.path());
+        if entry.file_type().is_file() && is_audio(&path) {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn shallow_track_for_path(path: &Path) -> Track {
+    let stripped = crate::config::strip_windows_verbatim_prefix(path);
+    Track {
+        title: stripped
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        artist: None,
+        album: None,
+        path: stripped,
+    }
+}
+
+fn track_for_path(path: &Path) -> Track {
+    let stripped = crate::config::strip_windows_verbatim_prefix(path);
+    let metadata = metadata_for(&stripped);
+    let title = metadata
+        .title
+        .filter(|title| !title.trim().is_empty())
+        .unwrap_or_else(|| {
+            stripped
+                .file_stem()
+                .and_then(OsStr::to_str)
+                .unwrap_or("unknown")
+                .to_string()
+        });
+
+    Track {
+        path: stripped,
+        title,
+        artist: metadata.artist,
+        album: metadata.album,
+    }
+}
+
+pub fn track_fingerprint(path: &Path) -> Option<LibraryTrackFingerprint> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let modified_unix_seconds = modified.duration_since(UNIX_EPOCH).ok()?.as_secs();
+    Some(LibraryTrackFingerprint {
+        file_size_bytes: metadata.len(),
+        modified_unix_seconds,
+    })
+}
+
+fn normalized_path_key(path: &Path) -> String {
+    let normalized = crate::config::normalize_path(path);
+    let value = normalized.to_string_lossy();
+    if cfg!(windows) {
+        value.to_ascii_lowercase()
+    } else {
+        value.to_string()
+    }
+}
+
+fn path_is_within(path: &Path, root: &Path) -> bool {
+    let path = crate::config::normalize_path(path);
+    let root = crate::config::normalize_path(root);
+
+    let mut path_components = path.components();
+    for root_component in root.components() {
+        let Some(path_component) = path_components.next() else {
+            return false;
+        };
+
+        if path_component.as_os_str() != root_component.as_os_str() {
+            return false;
+        }
+    }
+
+    true
+}
+
+impl LibraryIndexEntry {
+    pub fn from_track(track: &Track) -> Self {
+        Self::from_track_with_fingerprint(track, track_fingerprint(&track.path))
+    }
+
+    pub fn from_track_with_fingerprint(
+        track: &Track,
+        fingerprint: Option<LibraryTrackFingerprint>,
+    ) -> Self {
+        Self {
+            path: track.path.clone(),
+            title: track.title.clone(),
+            artist: track.artist.clone(),
+            album: track.album.clone(),
+            fingerprint,
+        }
+    }
+
+    pub fn to_track(&self) -> Track {
+        Track {
+            path: self.path.clone(),
+            title: self.title.clone(),
+            artist: self.artist.clone(),
+            album: self.album.clone(),
+        }
+    }
 }
 
 fn metadata_for(path: &Path) -> TrackMetadata {
@@ -1084,5 +1425,59 @@ mod tests {
             build_static_spectrograph(Path::new("missing-file.mp3"), Some(180)),
             vec![String::from("(spectrograph unavailable)")]
         );
+    }
+
+    #[test]
+    fn tracks_from_index_filters_to_requested_roots() {
+        let index = LibraryIndex {
+            tracks: vec![
+                LibraryIndexEntry {
+                    path: PathBuf::from("/music/A/song1.flac"),
+                    title: String::from("one"),
+                    artist: Some(String::from("artist")),
+                    album: None,
+                    fingerprint: None,
+                },
+                LibraryIndexEntry {
+                    path: PathBuf::from("/other/song2.flac"),
+                    title: String::from("two"),
+                    artist: None,
+                    album: None,
+                    fingerprint: None,
+                },
+            ],
+        };
+
+        let tracks = tracks_from_index(&index, &[PathBuf::from("/music")]);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].path, PathBuf::from("/music/A/song1.flac"));
+        assert_eq!(tracks[0].title, "one");
+    }
+
+    #[test]
+    fn remove_index_entries_in_folder_prunes_matching_paths() {
+        let mut index = LibraryIndex {
+            tracks: vec![
+                LibraryIndexEntry {
+                    path: PathBuf::from("/music/A/song1.flac"),
+                    title: String::from("one"),
+                    artist: None,
+                    album: None,
+                    fingerprint: None,
+                },
+                LibraryIndexEntry {
+                    path: PathBuf::from("/music/B/song2.flac"),
+                    title: String::from("two"),
+                    artist: None,
+                    album: None,
+                    fingerprint: None,
+                },
+            ],
+        };
+
+        let removed = remove_index_entries_in_folder(&mut index, Path::new("/music/A"));
+        assert_eq!(removed, 1);
+        assert_eq!(index.tracks.len(), 1);
+        assert_eq!(index.tracks[0].path, PathBuf::from("/music/B/song2.flac"));
     }
 }
