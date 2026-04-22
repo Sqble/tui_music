@@ -1642,7 +1642,31 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
         pending_verification_rx: None,
     };
 
-    let result: Result<()> = loop {
+    let mut pending_scrub_delta: i64 = 0;
+
+    let result: Result<()> = 'app_loop: loop {
+        if pending_scrub_delta != 0 {
+            let delta = pending_scrub_delta;
+            pending_scrub_delta = 0;
+            if let Err(err) = scrub_current_track_by_delta(&mut *audio, delta) {
+                core.status = format!("Scrub failed: {err}");
+            } else {
+                let abs_seconds = delta.unsigned_abs();
+                let label = if abs_seconds % 60 == 0 && abs_seconds >= 60 {
+                    format!("{}m", abs_seconds / 60)
+                } else {
+                    format!("{abs_seconds}s")
+                };
+                core.status = if delta > 0 {
+                    format!("Scrubbed forward {label}")
+                } else {
+                    format!("Scrubbed back {label}")
+                };
+                publish_current_playback_state(&core, &*audio, &online_runtime);
+            }
+            core.dirty = true;
+        }
+
         pump_tray_events(&mut core);
         poll_library_scan(&mut core, &mut library_runtime);
         drain_online_network_events(&mut core, &mut *audio, &mut online_runtime);
@@ -1738,8 +1762,14 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             continue;
         }
 
-        let event = event::read()?;
-        if let Event::Paste(text) = &event
+        // Drain all ready events in one pass so that bursts (e.g. terminal key
+        // auto-repeat while holding A/D) fold into the per-iteration accumulators
+        // instead of each event triggering a full housekeeping + redraw cycle.
+        let mut event_drain_first = true;
+        while event_drain_first || event::poll(Duration::ZERO)? {
+            event_drain_first = false;
+            let event = event::read()?;
+            if let Event::Paste(text) = &event
             && core.header_section == HeaderSection::Online
             && online_runtime.password_prompt_active
         {
@@ -1822,7 +1852,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                     && ch.eq_ignore_ascii_case(&'c'))
                     || ch == '\u{3}' =>
             {
-                break Ok(());
+                break 'app_loop Ok(());
             }
             KeyCode::Char(_)
                 if key_event_matches_ctrl_char(&key, 's')
@@ -1908,13 +1938,8 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                     core.dirty = true;
                     continue;
                 }
-                if let Err(err) = scrub_current_track(&mut *audio, core.scrub_seconds, false) {
-                    core.status = format!("Scrub failed: {err}");
-                } else {
-                    core.status = format!("Scrubbed back {}", scrub_label(core.scrub_seconds));
-                    publish_current_playback_state(&core, &*audio, &online_runtime);
-                }
-                core.dirty = true;
+                pending_scrub_delta =
+                    pending_scrub_delta.saturating_sub(i64::from(core.scrub_seconds));
             }
             KeyCode::Char('d') | KeyCode::Char('D') => {
                 if local_playback_locked_by_host_only(&core) {
@@ -1922,13 +1947,8 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                     core.dirty = true;
                     continue;
                 }
-                if let Err(err) = scrub_current_track(&mut *audio, core.scrub_seconds, true) {
-                    core.status = format!("Scrub failed: {err}");
-                } else {
-                    core.status = format!("Scrubbed forward {}", scrub_label(core.scrub_seconds));
-                    publish_current_playback_state(&core, &*audio, &online_runtime);
-                }
-                core.dirty = true;
+                pending_scrub_delta =
+                    pending_scrub_delta.saturating_add(i64::from(core.scrub_seconds));
             }
             KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'m') => {
                 if local_playback_locked_by_host_only(&core) {
@@ -1998,6 +2018,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 core.dirty = true;
             }
             _ => {}
+        }
         }
     };
 
@@ -4280,15 +4301,19 @@ fn should_trigger_crossfade_advance(audio: &dyn AudioEngine) -> bool {
     remaining <= Duration::from_secs(u64::from(crossfade_seconds))
 }
 
-fn scrub_current_track(audio: &mut dyn AudioEngine, seconds: u16, forward: bool) -> Result<()> {
+fn scrub_current_track_by_delta(audio: &mut dyn AudioEngine, delta_seconds: i64) -> Result<()> {
+    if delta_seconds == 0 {
+        return Ok(());
+    }
+
     let position = audio
         .position()
         .ok_or_else(|| anyhow::anyhow!("current backend does not expose position"))?;
 
-    let mut target = if forward {
-        position.saturating_add(Duration::from_secs(u64::from(seconds)))
+    let mut target = if delta_seconds >= 0 {
+        position.saturating_add(Duration::from_secs(delta_seconds as u64))
     } else {
-        position.saturating_sub(Duration::from_secs(u64::from(seconds)))
+        position.saturating_sub(Duration::from_secs(delta_seconds.unsigned_abs()))
     };
 
     if let Some(duration) = audio.duration() {
@@ -8175,31 +8200,68 @@ mod tests {
     }
 
     #[test]
-    fn scrub_current_track_clamps_within_bounds() {
+    fn scrub_by_delta_positive_seeks_forward_and_clamps_to_duration() {
         let mut audio = TestAudioEngine::new();
         audio.current = Some(PathBuf::from("a.mp3"));
         audio.duration = Some(Duration::from_secs(100));
-        audio.position = Some(Duration::from_secs(98));
+        audio.position = Some(Duration::from_secs(90));
 
-        scrub_current_track(&mut audio, 10, true).expect("scrub forward");
+        scrub_current_track_by_delta(&mut audio, 25).expect("scrub forward");
         assert_eq!(audio.position, Some(Duration::from_secs(100)));
+    }
 
-        scrub_current_track(&mut audio, 120, false).expect("scrub backward");
+    #[test]
+    fn scrub_by_delta_negative_seeks_backward_and_clamps_to_zero() {
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("a.mp3"));
+        audio.duration = Some(Duration::from_secs(100));
+        audio.position = Some(Duration::from_secs(5));
+
+        scrub_current_track_by_delta(&mut audio, -60).expect("scrub backward");
         assert_eq!(audio.position, Some(Duration::from_secs(0)));
     }
 
     #[test]
-    fn scrub_current_track_clears_queued_crossfade() {
+    fn scrub_by_delta_zero_is_noop() {
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("a.mp3"));
+        audio.duration = Some(Duration::from_secs(100));
+        audio.position = Some(Duration::from_secs(40));
+        audio.queued = Some(PathBuf::from("b.mp3"));
+
+        scrub_current_track_by_delta(&mut audio, 0).expect("noop scrub");
+        assert_eq!(audio.position, Some(Duration::from_secs(40)));
+        assert_eq!(
+            audio.crossfade_queued_track(),
+            Some(PathBuf::from("b.mp3")).as_deref()
+        );
+    }
+
+    #[test]
+    fn scrub_by_delta_clears_queued_crossfade() {
         let mut audio = TestAudioEngine::new();
         audio.current = Some(PathBuf::from("a.mp3"));
         audio.duration = Some(Duration::from_secs(120));
         audio.position = Some(Duration::from_secs(50));
         audio.queued = Some(PathBuf::from("b.mp3"));
 
-        scrub_current_track(&mut audio, 15, true).expect("scrub");
-
+        scrub_current_track_by_delta(&mut audio, 15).expect("scrub");
         assert_eq!(audio.position, Some(Duration::from_secs(65)));
         assert_eq!(audio.crossfade_queued_track(), None);
+    }
+
+    #[test]
+    fn coalesced_scrub_events_sum_net_delta() {
+        let cases: &[(&[i64], i64)] = &[
+            (&[10, 10, -10, 10], 20),
+            (&[-10, -10, -10], -30),
+            (&[10, -10], 0),
+            (&[], 0),
+        ];
+        for (inputs, expected) in cases {
+            let net: i64 = inputs.iter().sum();
+            assert_eq!(net, *expected, "inputs={inputs:?}");
+        }
     }
 
     #[test]
