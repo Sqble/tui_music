@@ -47,6 +47,7 @@ pub struct JoinPromptModalView {
     pub paste_selected: bool,
     pub room_name_mode: bool,
     pub nickname_mode: bool,
+    pub connect_mode: bool,
 }
 
 pub struct OnlineRoomDirectoryModalView {
@@ -527,6 +528,7 @@ pub fn draw(
                     colors,
                     core,
                     overlays.room_code_revealed,
+                    overlays.join_prompt_modal,
                     overlays.room_directory_view,
                 );
             }
@@ -584,7 +586,9 @@ pub fn draw(
     if let Some(panel) = action_panel {
         draw_action_panel(frame, panel, &colors);
     }
-    if let Some(join_prompt_modal) = overlays.join_prompt_modal {
+    if let Some(join_prompt_modal) = overlays.join_prompt_modal
+        && !join_prompt_modal.connect_mode
+    {
         draw_join_prompt(frame, join_prompt_modal, &colors);
     }
     if let Some(password_prompt) = overlays.online_password_prompt {
@@ -704,6 +708,136 @@ fn draw_room_directory_inline(
     frame.render_widget(right, horizontal[1]);
 }
 
+fn join_prompt_title(modal: &JoinPromptModalView) -> &'static str {
+    if modal.nickname_mode {
+        "Set Online Nickname"
+    } else if modal.room_name_mode {
+        "Host Online Room"
+    } else {
+        "Connect to Homeserver"
+    }
+}
+
+fn join_prompt_input_label(modal: &JoinPromptModalView) -> &'static str {
+    if modal.nickname_mode {
+        "Nickname"
+    } else if modal.room_name_mode {
+        "Room name"
+    } else {
+        "Server / Link"
+    }
+}
+
+fn join_prompt_help_line(modal: &JoinPromptModalView) -> &'static str {
+    if modal.nickname_mode {
+        "Pick a nickname for online rooms. Enter saves and continues."
+    } else if modal.room_name_mode {
+        "Type room name. Enter continues. Tab/arrow selects button. Ctrl+V pastes."
+    } else {
+        "Type homeserver address or room link. Server-only opens room directory; link with /room/<name> auto-joins."
+    }
+}
+
+fn draw_join_prompt_inline(
+    frame: &mut Frame,
+    horizontal: &[Rect],
+    colors: ThemePalette,
+    modal: &JoinPromptModalView,
+) {
+    let left_lines = vec![
+        Line::from(Span::styled(
+            join_prompt_title(modal),
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                join_prompt_input_label(modal),
+                Style::default().fg(colors.muted),
+            ),
+            Span::styled(": ", Style::default().fg(colors.muted)),
+            Span::styled(modal.invite_code.as_str(), Style::default().fg(colors.text)),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                "[ Continue ]",
+                if modal.paste_selected {
+                    Style::default().fg(colors.muted)
+                } else {
+                    Style::default()
+                        .fg(colors.text)
+                        .bg(colors.selected_bg)
+                        .add_modifier(Modifier::BOLD)
+                },
+            ),
+            Span::raw("   "),
+            Span::styled(
+                "[ Paste clipboard ]",
+                if modal.paste_selected {
+                    Style::default()
+                        .fg(colors.text)
+                        .bg(colors.selected_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(colors.muted)
+                },
+            ),
+        ]),
+    ];
+    let left = Paragraph::new(left_lines)
+        .block(panel_block(
+            "Online",
+            colors.content_panel_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(left, horizontal[0]);
+
+    let right_lines = vec![
+        Line::from(Span::styled(
+            "Help",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            join_prompt_help_line(modal),
+            Style::default().fg(colors.accent),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter - Continue",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            "Left/Right/Up/Down - Select button",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            "Ctrl+V - Paste clipboard",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            "Tab - Switch tabs",
+            Style::default().fg(colors.muted),
+        )),
+    ];
+    let right = Paragraph::new(right_lines)
+        .block(panel_block(
+            "Info",
+            colors.content_panel_alt_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(right, horizontal[1]);
+}
+
 fn room_directory_line(room_line: &str, base_style: Style, colors: &ThemePalette) -> Line<'static> {
     if let Some(rest) = room_line.strip_prefix("[lock]") {
         return Line::from(vec![
@@ -729,29 +863,13 @@ fn room_directory_line(room_line: &str, base_style: Style, colors: &ThemePalette
 fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &ThemePalette) {
     let popup = centered_rect(frame.area(), 68, 34);
     frame.render_widget(Clear, popup);
-    let title = if modal.nickname_mode {
-        "Set Online Nickname"
-    } else if modal.room_name_mode {
-        "Host Online Room"
-    } else {
-        "Connect to Homeserver"
-    };
-    let input_label = if modal.nickname_mode {
-        "Nickname"
-    } else if modal.room_name_mode {
-        "Room name"
-    } else {
-        "Server / Link"
-    };
-    let help_line = if modal.nickname_mode {
-        "Pick a nickname for online rooms. Enter saves and continues."
-    } else if modal.room_name_mode {
-        "Type room name. Enter continues. Tab/arrow selects button. Ctrl+V pastes."
-    } else {
-        "Type homeserver address or room link. Server-only opens room directory; link with /room/<name> auto-joins."
-    };
     frame.render_widget(
-        panel_block(title, colors.popup_bg, colors.text, colors.border),
+        panel_block(
+            join_prompt_title(modal),
+            colors.popup_bg,
+            colors.text,
+            colors.border,
+        ),
         popup,
     );
 
@@ -761,7 +879,10 @@ fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &The
     });
     let lines = vec![
         Line::from(vec![
-            Span::styled(input_label, Style::default().fg(colors.muted)),
+            Span::styled(
+                join_prompt_input_label(modal),
+                Style::default().fg(colors.muted),
+            ),
             Span::styled(": ", Style::default().fg(colors.muted)),
             Span::styled(modal.invite_code.as_str(), Style::default().fg(colors.text)),
         ]),
@@ -793,7 +914,7 @@ fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &The
         ]),
         Line::from(""),
         Line::from(Span::styled(
-            help_line,
+            join_prompt_help_line(modal),
             Style::default()
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
@@ -995,6 +1116,7 @@ fn draw_online_section(
     colors: ThemePalette,
     core: &TuneCore,
     room_code_revealed: bool,
+    join_prompt: Option<&JoinPromptModalView>,
     room_directory: Option<&OnlineRoomDirectoryModalView>,
 ) {
     let horizontal = Layout::default()
@@ -1010,14 +1132,10 @@ fn draw_online_section(
     let Some(session) = core.online.session.as_ref() else {
         if let Some(dir) = room_directory {
             draw_room_directory_inline(frame, &horizontal, colors, dir);
+        } else if let Some(prompt) = join_prompt.filter(|prompt| prompt.connect_mode) {
+            draw_join_prompt_inline(frame, &horizontal, colors, prompt);
         } else {
-            draw_placeholder_section(
-                frame,
-                body,
-                colors,
-                "Online",
-                "No room connected. Use Tab to switch to this tab.",
-            );
+            draw_placeholder_section(frame, body, colors, "Online", "No room connected.");
         }
         return;
     };
