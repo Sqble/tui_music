@@ -26,7 +26,11 @@ use crossterm::terminal::{
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
 use std::fs;
+#[cfg(target_os = "linux")]
+use std::io::IsTerminal;
 use std::io::{Write, stdout};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
@@ -62,6 +66,67 @@ const HOST_ONLY_LISTENER_LOCKED_STATUS: &str = "Room is host-only. Listener play
 pub struct AppStartupOptions {
     pub default_home_server_addr: Option<String>,
     pub home_server_connected: bool,
+}
+
+#[cfg(target_os = "linux")]
+struct TuiStderrGuard {
+    saved_fd: i32,
+}
+
+#[cfg(target_os = "linux")]
+impl TuiStderrGuard {
+    fn new() -> Self {
+        if !std::io::stderr().is_terminal() {
+            return Self { saved_fd: -1 };
+        }
+
+        let saved_fd = unsafe { libc::dup(libc::STDERR_FILENO) };
+        if saved_fd < 0 {
+            return Self { saved_fd: -1 };
+        }
+
+        let devnull = CString::new("/dev/null")
+            .ok()
+            .map(|path| unsafe { libc::open(path.as_ptr(), libc::O_WRONLY) })
+            .unwrap_or(-1);
+        if devnull < 0 {
+            unsafe {
+                libc::close(saved_fd);
+            }
+            return Self { saved_fd: -1 };
+        }
+
+        unsafe {
+            libc::dup2(devnull, libc::STDERR_FILENO);
+            libc::close(devnull);
+        }
+
+        Self { saved_fd }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for TuiStderrGuard {
+    fn drop(&mut self) {
+        if self.saved_fd < 0 {
+            return;
+        }
+
+        unsafe {
+            libc::dup2(self.saved_fd, libc::STDERR_FILENO);
+            libc::close(self.saved_fd);
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+struct TuiStderrGuard;
+
+#[cfg(not(target_os = "linux"))]
+impl TuiStderrGuard {
+    fn new() -> Self {
+        Self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1486,6 +1551,10 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
     apply_audio_preferences_from_core(&core, &mut *audio);
     apply_saved_volume(&mut *audio, saved_volume);
     apply_saved_audio_output(&mut core, &mut *audio, preferred_output);
+
+    // Linux audio backends can emit ALSA underrun diagnostics directly to stderr,
+    // which splashes over the alternate-screen UI until the next redraw.
+    let _stderr_guard = TuiStderrGuard::new();
 
     enable_raw_mode()?;
     let mut out = stdout();

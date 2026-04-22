@@ -33,6 +33,7 @@ Full documentation available at **https://tunetui.online**
 - Audio quality inspector action with static spectrograph and bitrate-based rating (Unavailable/Red/Yellow/Green/Gold*)
 - Audio driver recovery and output speaker selection
 - Selected output speaker persists across launches with fallback to default
+- Linux TUI sessions suppress backend stderr splash and bias output buffering toward underrun-resistant playback
 - Volume level persists across launches
 - Playback settings: loudness normalization, crossfade, scrub length, stats tracking, top songs rows, missing-cover fallback template, themes
 - Online tab: TCP host/client room sync, room-code handshake, collaborative/host-only modes, shared queue, password-encrypted invite codes
@@ -112,6 +113,7 @@ Or run the built binary:
 
 On SSH sessions, TuneTUI auto-sets `TERM=xterm-256color` when `TERM` is missing/`dumb`.
 If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI auto-falls back to `$HOME/.config/tunetui`.
+On Linux, TuneTUI uses a larger output buffer when the device exposes a safe range and suppresses runtime backend stderr while the TUI is active so ALSA underrun recovery messages do not draw over the screen.
 
 ## Hosting Your Own Server
 

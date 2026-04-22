@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
 use rodio::Source;
+use rodio::cpal::Device;
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
+#[cfg(target_os = "linux")]
+use rodio::cpal::{BufferSize, SupportedBufferSize};
 use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink};
 #[cfg(unix)]
 use std::ffi::CString;
@@ -11,6 +14,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 const MAX_VOLUME: f32 = 2.5;
+#[cfg(target_os = "linux")]
+const LINUX_PREFERRED_BUFFER_FRAMES: u32 = 2_048;
 
 pub trait AudioEngine {
     fn play(&mut self, path: &Path) -> Result<()>;
@@ -180,6 +185,35 @@ impl WasapiAudioEngine {
         u32::from_le_bytes(data_size) == u32::MAX
     }
 
+    #[cfg(target_os = "linux")]
+    fn preferred_buffer_size_for_linux(supported: &SupportedBufferSize) -> Option<BufferSize> {
+        match *supported {
+            SupportedBufferSize::Range { min, max } => Some(BufferSize::Fixed(
+                LINUX_PREFERRED_BUFFER_FRAMES.clamp(min, max),
+            )),
+            SupportedBufferSize::Unknown => None,
+        }
+    }
+
+    fn output_stream_builder_for_device(device: Device) -> Result<OutputStreamBuilder> {
+        let builder = OutputStreamBuilder::from_device(device.clone())
+            .context("failed to open selected output device")?;
+
+        #[cfg(target_os = "linux")]
+        {
+            let default_config = device
+                .default_output_config()
+                .context("failed to read output device config")?;
+            if let Some(buffer_size) =
+                Self::preferred_buffer_size_for_linux(default_config.buffer_size())
+            {
+                return Ok(builder.with_buffer_size(buffer_size));
+            }
+        }
+
+        Ok(builder)
+    }
+
     fn open_output_stream(output: Option<&str>) -> Result<(OutputStream, Sink)> {
         let mut stream = with_silenced_stderr(|| {
             let host = rodio::cpal::default_host();
@@ -189,20 +223,20 @@ impl WasapiAudioEngine {
                     .context("failed to enumerate output devices")?
                     .find(|candidate| candidate.name().ok().as_deref() == Some(requested))
                     .with_context(|| format!("audio output device not found: {requested}"))?;
-                OutputStreamBuilder::from_device(device)
-                    .context("failed to open selected output device")?
+                Self::output_stream_builder_for_device(device)?
                     .with_error_callback(|_| {})
                     .open_stream_or_fallback()
                     .context("failed to start selected output stream")
             } else {
-                match OutputStreamBuilder::from_default_device()
-                    .context("failed to open default system output stream")
-                    .and_then(|builder| {
-                        builder
-                            .with_error_callback(|_| {})
-                            .open_stream_or_fallback()
-                            .context("failed to start default output stream")
-                    }) {
+                let default_device = host
+                    .default_output_device()
+                    .context("failed to open default system output stream")?;
+                match Self::output_stream_builder_for_device(default_device).and_then(|builder| {
+                    builder
+                        .with_error_callback(|_| {})
+                        .open_stream_or_fallback()
+                        .context("failed to start default output stream")
+                }) {
                     Ok(stream) => Ok(stream),
                     Err(default_err) => {
                         let mut candidates: Vec<String> = host
@@ -238,14 +272,14 @@ impl WasapiAudioEngine {
                                     Some(device) => device,
                                     None => continue,
                                 };
-                            let opened = OutputStreamBuilder::from_device(device)
-                                .context("failed to open fallback output device")
-                                .and_then(|builder| {
+                            let opened = Self::output_stream_builder_for_device(device).and_then(
+                                |builder| {
                                     builder
                                         .with_error_callback(|_| {})
                                         .open_stream_or_fallback()
                                         .context("failed to start fallback output stream")
-                                });
+                                },
+                            );
                             if let Ok(stream) = opened {
                                 started = Some(stream);
                                 break;
@@ -734,7 +768,11 @@ impl AudioEngine for NullAudioEngine {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "linux")]
+    use super::WasapiAudioEngine;
     use super::{AudioEngine, NullAudioEngine};
+    #[cfg(target_os = "linux")]
+    use rodio::cpal::{BufferSize, SupportedBufferSize};
     use std::env;
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -886,5 +924,38 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_buffer_size_prefers_stability_target_when_supported() {
+        let buffer_size =
+            WasapiAudioEngine::preferred_buffer_size_for_linux(&SupportedBufferSize::Range {
+                min: 512,
+                max: 4_096,
+            });
+
+        assert_eq!(buffer_size, Some(BufferSize::Fixed(2_048)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_buffer_size_clamps_to_supported_range() {
+        let buffer_size =
+            WasapiAudioEngine::preferred_buffer_size_for_linux(&SupportedBufferSize::Range {
+                min: 4_096,
+                max: 8_192,
+            });
+
+        assert_eq!(buffer_size, Some(BufferSize::Fixed(4_096)));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_buffer_size_skips_unknown_ranges() {
+        assert_eq!(
+            WasapiAudioEngine::preferred_buffer_size_for_linux(&SupportedBufferSize::Unknown),
+            None
+        );
     }
 }
