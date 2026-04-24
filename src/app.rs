@@ -2646,7 +2646,11 @@ fn handle_online_inline_input(
                 online_runtime.join_directory_search.clear();
                 online_runtime.join_directory_selected = 0;
                 online_runtime.join_directory_rooms.clear();
-                core.status = String::from("Join cancelled");
+                online_runtime.join_prompt_active = true;
+                online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                online_runtime.join_code_input = online_runtime.pending_join_server_addr.clone();
+                core.status = String::from("Connect to homeserver");
                 core.dirty = true;
                 return true;
             }
@@ -2751,17 +2755,36 @@ fn handle_online_inline_input(
 
     if online_runtime.join_prompt_active {
         if key.code == KeyCode::Tab
-            && matches!(online_runtime.join_prompt_mode, JoinPromptMode::Connect)
+            && matches!(
+                online_runtime.join_prompt_mode,
+                JoinPromptMode::Connect | JoinPromptMode::HostRoomName
+            )
         {
             return false;
         }
         match key.code {
             KeyCode::Esc => {
+                if matches!(online_runtime.join_prompt_mode, JoinPromptMode::Connect) {
+                    core.status = String::from("Enter a homeserver or press Tab to switch tabs");
+                    core.dirty = true;
+                    return true;
+                }
+                let was_host_room_name = matches!(
+                    online_runtime.join_prompt_mode,
+                    JoinPromptMode::HostRoomName
+                );
                 online_runtime.join_prompt_active = false;
                 online_runtime.join_code_input.clear();
                 online_runtime.join_prompt_button = JoinPromptButton::Join;
                 online_runtime.join_prompt_mode = JoinPromptMode::Connect;
-                core.status = String::from("Join cancelled");
+                if was_host_room_name && online_runtime.home_server_connected {
+                    online_runtime.pending_join_room_name = None;
+                    online_runtime.join_directory_active = true;
+                    online_runtime.join_directory_selected = 0;
+                    core.status = String::from("Room creation cancelled");
+                } else {
+                    core.status = String::from("Join cancelled");
+                }
                 core.dirty = true;
                 return true;
             }
@@ -2944,6 +2967,11 @@ fn handle_online_inline_input(
             true
         }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'l') => {
+            if core.online.session.is_none() {
+                core.status = String::from("No room connected");
+                core.dirty = true;
+                return true;
+            }
             online_runtime.shutdown();
             online_runtime.last_transport_seq = 0;
             core.online_leave_room();
@@ -3024,13 +3052,35 @@ fn handle_online_password_prompt_input(
     if key_event_matches_ctrl_char(&key, 'c') {
         return false;
     }
+    if key.code == KeyCode::Tab {
+        return false;
+    }
 
     match key.code {
         KeyCode::Esc => {
             online_runtime.password_prompt_active = false;
             online_runtime.password_input.clear();
             online_runtime.pending_join_invite_code.clear();
-            core.status = String::from("Password entry cancelled");
+            if matches!(
+                online_runtime.password_prompt_mode,
+                OnlinePasswordPromptMode::Host
+            ) {
+                online_runtime.pending_join_room_name = None;
+                if online_runtime.home_server_connected {
+                    online_runtime.join_directory_active = true;
+                    online_runtime.join_directory_selected = 0;
+                    core.status = String::from("Room creation cancelled");
+                } else {
+                    core.status = String::from("Room creation cancelled");
+                }
+            } else {
+                online_runtime.pending_join_room_name = None;
+                if online_runtime.home_server_connected {
+                    online_runtime.join_directory_active = true;
+                    online_runtime.join_directory_selected = 0;
+                }
+                core.status = String::from("Password entry cancelled");
+            }
             core.dirty = true;
             true
         }
@@ -8964,6 +9014,138 @@ mod tests {
     }
 
     #[test]
+    fn online_connect_prompt_escape_keeps_prompt_open() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.join_prompt_active = true;
+        runtime.join_prompt_mode = JoinPromptMode::Connect;
+        runtime.join_code_input = String::from("tunetui.online");
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+
+        assert!(runtime.join_prompt_active);
+        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
+        assert_eq!(runtime.join_code_input, "tunetui.online");
+        assert!(core.online.session.is_none());
+    }
+
+    #[test]
+    fn online_room_directory_escape_returns_to_connect_prompt() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.join_directory_active = true;
+        runtime.join_directory_search = String::from("room");
+        runtime.join_directory_selected = 1;
+        runtime.pending_join_server_addr = String::from("tunetui.online");
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+
+        assert!(!runtime.join_directory_active);
+        assert!(runtime.join_prompt_active);
+        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
+        assert_eq!(runtime.join_code_input, "tunetui.online");
+        assert!(core.online.session.is_none());
+    }
+
+    #[test]
+    fn online_room_name_prompt_does_not_consume_tab() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.join_prompt_active = true;
+        runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
+
+        assert!(!handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+    }
+
+    #[test]
+    fn online_room_name_prompt_escape_returns_to_room_directory() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.home_server_connected = true;
+        runtime.join_prompt_active = true;
+        runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
+        runtime.join_code_input = String::from("test-room");
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+
+        assert!(!runtime.join_prompt_active);
+        assert!(runtime.join_directory_active);
+        assert!(runtime.join_code_input.is_empty());
+        assert!(core.online.session.is_none());
+    }
+
+    #[test]
+    fn online_password_prompt_does_not_consume_tab() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut runtime = test_online_runtime();
+        runtime.password_prompt_active = true;
+        runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
+
+        assert!(!handle_online_password_prompt_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+    }
+
+    #[test]
+    fn host_password_prompt_escape_returns_to_room_directory() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut runtime = test_online_runtime();
+        runtime.home_server_connected = true;
+        runtime.pending_join_server_addr = String::from("127.0.0.1:7878");
+        runtime.pending_join_room_name = Some(String::from("test-room"));
+        runtime.password_prompt_active = true;
+        runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
+        runtime.password_input = String::from("secret");
+
+        assert!(handle_online_password_prompt_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+
+        assert!(!runtime.password_prompt_active);
+        assert!(runtime.join_directory_active);
+        assert!(runtime.pending_join_room_name.is_none());
+        assert!(core.online.session.is_none());
+    }
+
+    #[test]
     fn failed_room_link_keeps_connect_prompt_open() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
@@ -9045,6 +9227,27 @@ mod tests {
             &mut runtime,
         ));
         assert!(core.online.session.is_none());
+    }
+
+    #[test]
+    fn online_tab_l_without_room_does_not_open_empty_directory() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.home_server_connected = true;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+
+        assert!(core.online.session.is_none());
+        assert!(!runtime.join_directory_active);
+        assert_eq!(core.status, "No room connected");
     }
 
     #[test]

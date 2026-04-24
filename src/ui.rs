@@ -522,15 +522,7 @@ pub fn draw(
                 draw_lyrics_section(frame, &body, colors, core, audio);
             }
             HeaderSection::Online => {
-                draw_online_section(
-                    frame,
-                    &body,
-                    colors,
-                    core,
-                    overlays.room_code_revealed,
-                    overlays.join_prompt_modal,
-                    overlays.room_directory_view,
-                );
+                draw_online_section(frame, &body, colors, core, &overlays);
             }
         }
     }
@@ -588,11 +580,9 @@ pub fn draw(
     }
     if let Some(join_prompt_modal) = overlays.join_prompt_modal
         && !join_prompt_modal.connect_mode
+        && !join_prompt_modal.room_name_mode
     {
         draw_join_prompt(frame, join_prompt_modal, &colors);
-    }
-    if let Some(password_prompt) = overlays.online_password_prompt {
-        draw_online_password_prompt(frame, password_prompt, &colors);
     }
     if let Some(host_invite_modal) = overlays.host_invite_modal {
         draw_host_invite_modal(frame, host_invite_modal, &colors);
@@ -615,6 +605,10 @@ fn draw_room_directory_inline(
         Line::from(Span::styled(
             format!("Server: {}", dir.server_addr),
             Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            "Esc - Leave home server",
+            Style::default().fg(colors.accent),
         )),
         Line::from(Span::styled(
             format!("Search: {}", dir.search),
@@ -688,7 +682,7 @@ fn draw_room_directory_inline(
             Style::default().fg(colors.muted),
         )),
         Line::from(Span::styled(
-            "Esc - Close directory",
+            "Esc - Leave home server",
             Style::default().fg(colors.muted),
         )),
         Line::from(Span::styled(
@@ -700,6 +694,98 @@ fn draw_room_directory_inline(
     let right = Paragraph::new(right_lines)
         .block(panel_block(
             "Help",
+            colors.content_panel_alt_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(right, horizontal[1]);
+}
+
+fn draw_online_password_prompt_inline(
+    frame: &mut Frame,
+    horizontal: &[Rect],
+    colors: ThemePalette,
+    prompt: &OnlinePasswordPromptView,
+) {
+    let masked = if prompt.masked_input.is_empty() {
+        String::from("(empty)")
+    } else {
+        prompt.masked_input.clone()
+    };
+    let left_lines = vec![
+        Line::from(Span::styled(
+            prompt.title.as_str(),
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        if prompt.title == "Set Room Password" {
+            Line::from(Span::styled(
+                "Esc - Back to room directory",
+                Style::default().fg(colors.accent),
+            ))
+        } else {
+            Line::from("")
+        },
+        Line::from(""),
+        Line::from(Span::styled(
+            prompt.subtitle.as_str(),
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("Password: ", Style::default().fg(colors.muted)),
+            Span::styled(masked, Style::default().fg(colors.accent)),
+        ]),
+    ];
+    let left = Paragraph::new(left_lines)
+        .block(panel_block(
+            "Online",
+            colors.content_panel_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
+    frame.render_widget(left, horizontal[0]);
+
+    let right_lines = vec![
+        Line::from(Span::styled(
+            "Help",
+            Style::default()
+                .fg(colors.text)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            if prompt.title == "Set Room Password" {
+                "Enter continues. Esc goes back to room directory."
+            } else {
+                "Enter continues. Esc cancels password entry."
+            },
+            Style::default().fg(colors.accent),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Enter - Continue",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            if prompt.title == "Set Room Password" {
+                "Esc - Back to room directory"
+            } else {
+                "Esc - Cancel"
+            },
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            "Tab - Switch tabs",
+            Style::default().fg(colors.muted),
+        )),
+    ];
+    let right = Paragraph::new(right_lines)
+        .block(panel_block(
+            "Info",
             colors.content_panel_alt_bg,
             colors.text,
             colors.border,
@@ -732,7 +818,7 @@ fn join_prompt_help_line(modal: &JoinPromptModalView) -> &'static str {
     if modal.nickname_mode {
         "Pick a nickname for online rooms. Enter saves and continues."
     } else if modal.room_name_mode {
-        "Type room name. Enter continues. Tab/arrow selects button. Ctrl+V pastes."
+        "Type room name. Enter continues. Esc goes back to room directory."
     } else {
         "Type homeserver address or room link. Server-only opens room directory; link with /room/<name> auto-joins."
     }
@@ -751,6 +837,14 @@ fn draw_join_prompt_inline(
                 .fg(colors.text)
                 .add_modifier(Modifier::BOLD),
         )),
+        if modal.room_name_mode {
+            Line::from(Span::styled(
+                "Esc - Back to room directory",
+                Style::default().fg(colors.accent),
+            ))
+        } else {
+            Line::from("")
+        },
         Line::from(""),
         Line::from(vec![
             Span::styled(
@@ -923,47 +1017,6 @@ fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &The
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
-fn draw_online_password_prompt(
-    frame: &mut Frame,
-    prompt: &OnlinePasswordPromptView,
-    colors: &ThemePalette,
-) {
-    let popup = centered_rect(frame.area(), 58, 34);
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        panel_block(&prompt.title, colors.popup_bg, colors.text, colors.border),
-        popup,
-    );
-    let inner = popup.inner(Margin {
-        vertical: 1,
-        horizontal: 2,
-    });
-    let masked = if prompt.masked_input.is_empty() {
-        String::from("(empty)")
-    } else {
-        prompt.masked_input.clone()
-    };
-    let lines = vec![
-        Line::from(Span::styled(
-            prompt.subtitle.as_str(),
-            Style::default().fg(colors.muted),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(masked, Style::default().fg(colors.accent))),
-        Line::from(""),
-        Line::from(Span::styled(
-            "Press Enter to continue, Esc to cancel.",
-            Style::default().fg(colors.muted),
-        )),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: true }),
-        inner,
-    );
-}
-
 fn draw_host_invite_modal(frame: &mut Frame, modal: &HostInviteModalView, colors: &ThemePalette) {
     let popup = centered_rect(frame.area(), 54, 36);
     frame.render_widget(Clear, popup);
@@ -1115,9 +1168,7 @@ fn draw_online_section(
     body: &[Rect],
     colors: ThemePalette,
     core: &TuneCore,
-    room_code_revealed: bool,
-    join_prompt: Option<&JoinPromptModalView>,
-    room_directory: Option<&OnlineRoomDirectoryModalView>,
+    overlays: &OverlayViews<'_>,
 ) {
     let horizontal = Layout::default()
         .direction(Direction::Horizontal)
@@ -1130,9 +1181,14 @@ fn draw_online_section(
         });
 
     let Some(session) = core.online.session.as_ref() else {
-        if let Some(dir) = room_directory {
+        if let Some(prompt) = overlays.online_password_prompt {
+            draw_online_password_prompt_inline(frame, &horizontal, colors, prompt);
+        } else if let Some(dir) = overlays.room_directory_view {
             draw_room_directory_inline(frame, &horizontal, colors, dir);
-        } else if let Some(prompt) = join_prompt.filter(|prompt| prompt.connect_mode) {
+        } else if let Some(prompt) = overlays
+            .join_prompt_modal
+            .filter(|prompt| prompt.connect_mode || prompt.room_name_mode)
+        {
             draw_join_prompt_inline(frame, &horizontal, colors, prompt);
         } else {
             draw_placeholder_section(frame, body, colors, "Online", "No room connected.");
@@ -1140,7 +1196,7 @@ fn draw_online_section(
         return;
     };
 
-    let code_display = if room_code_revealed {
+    let code_display = if overlays.room_code_revealed {
         session.room_code.clone()
     } else {
         String::from("[hidden]")

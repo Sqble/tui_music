@@ -89,7 +89,7 @@ A public server is available at **tunetui.online** — anyone can use it to host
 3. Enter server (`tunetui.online`) or room link in the embedded Online panel
 4. Enter invite code (and password if needed)
 
-If the homeserver needs manual entry, that prompt stays embedded in the Online tab so `Tab` still switches tabs normally.
+Homeserver, room creation, and password prompts stay embedded in the Online tab so `Tab` still switches tabs normally.
 
 **Online quick control:**
 - In Online tab, `Ctrl+n` starts shared queue playback immediately (or jumps to the next shared item)
