@@ -480,7 +480,7 @@ impl StatsStore {
         rows.sort_by(|a, b| compare_rows(a, b, query.sort));
 
         let mut recent: Vec<ListenEvent> = recent.into_values().collect();
-        recent.sort_by(|a, b| b.started_at_epoch_seconds.cmp(&a.started_at_epoch_seconds));
+        recent.sort_by_key(|event| std::cmp::Reverse(event.started_at_epoch_seconds));
         let trend = build_trend_series(query.range, query.sort, now_epoch_seconds, &recent);
 
         StatsSnapshot {

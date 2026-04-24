@@ -1652,7 +1652,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 core.status = format!("Scrub failed: {err}");
             } else {
                 let abs_seconds = delta.unsigned_abs();
-                let label = if abs_seconds % 60 == 0 && abs_seconds >= 60 {
+                let label = if abs_seconds.is_multiple_of(60) && abs_seconds >= 60 {
                     format!("{}m", abs_seconds / 60)
                 } else {
                     format!("{abs_seconds}s")
@@ -1770,255 +1770,256 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             event_drain_first = false;
             let event = event::read()?;
             if let Event::Paste(text) = &event
-            && core.header_section == HeaderSection::Online
-            && online_runtime.password_prompt_active
-        {
-            append_password_input(&mut online_runtime, text);
-            core.status = format!(
-                "Password length: {}",
-                online_runtime.password_input.chars().count()
-            );
-            core.dirty = true;
-            continue;
-        }
-        if let Event::Paste(text) = &event
-            && core.header_section == HeaderSection::Online
-            && online_runtime.join_prompt_active
-        {
-            append_invite_input(&mut online_runtime, text);
-            online_runtime.join_prompt_button = JoinPromptButton::Join;
-            core.status = join_prompt_input_status(
-                online_runtime.join_prompt_mode,
-                &online_runtime.join_code_input,
-            );
-            core.dirty = true;
-            continue;
-        }
-        if let Event::Mouse(mouse) = event {
-            handle_mouse_with_panel(
-                &mut core,
-                &mut *audio,
-                &mut action_panel,
-                &mut recent_root_actions,
-                &mut online_runtime,
-                mouse,
-                library_rect,
-            );
-            continue;
-        }
-
-        let Event::Key(key) = event else {
-            continue;
-        };
-
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-
-        if action_panel.is_open() {
-            handle_action_panel_input_with_recent(
-                &mut core,
-                &mut *audio,
-                &mut action_panel,
-                &mut recent_root_actions,
-                Some(&mut online_runtime),
-                Some(&mut library_runtime),
-                key.code,
-            );
-            continue;
-        }
-
-        if handle_online_password_prompt_input(&mut core, key, &mut online_runtime) {
-            continue;
-        }
-
-        if handle_host_invite_modal_input(&mut core, key, &mut online_runtime) {
-            continue;
-        }
-
-        if handle_online_inline_input(&mut core, &mut *audio, key, &mut online_runtime) {
-            continue;
-        }
-        if handle_stats_inline_input(&mut core, key) {
-            continue;
-        }
-        if handle_lyrics_inline_input(&mut core, &*audio, key) {
-            continue;
-        }
-
-        match key.code {
-            KeyCode::Char(ch)
-                if (key.modifiers.contains(KeyModifiers::CONTROL)
-                    && ch.eq_ignore_ascii_case(&'c'))
-                    || ch == '\u{3}' =>
+                && core.header_section == HeaderSection::Online
+                && online_runtime.password_prompt_active
             {
-                break 'app_loop Ok(());
+                append_password_input(&mut online_runtime, text);
+                core.status = format!(
+                    "Password length: {}",
+                    online_runtime.password_input.chars().count()
+                );
+                core.dirty = true;
+                continue;
             }
-            KeyCode::Char(_)
-                if key_event_matches_ctrl_char(&key, 's')
-                    && core.header_section == HeaderSection::Library =>
+            if let Event::Paste(text) = &event
+                && core.header_section == HeaderSection::Online
+                && online_runtime.join_prompt_active
             {
-                let selected_paths = core.selected_paths_for_online_queue_action();
-                let added = core.online_queue_paths(&selected_paths);
-                if let Some(network) = online_runtime.network.as_ref() {
-                    for item in added {
-                        network.send_local_action(NetworkLocalAction::QueueAdd(item));
-                    }
-                }
-            }
-            KeyCode::Down => core.select_next(),
-            KeyCode::Up => core.select_prev(),
-            KeyCode::Enter => {
-                if local_playback_locked_by_host_only(&core) {
-                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
-                    core.dirty = true;
-                    continue;
-                }
-                if play_selected_shared_queue_item(&mut core, &mut *audio, &mut online_runtime) {
-                    continue;
-                }
-                if let Some(path) = core.activate_selected() {
-                    if let Err(err) = audio.play(&path) {
-                        core.status = concise_audio_error(&err);
-                    } else {
-                        publish_current_playback_state(&core, &*audio, &online_runtime);
-                    }
-                }
-            }
-            KeyCode::Left | KeyCode::Backspace => core.navigate_back(),
-            KeyCode::Char(' ') => {
-                if local_playback_locked_by_host_only(&core) {
-                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
-                    core.dirty = true;
-                    continue;
-                }
-                if audio.is_paused() {
-                    audio.resume();
-                    core.status = String::from("Resumed");
-                } else {
-                    audio.pause();
-                    core.status = String::from("Paused");
-                }
-                publish_current_playback_state(&core, &*audio, &online_runtime);
+                append_invite_input(&mut online_runtime, text);
+                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                core.status = join_prompt_input_status(
+                    online_runtime.join_prompt_mode,
+                    &online_runtime.join_code_input,
+                );
                 core.dirty = true;
+                continue;
             }
-            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'n') => {
-                if local_playback_locked_by_host_only(&core) {
-                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
-                    core.dirty = true;
-                    continue;
+            if let Event::Mouse(mouse) = event {
+                handle_mouse_with_panel(
+                    &mut core,
+                    &mut *audio,
+                    &mut action_panel,
+                    &mut recent_root_actions,
+                    &mut online_runtime,
+                    mouse,
+                    library_rect,
+                );
+                continue;
+            }
+
+            let Event::Key(key) = event else {
+                continue;
+            };
+
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+
+            if action_panel.is_open() {
+                handle_action_panel_input_with_recent(
+                    &mut core,
+                    &mut *audio,
+                    &mut action_panel,
+                    &mut recent_root_actions,
+                    Some(&mut online_runtime),
+                    Some(&mut library_runtime),
+                    key.code,
+                );
+                continue;
+            }
+
+            if handle_online_password_prompt_input(&mut core, key, &mut online_runtime) {
+                continue;
+            }
+
+            if handle_host_invite_modal_input(&mut core, key, &mut online_runtime) {
+                continue;
+            }
+
+            if handle_online_inline_input(&mut core, &mut *audio, key, &mut online_runtime) {
+                continue;
+            }
+            if handle_stats_inline_input(&mut core, key) {
+                continue;
+            }
+            if handle_lyrics_inline_input(&mut core, &*audio, key) {
+                continue;
+            }
+
+            match key.code {
+                KeyCode::Char(ch)
+                    if (key.modifiers.contains(KeyModifiers::CONTROL)
+                        && ch.eq_ignore_ascii_case(&'c'))
+                        || ch == '\u{3}' =>
+                {
+                    break 'app_loop Ok(());
                 }
-                if let Some(path) = core.next_track_path() {
-                    if let Err(err) = audio.play(&path) {
-                        core.status = concise_audio_error(&err);
+                KeyCode::Char(_)
+                    if key_event_matches_ctrl_char(&key, 's')
+                        && core.header_section == HeaderSection::Library =>
+                {
+                    let selected_paths = core.selected_paths_for_online_queue_action();
+                    let added = core.online_queue_paths(&selected_paths);
+                    if let Some(network) = online_runtime.network.as_ref() {
+                        for item in added {
+                            network.send_local_action(NetworkLocalAction::QueueAdd(item));
+                        }
+                    }
+                }
+                KeyCode::Down => core.select_next(),
+                KeyCode::Up => core.select_prev(),
+                KeyCode::Enter => {
+                    if local_playback_locked_by_host_only(&core) {
+                        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
                         core.dirty = true;
-                    } else {
-                        publish_current_playback_state(&core, &*audio, &online_runtime);
+                        continue;
+                    }
+                    if play_selected_shared_queue_item(&mut core, &mut *audio, &mut online_runtime)
+                    {
+                        continue;
+                    }
+                    if let Some(path) = core.activate_selected() {
+                        if let Err(err) = audio.play(&path) {
+                            core.status = concise_audio_error(&err);
+                        } else {
+                            publish_current_playback_state(&core, &*audio, &online_runtime);
+                        }
                     }
                 }
-            }
-            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'b') => {
-                if local_playback_locked_by_host_only(&core) {
-                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
-                    core.dirty = true;
-                    continue;
-                }
-                if let Some(path) = core.prev_track_path() {
-                    if let Err(err) = audio.play(&path) {
-                        core.status = concise_audio_error(&err);
+                KeyCode::Left | KeyCode::Backspace => core.navigate_back(),
+                KeyCode::Char(' ') => {
+                    if local_playback_locked_by_host_only(&core) {
+                        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
                         core.dirty = true;
+                        continue;
+                    }
+                    if audio.is_paused() {
+                        audio.resume();
+                        core.status = String::from("Resumed");
                     } else {
-                        publish_current_playback_state(&core, &*audio, &online_runtime);
+                        audio.pause();
+                        core.status = String::from("Paused");
+                    }
+                    publish_current_playback_state(&core, &*audio, &online_runtime);
+                    core.dirty = true;
+                }
+                KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'n') => {
+                    if local_playback_locked_by_host_only(&core) {
+                        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                        core.dirty = true;
+                        continue;
+                    }
+                    if let Some(path) = core.next_track_path() {
+                        if let Err(err) = audio.play(&path) {
+                            core.status = concise_audio_error(&err);
+                            core.dirty = true;
+                        } else {
+                            publish_current_playback_state(&core, &*audio, &online_runtime);
+                        }
                     }
                 }
-            }
-            KeyCode::Char('a') | KeyCode::Char('A') => {
-                if local_playback_locked_by_host_only(&core) {
-                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
-                    core.dirty = true;
-                    continue;
+                KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'b') => {
+                    if local_playback_locked_by_host_only(&core) {
+                        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                        core.dirty = true;
+                        continue;
+                    }
+                    if let Some(path) = core.prev_track_path() {
+                        if let Err(err) = audio.play(&path) {
+                            core.status = concise_audio_error(&err);
+                            core.dirty = true;
+                        } else {
+                            publish_current_playback_state(&core, &*audio, &online_runtime);
+                        }
+                    }
                 }
-                pending_scrub_delta =
-                    pending_scrub_delta.saturating_sub(i64::from(core.scrub_seconds));
-            }
-            KeyCode::Char('d') | KeyCode::Char('D') => {
-                if local_playback_locked_by_host_only(&core) {
-                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
-                    core.dirty = true;
-                    continue;
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    if local_playback_locked_by_host_only(&core) {
+                        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                        core.dirty = true;
+                        continue;
+                    }
+                    pending_scrub_delta =
+                        pending_scrub_delta.saturating_sub(i64::from(core.scrub_seconds));
                 }
-                pending_scrub_delta =
-                    pending_scrub_delta.saturating_add(i64::from(core.scrub_seconds));
-            }
-            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'m') => {
-                if local_playback_locked_by_host_only(&core) {
-                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
-                    core.dirty = true;
-                    continue;
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    if local_playback_locked_by_host_only(&core) {
+                        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                        core.dirty = true;
+                        continue;
+                    }
+                    pending_scrub_delta =
+                        pending_scrub_delta.saturating_add(i64::from(core.scrub_seconds));
                 }
-                core.cycle_mode();
-                auto_save_state(&mut core, &*audio);
-            }
-            KeyCode::Tab => {
-                let next_section = core.header_section.next();
-                core.cycle_header_section();
-                if next_section == HeaderSection::Online {
-                    trigger_online_tab_entry(&mut core, &mut online_runtime);
+                KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'m') => {
+                    if local_playback_locked_by_host_only(&core) {
+                        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                        core.dirty = true;
+                        continue;
+                    }
+                    core.cycle_mode();
+                    auto_save_state(&mut core, &*audio);
                 }
-            }
-            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'t') => {
-                #[cfg(windows)]
-                {
-                    minimize_to_tray();
-                    core.status = String::from("Minimized to tray");
+                KeyCode::Tab => {
+                    let next_section = core.header_section.next();
+                    core.cycle_header_section();
+                    if next_section == HeaderSection::Online {
+                        trigger_online_tab_entry(&mut core, &mut online_runtime);
+                    }
                 }
-                #[cfg(not(windows))]
-                {
-                    core.status = String::from("Tray minimize is only available on Windows");
-                }
-                core.dirty = true;
-            }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                let step = if key.code == KeyCode::Char('+')
-                    || key.modifiers.contains(KeyModifiers::SHIFT)
-                {
-                    VOLUME_STEP_FINE
-                } else {
-                    VOLUME_STEP_COARSE
-                };
-                let next = (audio.volume() + step).clamp(0.0, MAX_VOLUME);
-                audio.set_volume(next);
-                core.status = format!("Volume: {}%", (next * 100.0).round() as u16);
-                core.dirty = true;
-            }
-            KeyCode::Char('-') | KeyCode::Char('_') => {
-                let step = if key.code == KeyCode::Char('_')
-                    || key.modifiers.contains(KeyModifiers::SHIFT)
-                {
-                    VOLUME_STEP_FINE
-                } else {
-                    VOLUME_STEP_COARSE
-                };
-                let next = (audio.volume() - step).clamp(0.0, MAX_VOLUME);
-                audio.set_volume(next);
-                core.status = format!("Volume: {}%", (next * 100.0).round() as u16);
-                core.dirty = true;
-            }
-            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'r') => {
-                request_library_rescan(&mut core, &mut library_runtime)
-            }
-            KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'s') => {
-                if let Err(err) = save_state_with_audio(&mut core, &*audio) {
-                    core.status = format!("save error: {err:#}");
+                KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'t') => {
+                    #[cfg(windows)]
+                    {
+                        minimize_to_tray();
+                        core.status = String::from("Minimized to tray");
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        core.status = String::from("Tray minimize is only available on Windows");
+                    }
                     core.dirty = true;
                 }
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    let step = if key.code == KeyCode::Char('+')
+                        || key.modifiers.contains(KeyModifiers::SHIFT)
+                    {
+                        VOLUME_STEP_FINE
+                    } else {
+                        VOLUME_STEP_COARSE
+                    };
+                    let next = (audio.volume() + step).clamp(0.0, MAX_VOLUME);
+                    audio.set_volume(next);
+                    core.status = format!("Volume: {}%", (next * 100.0).round() as u16);
+                    core.dirty = true;
+                }
+                KeyCode::Char('-') | KeyCode::Char('_') => {
+                    let step = if key.code == KeyCode::Char('_')
+                        || key.modifiers.contains(KeyModifiers::SHIFT)
+                    {
+                        VOLUME_STEP_FINE
+                    } else {
+                        VOLUME_STEP_COARSE
+                    };
+                    let next = (audio.volume() - step).clamp(0.0, MAX_VOLUME);
+                    audio.set_volume(next);
+                    core.status = format!("Volume: {}%", (next * 100.0).round() as u16);
+                    core.dirty = true;
+                }
+                KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'r') => {
+                    request_library_rescan(&mut core, &mut library_runtime)
+                }
+                KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'s') => {
+                    if let Err(err) = save_state_with_audio(&mut core, &*audio) {
+                        core.status = format!("save error: {err:#}");
+                        core.dirty = true;
+                    }
+                }
+                KeyCode::Char('/') => {
+                    action_panel.open();
+                    core.dirty = true;
+                }
+                _ => {}
             }
-            KeyCode::Char('/') => {
-                action_panel.open();
-                core.dirty = true;
-            }
-            _ => {}
-        }
         }
     };
 
