@@ -200,7 +200,7 @@ impl TuneCore {
             sorted_library_queue_cache: RefCell::new(None),
             shuffle_order: Vec::new(),
             shuffle_cursor: 0,
-            shuffle_rng: SmallRng::from_os_rng(),
+            shuffle_rng: SmallRng::from_rng(&mut rand::rng()),
         };
         core.rebuild_main_queue();
         core.refresh_browser_entries();

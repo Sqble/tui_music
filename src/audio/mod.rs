@@ -4,7 +4,7 @@ use rodio::cpal::Device;
 use rodio::cpal::traits::{DeviceTrait, HostTrait};
 #[cfg(target_os = "linux")]
 use rodio::cpal::{BufferSize, SupportedBufferSize};
-use rodio::{Decoder, OutputStream, OutputStreamBuilder, Sink};
+use rodio::{Decoder, DeviceSinkBuilder, MixerDeviceSink, Player};
 #[cfg(unix)]
 use std::ffi::CString;
 use std::fs::File;
@@ -45,9 +45,9 @@ pub trait AudioEngine {
 }
 
 pub struct WasapiAudioEngine {
-    stream: OutputStream,
-    sink: Sink,
-    next_sink: Option<Sink>,
+    stream: MixerDeviceSink,
+    sink: Player,
+    next_sink: Option<Player>,
     current: Option<PathBuf>,
     next_track: Option<PathBuf>,
     track_duration: Option<Duration>,
@@ -129,8 +129,8 @@ impl WasapiAudioEngine {
         let source = Decoder::try_from(file)
             .with_context(|| format!("failed to decode for loudness scan {}", path.display()))?;
 
-        let channels = usize::from(source.channels()).max(1);
-        let sample_rate = usize::try_from(source.sample_rate())
+        let channels = usize::from(source.channels().get()).max(1);
+        let sample_rate = usize::try_from(source.sample_rate().get())
             .unwrap_or(44_100)
             .max(1);
         let max_samples = sample_rate.saturating_mul(channels).saturating_mul(10);
@@ -195,8 +195,8 @@ impl WasapiAudioEngine {
         }
     }
 
-    fn output_stream_builder_for_device(device: Device) -> Result<OutputStreamBuilder> {
-        let builder = OutputStreamBuilder::from_device(device.clone())
+    fn output_stream_builder_for_device(device: Device) -> Result<DeviceSinkBuilder> {
+        let builder = DeviceSinkBuilder::from_device(device.clone())
             .context("failed to open selected output device")?;
 
         #[cfg(target_os = "linux")]
@@ -214,18 +214,18 @@ impl WasapiAudioEngine {
         Ok(builder)
     }
 
-    fn open_output_stream(output: Option<&str>) -> Result<(OutputStream, Sink)> {
+    fn open_output_stream(output: Option<&str>) -> Result<(MixerDeviceSink, Player)> {
         let mut stream = with_silenced_stderr(|| {
             let host = rodio::cpal::default_host();
             if let Some(requested) = output {
                 let device = host
                     .output_devices()
                     .context("failed to enumerate output devices")?
-                    .find(|candidate| candidate.name().ok().as_deref() == Some(requested))
+                    .find(|candidate| audio_device_name(candidate).as_deref() == Some(requested))
                     .with_context(|| format!("audio output device not found: {requested}"))?;
                 Self::output_stream_builder_for_device(device)?
-                    .with_error_callback(|_| {})
-                    .open_stream_or_fallback()
+                    .with_error_callback(ignore_stream_error)
+                    .open_sink_or_fallback()
                     .context("failed to start selected output stream")
             } else {
                 let default_device = host
@@ -233,8 +233,8 @@ impl WasapiAudioEngine {
                     .context("failed to open default system output stream")?;
                 match Self::output_stream_builder_for_device(default_device).and_then(|builder| {
                     builder
-                        .with_error_callback(|_| {})
-                        .open_stream_or_fallback()
+                        .with_error_callback(ignore_stream_error)
+                        .open_sink_or_fallback()
                         .context("failed to start default output stream")
                 }) {
                     Ok(stream) => Ok(stream),
@@ -244,7 +244,7 @@ impl WasapiAudioEngine {
                             .ok()
                             .into_iter()
                             .flatten()
-                            .filter_map(|device| device.name().ok())
+                            .filter_map(|device| audio_device_name(&device))
                             .collect();
                         candidates.sort_by_cached_key(|name| {
                             let lower = name.to_ascii_lowercase();
@@ -261,12 +261,13 @@ impl WasapiAudioEngine {
                         });
                         candidates.dedup();
 
-                        let mut started: Option<OutputStream> = None;
+                        let mut started: Option<MixerDeviceSink> = None;
                         for candidate in candidates {
                             let device =
                                 match host.output_devices().ok().into_iter().flatten().find(
                                     |entry| {
-                                        entry.name().ok().as_deref() == Some(candidate.as_str())
+                                        audio_device_name(entry).as_deref()
+                                            == Some(candidate.as_str())
                                     },
                                 ) {
                                     Some(device) => device,
@@ -275,8 +276,8 @@ impl WasapiAudioEngine {
                             let opened = Self::output_stream_builder_for_device(device).and_then(
                                 |builder| {
                                     builder
-                                        .with_error_callback(|_| {})
-                                        .open_stream_or_fallback()
+                                        .with_error_callback(ignore_stream_error)
+                                        .open_sink_or_fallback()
                                         .context("failed to start fallback output stream")
                                 },
                             );
@@ -296,7 +297,7 @@ impl WasapiAudioEngine {
             }
         })?;
         stream.log_on_drop(false);
-        let sink = Sink::connect_new(stream.mixer());
+        let sink = Player::connect_new(stream.mixer());
         Ok((stream, sink))
     }
 
@@ -326,7 +327,7 @@ impl AudioEngine for WasapiAudioEngine {
     fn play(&mut self, path: &Path) -> Result<()> {
         self.sink.stop();
         self.clear_next();
-        self.sink = Sink::connect_new(self.stream.mixer());
+        self.sink = Player::connect_new(self.stream.mixer());
         self.sink.set_volume(self.volume.clamp(0.0, MAX_VOLUME));
 
         let file =
@@ -360,7 +361,7 @@ impl AudioEngine for WasapiAudioEngine {
         }
 
         self.clear_next();
-        let next_sink = Sink::connect_new(self.stream.mixer());
+        let next_sink = Player::connect_new(self.stream.mixer());
         next_sink.set_volume(0.0);
 
         let file =
@@ -479,7 +480,7 @@ impl AudioEngine for WasapiAudioEngine {
     }
 
     fn output_name(&self) -> Option<String> {
-        self.stream.config().channel_count().checked_sub(0)?;
+        let _ = self.stream.config().channel_count();
         Some(
             self.selected_output
                 .clone()
@@ -498,7 +499,7 @@ impl AudioEngine for WasapiAudioEngine {
                 .ok()
                 .into_iter()
                 .flatten()
-                .filter_map(|device| device.name().ok())
+                .filter_map(|device| audio_device_name(&device))
                 .collect()
         });
         outputs.sort_by_cached_key(|name| name.to_ascii_lowercase());
@@ -558,6 +559,15 @@ impl AudioEngine for WasapiAudioEngine {
         }
         self.current.is_some() && !self.sink.is_paused() && self.sink.empty()
     }
+}
+
+fn ignore_stream_error(_: rodio::cpal::StreamError) {}
+
+fn audio_device_name(device: &Device) -> Option<String> {
+    device
+        .description()
+        .ok()
+        .map(|description| description.name().to_string())
 }
 
 #[cfg(unix)]

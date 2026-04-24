@@ -3,7 +3,7 @@ use crate::online::{
 };
 use anyhow::Context;
 use base64::Engine;
-use rand::Rng;
+use rand::RngExt;
 use rodio::{Decoder, Source};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -3407,8 +3407,8 @@ where
         .with_context(|| format!("failed to open stream source {}", source_path.display()))?;
     let decoder = Decoder::try_from(source_file)
         .with_context(|| format!("failed to decode {}", source_path.display()))?;
-    let source_rate = decoder.sample_rate().max(1);
-    let source_channels = usize::from(decoder.channels()).max(1);
+    let source_rate = decoder.sample_rate().get().max(1);
+    let source_channels = usize::from(decoder.channels().get()).max(1);
 
     let header = balanced_opus_header_bytes();
     send_chunk(&header)?;

@@ -566,7 +566,7 @@ fn apply_metadata_edit_to_tag(tag: &mut Tag, edit: &MetadataEdit) {
 
 fn set_tag_text(tag: &mut Tag, key: ItemKey, value: Option<&str>) {
     let cleaned = value.and_then(clean_metadata_value);
-    tag.remove_key(&key);
+    tag.remove_key(key);
     if let Some(text) = cleaned {
         tag.insert_text(key, text);
     }
@@ -1071,8 +1071,8 @@ fn build_static_spectrograph(path: &Path, duration_seconds: Option<u32>) -> Vec<
         return vec![String::from("(spectrograph unavailable)")];
     };
 
-    let channels = usize::from(source.channels()).max(1);
-    let sample_rate = source.sample_rate().max(8_000);
+    let channels = usize::from(source.channels().get()).max(1);
+    let sample_rate = source.sample_rate().get().max(8_000);
     let sample_rate_usize = usize::try_from(sample_rate).unwrap_or(44_100);
     let total_frames_hint = duration_seconds
         .and_then(|seconds| usize::try_from(seconds).ok())
