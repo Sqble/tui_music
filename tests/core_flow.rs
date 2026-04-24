@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use tune::core::TuneCore;
 use tune::core::{BrowserEntry, BrowserEntryKind};
-use tune::model::{PersistedState, PlaybackMode, Track};
+use tune::model::{PersistedState, RepeatMode, Track};
 
 #[test]
 fn playlist_flow_works() {
@@ -67,7 +67,7 @@ fn loop_one_repeats_same_track() {
         album: None,
     }];
     core.reset_main_queue();
-    core.playback_mode = PlaybackMode::LoopOne;
+    core.repeat_mode = RepeatMode::One;
     core.current_queue_index = Some(0);
 
     let next = core.next_track_path().expect("next");

@@ -127,8 +127,15 @@ fn load_state_from_path(path: &Path) -> Result<PersistedState> {
 
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to read state file {}", path.display()))?;
-    let mut state: PersistedState = serde_json::from_str(&raw)
+    let raw_json: serde_json::Value = serde_json::from_str(&raw)
         .with_context(|| format!("failed to parse state file {}", path.display()))?;
+    let has_split_playback_settings =
+        raw_json.get("shuffle_enabled").is_some() || raw_json.get("repeat_mode").is_some();
+    let mut state: PersistedState = serde_json::from_value(raw_json)
+        .with_context(|| format!("failed to parse state file {}", path.display()))?;
+    if !has_split_playback_settings {
+        state.migrate_legacy_playback_mode();
+    }
 
     state.folders = state
         .folders
@@ -462,12 +469,34 @@ mod tests {
         let path = dir.path().join(STATE_FILE);
 
         let state = PersistedState {
-            playback_mode: crate::model::PlaybackMode::Loop,
+            shuffle_enabled: true,
+            repeat_mode: crate::model::RepeatMode::All,
             ..PersistedState::default()
         };
         save_state_to_path(&path, &state).expect("save");
         let loaded = load_state_from_path(&path).expect("load");
-        assert_eq!(loaded.playback_mode, crate::model::PlaybackMode::Loop);
+        assert!(loaded.shuffle_enabled);
+        assert_eq!(loaded.repeat_mode, crate::model::RepeatMode::All);
+    }
+
+    #[test]
+    fn load_migrates_legacy_playback_mode() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join(STATE_FILE);
+        fs::write(
+            &path,
+            r#"{
+                "folders": [],
+                "playlists": {},
+                "playback_mode": "Shuffle"
+            }"#,
+        )
+        .expect("write legacy state");
+
+        let loaded = load_state_from_path(&path).expect("load");
+
+        assert!(loaded.shuffle_enabled);
+        assert_eq!(loaded.repeat_mode, crate::model::RepeatMode::All);
     }
 
     #[test]

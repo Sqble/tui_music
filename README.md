@@ -13,7 +13,7 @@ Full documentation available at **https://tunetui.online**
 - Background library scan on startup/add-folder/rescan so the TUI opens without waiting for full tag parsing
 - Persistent library index cache in config dir (`library_index.json`) for warm-start metadata reuse
 - Playlist create/add/play flows
-- Playback modes: normal, shuffle, loop playlist, loop single track
+- Independent shuffle and repeat controls (repeat off, playlist, or single track)
 - Main library queue order uses metadata titles (not file names)
 - Queue scope follows where you start playback (folder, playlist, or All Songs)
 - Queue tools in Library actions: open local/shared queue, add to end/next, remove item, move item to next
@@ -62,7 +62,8 @@ Download `tune.exe` from releases and run. No installation required.
 | `b` | Previous track |
 | `d` | Seek forward |
 | `a` | Seek backward |
-| `m` | Cycle playback mode |
+| `m` | Cycle repeat mode |
+| `v` | Toggle shuffle |
 | `=` `+` | Volume up |
 | `-` `_` | Volume down |
 | `/` | Open actions panel |

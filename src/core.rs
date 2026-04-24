@@ -1,7 +1,7 @@
 use crate::config;
 use crate::library;
 use crate::lyrics::{self, LyricLine, LyricsDocument, LyricsSource};
-use crate::model::{CoverArtTemplate, PersistedState, PlaybackMode, Playlist, Theme, Track};
+use crate::model::{CoverArtTemplate, PersistedState, Playlist, RepeatMode, Theme, Track};
 use crate::online::OnlineState;
 use crate::stats::{StatsRange, StatsSort};
 use rand::SeedableRng;
@@ -97,7 +97,8 @@ pub struct TuneCore {
     pub queue: Vec<usize>,
     pub selected_track: usize,
     pub current_queue_index: Option<usize>,
-    pub playback_mode: PlaybackMode,
+    pub shuffle_enabled: bool,
+    pub repeat_mode: RepeatMode,
     pub loudness_normalization: bool,
     pub crossfade_seconds: u16,
     pub scrub_seconds: u16,
@@ -156,7 +157,8 @@ impl TuneCore {
             queue: Vec::new(),
             selected_track: 0,
             current_queue_index: None,
-            playback_mode: state.playback_mode,
+            shuffle_enabled: state.shuffle_enabled,
+            repeat_mode: state.repeat_mode,
             loudness_normalization: state.loudness_normalization,
             crossfade_seconds: state.crossfade_seconds,
             scrub_seconds: normalize_scrub_seconds(state.scrub_seconds),
@@ -334,7 +336,9 @@ impl TuneCore {
         PersistedState {
             folders: self.folders.clone(),
             playlists: self.playlists.clone(),
-            playback_mode: self.playback_mode,
+            shuffle_enabled: self.shuffle_enabled,
+            repeat_mode: self.repeat_mode,
+            playback_mode: None,
             loudness_normalization: self.loudness_normalization,
             crossfade_seconds: self.crossfade_seconds,
             scrub_seconds: self.scrub_seconds,
@@ -708,19 +712,31 @@ impl TuneCore {
         self.set_status("Went back");
     }
 
-    pub fn cycle_mode(&mut self) {
-        self.set_playback_mode(self.playback_mode.next());
+    pub fn toggle_shuffle(&mut self) {
+        self.set_shuffle_enabled(!self.shuffle_enabled);
     }
 
-    pub fn set_playback_mode(&mut self, mode: PlaybackMode) {
-        self.playback_mode = mode;
-        if self.playback_mode == PlaybackMode::Shuffle {
+    pub fn set_shuffle_enabled(&mut self, enabled: bool) {
+        self.shuffle_enabled = enabled;
+        if self.shuffle_enabled && self.shuffle_order.len() != self.queue.len() {
             self.rebuild_shuffle_order();
         }
         if self.browser_local_queue {
             self.refresh_browser_entries();
         }
-        self.set_status("Playback mode updated");
+        self.set_status(&format!(
+            "Shuffle: {}",
+            if self.shuffle_enabled { "On" } else { "Off" }
+        ));
+    }
+
+    pub fn cycle_repeat_mode(&mut self) {
+        self.set_repeat_mode(self.repeat_mode.next());
+    }
+
+    pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
+        self.repeat_mode = mode;
+        self.set_status(&format!("Repeat: {}", self.repeat_mode.label()));
     }
 
     pub fn cycle_header_section(&mut self) {
@@ -1647,7 +1663,7 @@ impl TuneCore {
         let idx = match self.current_queue_index {
             Some(current) => self.next_index(current),
             None => {
-                if self.playback_mode == PlaybackMode::Shuffle {
+                if self.shuffle_enabled {
                     if self.shuffle_order.len() != self.queue.len() {
                         self.rebuild_shuffle_order();
                     }
@@ -1675,7 +1691,7 @@ impl TuneCore {
         let idx = match self.current_queue_index {
             Some(current) => self.prev_index(current),
             None => {
-                if self.playback_mode == PlaybackMode::Shuffle {
+                if self.shuffle_enabled {
                     if self.shuffle_order.len() != self.queue.len() {
                         self.rebuild_shuffle_order();
                     }
@@ -1695,43 +1711,42 @@ impl TuneCore {
     }
 
     fn next_index(&mut self, current: usize) -> Option<usize> {
-        match self.playback_mode {
-            PlaybackMode::LoopOne => Some(current),
-            PlaybackMode::Normal => {
+        if self.repeat_mode == RepeatMode::One {
+            return Some(current);
+        }
+
+        if self.shuffle_enabled {
+            return self.next_shuffle_index(current);
+        }
+
+        match self.repeat_mode {
+            RepeatMode::Off => {
                 let next = current + 1;
                 (next < self.queue.len()).then_some(next)
             }
-            PlaybackMode::Loop => {
+            RepeatMode::All => {
                 if self.queue.is_empty() {
                     None
                 } else {
                     Some((current + 1) % self.queue.len())
                 }
             }
-            PlaybackMode::Shuffle => {
-                if self.shuffle_order.len() != self.queue.len() {
-                    self.rebuild_shuffle_order();
-                }
-
-                if self.shuffle_order.is_empty() {
-                    return None;
-                }
-
-                if let Some(pos) = self.shuffle_order.iter().position(|idx| *idx == current) {
-                    self.shuffle_cursor = pos;
-                }
-
-                self.shuffle_cursor = (self.shuffle_cursor + 1) % self.shuffle_order.len();
-                self.shuffle_order.get(self.shuffle_cursor).copied()
-            }
+            RepeatMode::One => unreachable!("repeat-one handled before queue order"),
         }
     }
 
     fn prev_index(&mut self, current: usize) -> Option<usize> {
-        match self.playback_mode {
-            PlaybackMode::LoopOne => Some(current),
-            PlaybackMode::Normal => current.checked_sub(1),
-            PlaybackMode::Loop => {
+        if self.repeat_mode == RepeatMode::One {
+            return Some(current);
+        }
+
+        if self.shuffle_enabled {
+            return self.prev_shuffle_index(current);
+        }
+
+        match self.repeat_mode {
+            RepeatMode::Off => current.checked_sub(1),
+            RepeatMode::All => {
                 if self.queue.is_empty() {
                     None
                 } else if current == 0 {
@@ -1740,26 +1755,53 @@ impl TuneCore {
                     Some(current - 1)
                 }
             }
-            PlaybackMode::Shuffle => {
-                if self.shuffle_order.len() != self.queue.len() {
-                    self.rebuild_shuffle_order();
-                }
+            RepeatMode::One => unreachable!("repeat-one handled before queue order"),
+        }
+    }
 
-                if self.shuffle_order.is_empty() {
-                    return None;
-                }
+    fn next_shuffle_index(&mut self, current: usize) -> Option<usize> {
+        if self.shuffle_order.len() != self.queue.len() {
+            self.rebuild_shuffle_order();
+        }
 
-                if let Some(pos) = self.shuffle_order.iter().position(|idx| *idx == current) {
-                    self.shuffle_cursor = pos;
-                }
+        if self.shuffle_order.is_empty() {
+            return None;
+        }
 
-                self.shuffle_cursor = if self.shuffle_cursor == 0 {
-                    self.shuffle_order.len() - 1
-                } else {
-                    self.shuffle_cursor - 1
-                };
-                self.shuffle_order.get(self.shuffle_cursor).copied()
-            }
+        let pos = self.shuffle_order.iter().position(|idx| *idx == current)?;
+        if pos + 1 < self.shuffle_order.len() {
+            self.shuffle_cursor = pos + 1;
+            return self.shuffle_order.get(self.shuffle_cursor).copied();
+        }
+
+        if self.repeat_mode == RepeatMode::All {
+            self.shuffle_cursor = 0;
+            self.shuffle_order.first().copied()
+        } else {
+            None
+        }
+    }
+
+    fn prev_shuffle_index(&mut self, current: usize) -> Option<usize> {
+        if self.shuffle_order.len() != self.queue.len() {
+            self.rebuild_shuffle_order();
+        }
+
+        if self.shuffle_order.is_empty() {
+            return None;
+        }
+
+        let pos = self.shuffle_order.iter().position(|idx| *idx == current)?;
+        if pos > 0 {
+            self.shuffle_cursor = pos - 1;
+            return self.shuffle_order.get(self.shuffle_cursor).copied();
+        }
+
+        if self.repeat_mode == RepeatMode::All {
+            self.shuffle_cursor = self.shuffle_order.len() - 1;
+            self.shuffle_order.get(self.shuffle_cursor).copied()
+        } else {
+            None
         }
     }
 
@@ -1889,7 +1931,7 @@ impl TuneCore {
     }
 
     fn local_queue_display_positions(&self) -> Vec<usize> {
-        if self.playback_mode != PlaybackMode::Shuffle
+        if !self.shuffle_enabled
             || self.shuffle_order.len() != self.queue.len()
             || self.queue.is_empty()
         {
@@ -2269,7 +2311,7 @@ mod tests {
         ];
         core.track_lookup = build_track_lookup(&core.tracks);
         core.queue = vec![0, 1];
-        core.playback_mode = PlaybackMode::Loop;
+        core.repeat_mode = RepeatMode::All;
         core.current_queue_index = Some(1);
 
         let next = core.next_track_path().expect("next");
@@ -2604,7 +2646,7 @@ mod tests {
             },
         ];
         core.rebuild_shuffle_order();
-        core.playback_mode = PlaybackMode::Shuffle;
+        core.shuffle_enabled = true;
 
         let mut seen = std::collections::HashSet::new();
         for _ in 0..4 {
@@ -2613,6 +2655,78 @@ mod tests {
         }
 
         assert_eq!(seen.len(), 4);
+        assert_eq!(core.next_track_path(), None);
+    }
+
+    #[test]
+    fn shuffle_repeat_all_wraps_existing_order() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("a"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("b.mp3"),
+                title: String::from("b"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("c.mp3"),
+                title: String::from("c"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.queue = vec![0, 1, 2];
+        core.shuffle_enabled = true;
+        core.repeat_mode = RepeatMode::All;
+        core.shuffle_order = vec![1, 2, 0];
+        core.current_queue_index = Some(0);
+
+        let next = core.next_track_path().expect("wrapped shuffled next");
+
+        assert_eq!(next, PathBuf::from("b.mp3"));
+        assert_eq!(core.shuffle_order, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn repeat_one_during_shuffle_resumes_existing_order() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("a"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("b.mp3"),
+                title: String::from("b"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("c.mp3"),
+                title: String::from("c"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.queue = vec![0, 1, 2];
+        core.shuffle_enabled = true;
+        core.shuffle_order = vec![0, 1, 2];
+        core.current_queue_index = Some(1);
+
+        core.set_repeat_mode(RepeatMode::One);
+        assert_eq!(core.next_track_path(), Some(PathBuf::from("b.mp3")));
+
+        core.set_repeat_mode(RepeatMode::Off);
+        assert_eq!(core.next_track_path(), Some(PathBuf::from("c.mp3")));
+        assert_eq!(core.shuffle_order, vec![0, 1, 2]);
     }
 
     #[test]
@@ -3012,7 +3126,7 @@ mod tests {
         ];
         core.track_lookup = build_track_lookup(&core.tracks);
         core.queue = vec![0, 1, 2];
-        core.playback_mode = PlaybackMode::Shuffle;
+        core.shuffle_enabled = true;
         core.current_queue_index = Some(2);
         core.shuffle_order = vec![2, 0, 1];
 
@@ -3055,12 +3169,12 @@ mod tests {
         ];
         core.track_lookup = build_track_lookup(&core.tracks);
         core.queue = vec![0, 1, 2];
-        core.playback_mode = PlaybackMode::Shuffle;
+        core.shuffle_enabled = true;
         core.current_queue_index = Some(2);
         core.shuffle_order = vec![2, 0, 1];
         core.open_local_queue_view();
 
-        core.set_playback_mode(PlaybackMode::Normal);
+        core.set_shuffle_enabled(false);
 
         let labels: Vec<String> = core
             .browser_entries
@@ -3094,7 +3208,7 @@ mod tests {
         core.track_lookup = build_track_lookup(&core.tracks);
         core.queue = vec![0, 1];
         core.current_queue_index = Some(1);
-        core.playback_mode = PlaybackMode::Normal;
+        core.repeat_mode = RepeatMode::Off;
 
         let prev = core.prev_track_path().expect("prev track");
 
@@ -3119,8 +3233,16 @@ mod tests {
             core.rebuild_shuffle_order();
             core.current_queue_index = Some(current.min(len - 1));
 
-            for mode in [PlaybackMode::Normal, PlaybackMode::Shuffle, PlaybackMode::Loop, PlaybackMode::LoopOne] {
-                core.playback_mode = mode;
+            for (shuffle_enabled, repeat_mode) in [
+                (false, RepeatMode::Off),
+                (true, RepeatMode::Off),
+                (false, RepeatMode::All),
+                (true, RepeatMode::All),
+                (false, RepeatMode::One),
+                (true, RepeatMode::One),
+            ] {
+                core.shuffle_enabled = shuffle_enabled;
+                core.repeat_mode = repeat_mode;
                 if let Some(path) = core.next_track_path() {
                     assert!(core.tracks.iter().any(|track| track.path == path));
                 }
@@ -3145,7 +3267,7 @@ mod tests {
                 match op {
                     0 => core.select_next(),
                     1 => core.select_prev(),
-                    2 => core.cycle_mode(),
+                    2 => core.cycle_repeat_mode(),
                     3 => {
                         let _ = core.next_track_path();
                     }

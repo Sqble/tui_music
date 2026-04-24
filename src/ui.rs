@@ -282,7 +282,11 @@ pub fn draw(
         ),
         Span::styled("  |  ", Style::default().fg(colors.muted)),
         Span::styled(
-            format!("Mode {:?}", core.playback_mode),
+            format!(
+                "Shuffle {} | Repeat {}",
+                if core.shuffle_enabled { "On" } else { "Off" },
+                core.repeat_mode.label()
+            ),
             Style::default().fg(colors.alert),
         ),
         Span::styled("  |  ", Style::default().fg(colors.muted)),
@@ -577,7 +581,7 @@ pub fn draw(
     } else if core.header_section == HeaderSection::Online {
         "Keys: Enter select/join, Ctrl+n shared now, l leave room, o mode, q quality, t hide/show code, 2 copy code, Tab tabs"
     } else {
-        "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m cycle mode, / actions, t tray, Ctrl+C quit"
+        "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m repeat, v shuffle, / actions, t tray, Ctrl+C quit"
     };
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(key_hint, Style::default().fg(colors.muted)),

@@ -2,7 +2,7 @@ use crate::audio::{AudioEngine, NullAudioEngine, WasapiAudioEngine};
 use crate::config;
 use crate::core::{BrowserEntryKind, HeaderSection, LyricsMode, StatsFilterFocus, TuneCore};
 use crate::library::{self, LibraryIndex, LibraryScanEvent, LibraryScanKind, MetadataEdit};
-use crate::model::{CoverArtTemplate, PlaybackMode, Theme};
+use crate::model::{CoverArtTemplate, Theme};
 use crate::online::{
     OnlineSession, Participant, StreamQuality, TransportCommand, TransportEnvelope,
 };
@@ -723,7 +723,7 @@ enum RootActionId {
     AddSelectedToQueueNext,
     RemoveSelectedFromQueue,
     MoveSelectedQueueItemToNext,
-    SetPlaybackMode,
+    PlaybackOrder,
     PlaybackSettings,
     PlayPlaylist,
     RemoveSelectedFromPlaylist,
@@ -752,7 +752,7 @@ const ROOT_ACTIONS: [RootActionId; 26] = [
     RootActionId::AddSelectedToQueueNext,
     RootActionId::RemoveSelectedFromQueue,
     RootActionId::MoveSelectedQueueItemToNext,
-    RootActionId::SetPlaybackMode,
+    RootActionId::PlaybackOrder,
     RootActionId::PlaybackSettings,
     RootActionId::PlayPlaylist,
     RootActionId::RemoveSelectedFromPlaylist,
@@ -861,7 +861,7 @@ fn root_action_label(action: RootActionId) -> &'static str {
         RootActionId::AddSelectedToQueueNext => "Add selection to queue next",
         RootActionId::RemoveSelectedFromQueue => "Remove selected queue item",
         RootActionId::MoveSelectedQueueItemToNext => "Move selected queue item to next",
-        RootActionId::SetPlaybackMode => "Set playback mode",
+        RootActionId::PlaybackOrder => "Playback order and repeat",
         RootActionId::PlaybackSettings => "Playback settings",
         RootActionId::PlayPlaylist => "Play playlist",
         RootActionId::RemoveSelectedFromPlaylist => "Remove selected from playlist",
@@ -960,7 +960,7 @@ enum ActionPanelState {
         selected: usize,
         query: String,
     },
-    Mode {
+    PlaybackOrder {
         selected: usize,
     },
     PlaylistPlay {
@@ -1061,15 +1061,17 @@ impl ActionPanelState {
                     selected: *selected,
                 })
             }
-            Self::Mode { selected } => Some(crate::ui::ActionPanelView {
-                title: String::from("Playback Mode"),
-                hint: String::from("Enter apply  Backspace back"),
+            Self::PlaybackOrder { selected } => Some(crate::ui::ActionPanelView {
+                title: String::from("Playback Order"),
+                hint: String::from("Enter toggle/cycle  Backspace back"),
                 search_query: None,
                 options: vec![
-                    String::from("Normal"),
-                    String::from("Shuffle"),
-                    String::from("Loop playlist"),
-                    String::from("Loop single track"),
+                    format!(
+                        "Shuffle: {}",
+                        if core.shuffle_enabled { "On" } else { "Off" }
+                    ),
+                    format!("Repeat: {}", core.repeat_mode.label()),
+                    String::from("Back"),
                 ],
                 selected: *selected,
             }),
@@ -1957,7 +1959,16 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                         core.dirty = true;
                         continue;
                     }
-                    core.cycle_mode();
+                    core.cycle_repeat_mode();
+                    auto_save_state(&mut core, &*audio);
+                }
+                KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'v') => {
+                    if local_playback_locked_by_host_only(&core) {
+                        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                        core.dirty = true;
+                        continue;
+                    }
+                    core.toggle_shuffle();
                     auto_save_state(&mut core, &*audio);
                 }
                 KeyCode::Tab => {
@@ -2429,7 +2440,14 @@ fn key_event_matches_ctrl_char(key: &KeyEvent, expected: char) -> bool {
 fn online_tab_allows_global_shortcut(code: KeyCode) -> bool {
     matches!(
         code,
-        KeyCode::Char('+') | KeyCode::Char('=') | KeyCode::Char('-') | KeyCode::Char('_')
+        KeyCode::Char('+')
+            | KeyCode::Char('=')
+            | KeyCode::Char('-')
+            | KeyCode::Char('_')
+            | KeyCode::Char('m')
+            | KeyCode::Char('M')
+            | KeyCode::Char('v')
+            | KeyCode::Char('V')
     )
 }
 
@@ -4938,7 +4956,7 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
 
     match panel {
         ActionPanelState::Root { selected, .. }
-        | ActionPanelState::Mode { selected }
+        | ActionPanelState::PlaybackOrder { selected }
         | ActionPanelState::PlaylistPlay { selected }
         | ActionPanelState::PlaylistAdd { selected }
         | ActionPanelState::PlaylistAddNowPlaying { selected }
@@ -5115,7 +5133,7 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::Root { query, .. } => {
             root_visible_actions(query, recent_root_actions).len()
         }
-        ActionPanelState::Mode { .. } => 4,
+        ActionPanelState::PlaybackOrder { .. } => 3,
         ActionPanelState::PlaylistPlay { .. }
         | ActionPanelState::PlaylistAdd { .. }
         | ActionPanelState::PlaylistAddNowPlaying { .. }
@@ -5157,9 +5175,9 @@ fn handle_action_panel_input_with_recent(
         }
         KeyCode::Left | KeyCode::Backspace => {
             *panel = match panel {
-                ActionPanelState::Mode { .. } => ActionPanelState::Root {
+                ActionPanelState::PlaybackOrder { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
-                        RootActionId::SetPlaybackMode,
+                        RootActionId::PlaybackOrder,
                         recent_root_actions,
                     ),
                     query: String::new(),
@@ -5391,8 +5409,8 @@ fn handle_action_panel_input_with_recent(
                         auto_save_state(core, &*audio);
                         panel.close();
                     }
-                    RootActionId::SetPlaybackMode => {
-                        *panel = ActionPanelState::Mode { selected: 0 };
+                    RootActionId::PlaybackOrder => {
+                        *panel = ActionPanelState::PlaybackOrder { selected: 0 };
                         core.dirty = true;
                     }
                     RootActionId::PlaybackSettings => {
@@ -5506,21 +5524,30 @@ fn handle_action_panel_input_with_recent(
                     }
                 }
             }
-            ActionPanelState::Mode { selected } => {
+            ActionPanelState::PlaybackOrder { selected } => {
                 if local_playback_locked_by_host_only(core) {
                     core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
                     core.dirty = true;
                     panel.close();
                     return;
                 }
-                core.set_playback_mode(match selected {
-                    0 => PlaybackMode::Normal,
-                    1 => PlaybackMode::Shuffle,
-                    2 => PlaybackMode::Loop,
-                    _ => PlaybackMode::LoopOne,
-                });
+                match selected {
+                    0 => core.toggle_shuffle(),
+                    1 => core.cycle_repeat_mode(),
+                    _ => {
+                        *panel = ActionPanelState::Root {
+                            selected: root_selected_for_action(
+                                RootActionId::PlaybackOrder,
+                                recent_root_actions,
+                            ),
+                            query: String::new(),
+                        };
+                        core.dirty = true;
+                        return;
+                    }
+                }
                 auto_save_state(core, &*audio);
-                panel.close();
+                core.dirty = true;
             }
             ActionPanelState::PlaylistPlay { selected } => {
                 if local_playback_locked_by_host_only(core) {
@@ -6775,22 +6802,25 @@ mod tests {
     }
 
     #[test]
-    fn action_panel_mode_selection_applies_mode() {
+    fn action_panel_playback_order_updates_shuffle_and_repeat() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: root_selected(RootActionId::SetPlaybackMode),
+            selected: root_selected(RootActionId::PlaybackOrder),
             query: String::new(),
         };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
-        assert!(matches!(panel, ActionPanelState::Mode { .. }));
+        assert!(matches!(panel, ActionPanelState::PlaybackOrder { .. }));
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(core.shuffle_enabled);
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
 
-        assert_eq!(core.playback_mode, crate::model::PlaybackMode::Shuffle);
-        assert!(matches!(panel, ActionPanelState::Closed));
+        assert_eq!(core.repeat_mode, crate::model::RepeatMode::All);
+        assert!(matches!(panel, ActionPanelState::PlaybackOrder { .. }));
     }
 
     #[test]
@@ -6801,15 +6831,16 @@ mod tests {
     }
 
     #[test]
-    fn action_panel_mode_selection_is_blocked_for_host_only_listener() {
+    fn action_panel_playback_order_is_blocked_for_host_only_listener() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.online.session = Some(host_only_listener_session());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Mode { selected: 1 };
+        let mut panel = ActionPanelState::PlaybackOrder { selected: 0 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
 
-        assert_eq!(core.playback_mode, crate::model::PlaybackMode::Normal);
+        assert!(!core.shuffle_enabled);
+        assert_eq!(core.repeat_mode, crate::model::RepeatMode::Off);
         assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
         assert!(matches!(panel, ActionPanelState::Closed));
     }
@@ -8997,6 +9028,28 @@ mod tests {
             &mut core,
             &mut audio,
             KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+    }
+
+    #[test]
+    fn online_tab_does_not_consume_playback_order_keys() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+
+        assert!(!handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(!handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE),
             &mut runtime,
         ));
     }

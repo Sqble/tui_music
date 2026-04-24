@@ -3,11 +3,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PlaybackMode {
+pub enum LegacyPlaybackMode {
     Normal,
     Shuffle,
     Loop,
     LoopOne,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RepeatMode {
+    #[default]
+    Off,
+    All,
+    One,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -60,13 +68,20 @@ impl<'de> Deserialize<'de> for CoverArtTemplate {
     }
 }
 
-impl PlaybackMode {
+impl RepeatMode {
     pub fn next(self) -> Self {
         match self {
-            Self::Normal => Self::Shuffle,
-            Self::Shuffle => Self::Loop,
-            Self::Loop => Self::LoopOne,
-            Self::LoopOne => Self::Normal,
+            Self::Off => Self::All,
+            Self::All => Self::One,
+            Self::One => Self::Off,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::All => "Playlist",
+            Self::One => "One",
         }
     }
 }
@@ -88,7 +103,12 @@ pub struct Playlist {
 pub struct PersistedState {
     pub folders: Vec<PathBuf>,
     pub playlists: HashMap<String, Playlist>,
-    pub playback_mode: PlaybackMode,
+    #[serde(default)]
+    pub shuffle_enabled: bool,
+    #[serde(default)]
+    pub repeat_mode: RepeatMode,
+    #[serde(default, skip_serializing)]
+    pub playback_mode: Option<LegacyPlaybackMode>,
     #[serde(default)]
     pub loudness_normalization: bool,
     #[serde(default)]
@@ -138,7 +158,9 @@ impl Default for PersistedState {
         Self {
             folders: Vec::new(),
             playlists: HashMap::new(),
-            playback_mode: PlaybackMode::Normal,
+            shuffle_enabled: false,
+            repeat_mode: RepeatMode::Off,
+            playback_mode: None,
             loudness_normalization: false,
             crossfade_seconds: 0,
             scrub_seconds: default_scrub_seconds(),
@@ -150,6 +172,33 @@ impl Default for PersistedState {
             stats_top_songs_count: default_stats_top_songs_count(),
             fallback_cover_template: CoverArtTemplate::default(),
             online_nickname: None,
+        }
+    }
+}
+
+impl PersistedState {
+    pub fn migrate_legacy_playback_mode(&mut self) {
+        let Some(mode) = self.playback_mode.take() else {
+            return;
+        };
+
+        match mode {
+            LegacyPlaybackMode::Normal => {
+                self.shuffle_enabled = false;
+                self.repeat_mode = RepeatMode::Off;
+            }
+            LegacyPlaybackMode::Shuffle => {
+                self.shuffle_enabled = true;
+                self.repeat_mode = RepeatMode::All;
+            }
+            LegacyPlaybackMode::Loop => {
+                self.shuffle_enabled = false;
+                self.repeat_mode = RepeatMode::All;
+            }
+            LegacyPlaybackMode::LoopOne => {
+                self.shuffle_enabled = false;
+                self.repeat_mode = RepeatMode::One;
+            }
         }
     }
 }
