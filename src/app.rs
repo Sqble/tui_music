@@ -38,7 +38,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
 #[cfg(windows)]
 use std::sync::{Mutex, OnceLock};
-use std::thread;
 use std::time::{Duration, Instant};
 
 #[cfg(windows)]
@@ -60,6 +59,7 @@ const ONLINE_SYNC_CORRECTION_THRESHOLD_OPTIONS_MS: [u16; 8] =
 const MAX_ONLINE_EVENTS_PER_TICK: usize = 128;
 const ONLINE_DEFAULT_HOME_SERVER_PORT: u16 = 7878;
 const ONLINE_DEFAULT_HOME_SERVER_ADDR: &str = "127.0.0.1:7878";
+const ONLINE_PUBLIC_HOME_SERVER_ADDR: &str = "tunetui.online";
 const HOST_ONLY_LISTENER_LOCKED_STATUS: &str = "Room is host-only. Listener playback locked";
 
 #[derive(Debug, Clone, Default)]
@@ -141,12 +141,6 @@ enum OnlinePlaybackSource {
     SharedQueue,
 }
 
-#[derive(Debug, Clone)]
-enum HomeServerVerifyResult {
-    Success { server_addr: String },
-    Failure { error: String },
-}
-
 struct ActiveLibraryScan {
     scan_id: u64,
     kind: LibraryScanKind,
@@ -200,7 +194,6 @@ struct OnlineRuntime {
     last_remote_transport_origin: Option<String>,
     last_periodic_sync_at: Instant,
     online_playback_source: OnlinePlaybackSource,
-    pending_verification_rx: Option<Receiver<HomeServerVerifyResult>>,
 }
 
 impl OnlineRuntime {
@@ -252,7 +245,6 @@ impl OnlineRuntime {
         self.host_invite_code.clear();
         self.host_invite_button = HostInviteModalButton::Copy;
         self.online_playback_source = OnlinePlaybackSource::LocalQueue;
-        self.pending_verification_rx = None;
     }
 
     fn host_invite_modal_view(&self) -> Option<crate::ui::HostInviteModalView> {
@@ -271,6 +263,8 @@ impl OnlineRuntime {
         }
         Some(crate::ui::JoinPromptModalView {
             invite_code: self.join_code_input.clone(),
+            input_selected: matches!(self.join_prompt_button, JoinPromptButton::Input),
+            primary_selected: matches!(self.join_prompt_button, JoinPromptButton::Join),
             paste_selected: matches!(self.join_prompt_button, JoinPromptButton::Paste),
             room_name_mode: matches!(self.join_prompt_mode, JoinPromptMode::HostRoomName),
             nickname_mode: matches!(self.join_prompt_mode, JoinPromptMode::NicknameForJoin),
@@ -341,6 +335,7 @@ enum HostInviteModalButton {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JoinPromptButton {
+    Input,
     Join,
     Paste,
 }
@@ -353,11 +348,27 @@ enum JoinPromptMode {
 }
 
 impl JoinPromptButton {
-    fn toggle(self) -> Self {
+    fn next(self) -> Self {
         match self {
+            Self::Input => Self::Join,
             Self::Join => Self::Paste,
+            Self::Paste => Self::Input,
+        }
+    }
+
+    fn previous(self) -> Self {
+        match self {
+            Self::Input => Self::Paste,
+            Self::Join => Self::Input,
             Self::Paste => Self::Join,
         }
+    }
+}
+
+fn default_join_prompt_button(mode: JoinPromptMode) -> JoinPromptButton {
+    match mode {
+        JoinPromptMode::Connect => JoinPromptButton::Join,
+        JoinPromptMode::HostRoomName | JoinPromptMode::NicknameForJoin => JoinPromptButton::Input,
     }
 }
 
@@ -372,7 +383,9 @@ impl HostInviteModalButton {
 
 fn join_prompt_empty_status(mode: JoinPromptMode) -> String {
     match mode {
-        JoinPromptMode::Connect => String::from("Enter homeserver/link, then press Enter"),
+        JoinPromptMode::Connect => {
+            String::from("Select Server / Link to type, or press Enter for public servers")
+        }
         JoinPromptMode::HostRoomName => String::from("Enter room name, then Enter"),
         JoinPromptMode::NicknameForJoin => String::from("Enter nickname, then press Enter"),
     }
@@ -1641,7 +1654,6 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
         last_remote_transport_origin: None,
         last_periodic_sync_at: Instant::now(),
         online_playback_source: OnlinePlaybackSource::LocalQueue,
-        pending_verification_rx: None,
     };
 
     let mut pending_scrub_delta: i64 = 0;
@@ -1672,7 +1684,6 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
         pump_tray_events(&mut core);
         poll_library_scan(&mut core, &mut library_runtime);
         drain_online_network_events(&mut core, &mut *audio, &mut online_runtime);
-        poll_home_server_verification(&mut core, &mut online_runtime);
         audio.tick();
         maybe_publish_online_playback_sync(&core, &*audio, &mut online_runtime);
         let stats_identity_hint = online_streaming_stats_identity(&online_runtime, &*audio);
@@ -1788,7 +1799,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 && online_runtime.join_prompt_active
             {
                 append_invite_input(&mut online_runtime, text);
-                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                online_runtime.join_prompt_button = JoinPromptButton::Input;
                 core.status = join_prompt_input_status(
                     online_runtime.join_prompt_mode,
                     &online_runtime.join_code_input,
@@ -1971,10 +1982,10 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                     core.toggle_shuffle();
                     auto_save_state(&mut core, &*audio);
                 }
-                KeyCode::Tab => {
-                    let next_section = core.header_section.next();
-                    core.cycle_header_section();
-                    if next_section == HeaderSection::Online {
+                KeyCode::Char(_) if header_section_shortcut(key).is_some() => {
+                    let section = header_section_shortcut(key).expect("matched page shortcut");
+                    core.set_header_section(section);
+                    if section == HeaderSection::Online {
                         trigger_online_tab_entry(&mut core, &mut online_runtime);
                     }
                 }
@@ -2437,6 +2448,20 @@ fn key_event_matches_ctrl_char(key: &KeyEvent, expected: char) -> bool {
     key.modifiers.contains(KeyModifiers::CONTROL) && key_code_matches_char(key.code, expected)
 }
 
+fn header_section_shortcut(key: KeyEvent) -> Option<HeaderSection> {
+    if key.modifiers.contains(KeyModifiers::CONTROL) || key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+
+    match key.code {
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'h') => Some(HeaderSection::Library),
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'j') => Some(HeaderSection::Lyrics),
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'k') => Some(HeaderSection::Stats),
+        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'l') => Some(HeaderSection::Online),
+        _ => None,
+    }
+}
+
 fn online_tab_allows_global_shortcut(code: KeyCode) -> bool {
     matches!(
         code,
@@ -2571,7 +2596,10 @@ fn handle_lyrics_inline_input(core: &mut TuneCore, audio: &dyn AudioEngine, key:
         return false;
     }
 
-    if key.code == KeyCode::Tab || key.code == KeyCode::Char('/') {
+    if key.code == KeyCode::Char('/')
+        || (header_section_shortcut(key).is_some()
+            && (core.lyrics_missing_prompt || core.lyrics_mode != LyricsMode::Edit))
+    {
         return false;
     }
 
@@ -2666,7 +2694,8 @@ fn handle_online_inline_input(
                 online_runtime.join_directory_rooms.clear();
                 online_runtime.join_prompt_active = true;
                 online_runtime.join_prompt_mode = JoinPromptMode::Connect;
-                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                online_runtime.join_prompt_button =
+                    default_join_prompt_button(JoinPromptMode::Connect);
                 online_runtime.join_code_input = online_runtime.pending_join_server_addr.clone();
                 core.status = String::from("Connect to homeserver");
                 core.dirty = true;
@@ -2709,7 +2738,7 @@ fn handle_online_inline_input(
                     online_runtime.join_prompt_active = true;
                     online_runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
                     online_runtime.join_code_input.clear();
-                    online_runtime.join_prompt_button = JoinPromptButton::Join;
+                    online_runtime.join_prompt_button = JoinPromptButton::Input;
                     core.status = format!(
                         "Home server {} selected. Enter room name",
                         online_runtime.home_server_addr
@@ -2766,24 +2795,16 @@ fn handle_online_inline_input(
                 core.dirty = true;
                 return true;
             }
-            KeyCode::Tab => return false,
             _ => return true,
         }
     }
 
     if online_runtime.join_prompt_active {
-        if key.code == KeyCode::Tab
-            && matches!(
-                online_runtime.join_prompt_mode,
-                JoinPromptMode::Connect | JoinPromptMode::HostRoomName
-            )
-        {
-            return false;
-        }
         match key.code {
             KeyCode::Esc => {
                 if matches!(online_runtime.join_prompt_mode, JoinPromptMode::Connect) {
-                    core.status = String::from("Enter a homeserver or press Tab to switch tabs");
+                    core.status =
+                        String::from("Show public servers or select Server / Link to type");
                     core.dirty = true;
                     return true;
                 }
@@ -2793,7 +2814,8 @@ fn handle_online_inline_input(
                 );
                 online_runtime.join_prompt_active = false;
                 online_runtime.join_code_input.clear();
-                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                online_runtime.join_prompt_button =
+                    default_join_prompt_button(JoinPromptMode::Connect);
                 online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                 if was_host_room_name && online_runtime.home_server_connected {
                     online_runtime.pending_join_room_name = None;
@@ -2806,19 +2828,21 @@ fn handle_online_inline_input(
                 core.dirty = true;
                 return true;
             }
-            KeyCode::Tab
-            | KeyCode::BackTab
-            | KeyCode::Left
-            | KeyCode::Right
-            | KeyCode::Up
-            | KeyCode::Down => {
-                online_runtime.join_prompt_button = online_runtime.join_prompt_button.toggle();
+            KeyCode::Tab | KeyCode::Right | KeyCode::Down => {
+                online_runtime.join_prompt_button = online_runtime.join_prompt_button.next();
+                core.dirty = true;
+                return true;
+            }
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Up => {
+                online_runtime.join_prompt_button = online_runtime.join_prompt_button.previous();
                 core.dirty = true;
                 return true;
             }
             KeyCode::Backspace => {
+                if online_runtime.join_prompt_button != JoinPromptButton::Input {
+                    return true;
+                }
                 online_runtime.join_code_input.pop();
-                online_runtime.join_prompt_button = JoinPromptButton::Join;
                 core.status = join_prompt_input_status(
                     online_runtime.join_prompt_mode,
                     &online_runtime.join_code_input,
@@ -2838,7 +2862,7 @@ fn handle_online_inline_input(
                         core.status = format!("Clipboard paste failed: {err}");
                     }
                 }
-                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                online_runtime.join_prompt_button = JoinPromptButton::Input;
                 core.dirty = true;
                 return true;
             }
@@ -2853,7 +2877,33 @@ fn handle_online_inline_input(
                             core.status = format!("Clipboard paste failed: {err}");
                         }
                     }
-                    online_runtime.join_prompt_button = JoinPromptButton::Join;
+                    online_runtime.join_prompt_button = JoinPromptButton::Input;
+                    core.dirty = true;
+                    return true;
+                }
+                if matches!(
+                    (
+                        online_runtime.join_prompt_mode,
+                        online_runtime.join_prompt_button
+                    ),
+                    (JoinPromptMode::Connect, JoinPromptButton::Join)
+                ) {
+                    online_runtime.pending_join_server_addr =
+                        ensure_authority_port(String::from(ONLINE_PUBLIC_HOME_SERVER_ADDR));
+                    if load_home_room_directory(
+                        core,
+                        online_runtime,
+                        "Public room directory loaded",
+                    ) {
+                        online_runtime.join_prompt_active = false;
+                        online_runtime.join_code_input.clear();
+                        online_runtime.join_prompt_button =
+                            default_join_prompt_button(JoinPromptMode::Connect);
+                        online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+                        online_runtime.home_server_addr =
+                            online_runtime.pending_join_server_addr.clone();
+                        online_runtime.home_server_connected = true;
+                    }
                     core.dirty = true;
                     return true;
                 }
@@ -2869,7 +2919,8 @@ fn handle_online_inline_input(
                     let nickname = online_runtime.join_code_input.trim().to_string();
                     online_runtime.join_prompt_active = false;
                     online_runtime.join_code_input.clear();
-                    online_runtime.join_prompt_button = JoinPromptButton::Join;
+                    online_runtime.join_prompt_button =
+                        default_join_prompt_button(JoinPromptMode::Connect);
                     online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                     apply_online_nickname(core, online_runtime, &nickname);
                     auto_save_state(core, audio);
@@ -2880,6 +2931,8 @@ fn handle_online_inline_input(
                     } else {
                         online_runtime.join_prompt_active = true;
                         online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+                        online_runtime.join_prompt_button =
+                            default_join_prompt_button(JoinPromptMode::Connect);
                         core.status = String::from("Connect to homeserver to browse rooms");
                     }
                     core.dirty = true;
@@ -2895,7 +2948,8 @@ fn handle_online_inline_input(
                         Some(online_runtime.join_code_input.trim().to_string());
                     online_runtime.join_prompt_active = false;
                     online_runtime.join_code_input.clear();
-                    online_runtime.join_prompt_button = JoinPromptButton::Join;
+                    online_runtime.join_prompt_button =
+                        default_join_prompt_button(JoinPromptMode::Connect);
                     online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                     online_runtime.host_max_connections_input = String::from("8");
                     online_runtime.password_prompt_active = true;
@@ -2920,7 +2974,8 @@ fn handle_online_inline_input(
                     if load_home_room_directory(core, online_runtime, "Select a room to join") {
                         online_runtime.join_prompt_active = false;
                         online_runtime.join_code_input.clear();
-                        online_runtime.join_prompt_button = JoinPromptButton::Join;
+                        online_runtime.join_prompt_button =
+                            default_join_prompt_button(JoinPromptMode::Connect);
                         online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                         online_runtime.home_server_addr =
                             online_runtime.pending_join_server_addr.clone();
@@ -2938,7 +2993,8 @@ fn handle_online_inline_input(
                         if room.locked {
                             online_runtime.join_prompt_active = false;
                             online_runtime.join_code_input.clear();
-                            online_runtime.join_prompt_button = JoinPromptButton::Join;
+                            online_runtime.join_prompt_button =
+                                default_join_prompt_button(JoinPromptMode::Connect);
                             online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                             online_runtime.password_prompt_active = true;
                             online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
@@ -2949,7 +3005,8 @@ fn handle_online_inline_input(
                             if join_home_room(core, online_runtime, &server_addr, &room_name, "") {
                                 online_runtime.join_prompt_active = false;
                                 online_runtime.join_code_input.clear();
-                                online_runtime.join_prompt_button = JoinPromptButton::Join;
+                                online_runtime.join_prompt_button =
+                                    default_join_prompt_button(JoinPromptMode::Connect);
                                 online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                             }
                         }
@@ -2962,8 +3019,15 @@ fn handle_online_inline_input(
                 return true;
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if online_runtime.join_prompt_button != JoinPromptButton::Input {
+                    if matches!(online_runtime.join_prompt_mode, JoinPromptMode::Connect)
+                        && header_section_shortcut(key).is_some()
+                    {
+                        return false;
+                    }
+                    return true;
+                }
                 append_invite_char(online_runtime, ch);
-                online_runtime.join_prompt_button = JoinPromptButton::Join;
                 core.status = join_prompt_input_status(
                     online_runtime.join_prompt_mode,
                     &online_runtime.join_code_input,
@@ -2975,7 +3039,7 @@ fn handle_online_inline_input(
         }
     }
 
-    if key.code == KeyCode::Tab || key.code == KeyCode::Char('/') {
+    if header_section_shortcut(key).is_some() || key.code == KeyCode::Char('/') {
         return false;
     }
 
@@ -2984,7 +3048,7 @@ fn handle_online_inline_input(
             play_shared_queue_now(core, audio, online_runtime);
             true
         }
-        KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'l') => {
+        KeyCode::Char(_) if key_event_matches_ctrl_char(&key, 'l') => {
             if core.online.session.is_none() {
                 core.status = String::from("No room connected");
                 core.dirty = true;
@@ -3070,10 +3134,6 @@ fn handle_online_password_prompt_input(
     if key_event_matches_ctrl_char(&key, 'c') {
         return false;
     }
-    if key.code == KeyCode::Tab {
-        return false;
-    }
-
     match key.code {
         KeyCode::Esc => {
             online_runtime.password_prompt_active = false;
@@ -3475,14 +3535,12 @@ fn trigger_online_tab_entry(core: &mut TuneCore, online_runtime: &mut OnlineRunt
     {
         return;
     }
-    if online_runtime.pending_verification_rx.is_some() {
-        return;
-    }
     if !online_runtime.nickname_configured {
         online_runtime.join_prompt_active = true;
         online_runtime.join_prompt_mode = JoinPromptMode::NicknameForJoin;
         online_runtime.join_code_input.clear();
-        online_runtime.join_prompt_button = JoinPromptButton::Join;
+        online_runtime.join_prompt_button =
+            default_join_prompt_button(JoinPromptMode::NicknameForJoin);
         core.status = String::from("Set your online nickname");
         core.dirty = true;
         return;
@@ -3493,26 +3551,12 @@ fn trigger_online_tab_entry(core: &mut TuneCore, online_runtime: &mut OnlineRunt
         core.dirty = true;
         return;
     }
-    let server_addr = if online_runtime.home_server_addr.is_empty() {
-        String::from(ONLINE_DEFAULT_HOME_SERVER_ADDR)
-    } else {
-        online_runtime.home_server_addr.clone()
-    };
-    core.status = String::from("Connecting to home server...");
+    online_runtime.join_prompt_active = true;
+    online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+    online_runtime.join_code_input.clear();
+    online_runtime.join_prompt_button = default_join_prompt_button(JoinPromptMode::Connect);
+    core.status = String::from("Show public servers or select Server / Link to type");
     core.dirty = true;
-    let (tx, rx) = mpsc::channel();
-    online_runtime.pending_verification_rx = Some(rx);
-    thread::spawn(move || {
-        let result = match verify_home_server(&server_addr) {
-            Ok(()) => HomeServerVerifyResult::Success {
-                server_addr: server_addr.clone(),
-            },
-            Err(err) => HomeServerVerifyResult::Failure {
-                error: err.to_string(),
-            },
-        };
-        let _ = tx.send(result);
-    });
 }
 
 fn load_home_room_directory(
@@ -3543,37 +3587,6 @@ fn refresh_room_directory(core: &mut TuneCore, online_runtime: &mut OnlineRuntim
         online_runtime.join_directory_rooms = rooms;
         online_runtime.last_directory_refresh_at = Instant::now();
         if !had_rooms && !online_runtime.join_directory_rooms.is_empty() {
-            core.dirty = true;
-        }
-    }
-}
-
-fn poll_home_server_verification(core: &mut TuneCore, online_runtime: &mut OnlineRuntime) {
-    let Some(rx) = online_runtime.pending_verification_rx.as_ref() else {
-        return;
-    };
-    match rx.try_recv() {
-        Ok(HomeServerVerifyResult::Success { server_addr }) => {
-            online_runtime.pending_verification_rx = None;
-            online_runtime.home_server_addr = server_addr.clone();
-            online_runtime.home_server_connected = true;
-            online_runtime.pending_join_server_addr = server_addr;
-            load_home_room_directory(core, online_runtime, "Connected and loaded room directory");
-            core.dirty = true;
-        }
-        Ok(HomeServerVerifyResult::Failure { error }) => {
-            online_runtime.pending_verification_rx = None;
-            online_runtime.join_prompt_active = true;
-            online_runtime.join_prompt_mode = JoinPromptMode::Connect;
-            online_runtime.join_code_input.clear();
-            online_runtime.join_prompt_button = JoinPromptButton::Join;
-            core.status = format!("Homeserver unavailable: {error}. Enter address to connect.");
-            core.dirty = true;
-        }
-        Err(mpsc::TryRecvError::Empty) => {}
-        Err(mpsc::TryRecvError::Disconnected) => {
-            online_runtime.pending_verification_rx = None;
-            core.status = String::from("Home server verification failed unexpectedly");
             core.dirty = true;
         }
     }
@@ -6593,7 +6606,6 @@ mod tests {
             last_remote_transport_origin: None,
             last_periodic_sync_at: Instant::now(),
             online_playback_source: OnlinePlaybackSource::LocalQueue,
-            pending_verification_rx: None,
         }
     }
 
@@ -9055,6 +9067,46 @@ mod tests {
     }
 
     #[test]
+    fn page_shortcuts_map_to_header_sections() {
+        assert_eq!(
+            header_section_shortcut(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE)),
+            Some(HeaderSection::Library)
+        );
+        assert_eq!(
+            header_section_shortcut(KeyEvent::new(KeyCode::Char('H'), KeyModifiers::NONE)),
+            Some(HeaderSection::Library)
+        );
+        assert_eq!(
+            header_section_shortcut(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(HeaderSection::Lyrics)
+        );
+        assert_eq!(
+            header_section_shortcut(KeyEvent::new(KeyCode::Char('J'), KeyModifiers::NONE)),
+            Some(HeaderSection::Lyrics)
+        );
+        assert_eq!(
+            header_section_shortcut(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE)),
+            Some(HeaderSection::Stats)
+        );
+        assert_eq!(
+            header_section_shortcut(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::NONE)),
+            Some(HeaderSection::Stats)
+        );
+        assert_eq!(
+            header_section_shortcut(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+            Some(HeaderSection::Online)
+        );
+        assert_eq!(
+            header_section_shortcut(KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE)),
+            Some(HeaderSection::Online)
+        );
+        assert_eq!(
+            header_section_shortcut(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
+            None
+        );
+    }
+
+    #[test]
     fn join_prompt_allows_typing_v_without_triggering_paste() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
@@ -9063,6 +9115,7 @@ mod tests {
         runtime.local_nickname = String::from("tester");
         runtime.join_prompt_active = true;
         runtime.join_code_input = String::from("AB");
+        runtime.join_prompt_button = JoinPromptButton::Input;
 
         assert!(handle_online_inline_input(
             &mut core,
@@ -9074,7 +9127,7 @@ mod tests {
     }
 
     #[test]
-    fn online_connect_prompt_does_not_consume_tab() {
+    fn online_connect_prompt_button_focus_does_not_consume_page_shortcut() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
         let mut audio = NullAudioEngine::new();
@@ -9082,13 +9135,35 @@ mod tests {
         runtime.local_nickname = String::from("tester");
         runtime.join_prompt_active = true;
         runtime.join_prompt_mode = JoinPromptMode::Connect;
+        runtime.join_prompt_button = JoinPromptButton::Join;
 
         assert!(!handle_online_inline_input(
             &mut core,
             &mut audio,
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
             &mut runtime,
         ));
+        assert!(runtime.join_code_input.is_empty());
+    }
+
+    #[test]
+    fn online_connect_prompt_input_focus_allows_page_shortcut_chars_as_input() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.join_prompt_active = true;
+        runtime.join_prompt_mode = JoinPromptMode::Connect;
+        runtime.join_prompt_button = JoinPromptButton::Input;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.join_code_input, "h");
     }
 
     #[test]
@@ -9142,7 +9217,7 @@ mod tests {
     }
 
     #[test]
-    fn online_room_name_prompt_does_not_consume_tab() {
+    fn online_room_name_prompt_allows_page_shortcut_chars_as_input() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
         let mut audio = NullAudioEngine::new();
@@ -9150,13 +9225,15 @@ mod tests {
         runtime.local_nickname = String::from("tester");
         runtime.join_prompt_active = true;
         runtime.join_prompt_mode = JoinPromptMode::HostRoomName;
+        runtime.join_prompt_button = JoinPromptButton::Input;
 
-        assert!(!handle_online_inline_input(
+        assert!(handle_online_inline_input(
             &mut core,
             &mut audio,
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE),
             &mut runtime,
         ));
+        assert_eq!(runtime.join_code_input, "k");
     }
 
     #[test]
@@ -9185,18 +9262,19 @@ mod tests {
     }
 
     #[test]
-    fn online_password_prompt_does_not_consume_tab() {
+    fn online_password_prompt_allows_page_shortcut_chars_as_input() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
         let mut runtime = test_online_runtime();
         runtime.password_prompt_active = true;
         runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
 
-        assert!(!handle_online_password_prompt_input(
+        assert!(handle_online_password_prompt_input(
             &mut core,
-            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE),
             &mut runtime,
         ));
+        assert_eq!(runtime.password_input, "j");
     }
 
     #[test]
@@ -9286,11 +9364,26 @@ mod tests {
         assert!(runtime.join_prompt_active);
         assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
         assert_eq!(runtime.join_code_input, "matrix.example:443");
-        assert!(runtime.pending_verification_rx.is_none());
     }
 
     #[test]
-    fn online_tab_uppercase_l_leaves_room() {
+    fn trigger_online_tab_entry_defaults_to_public_servers_button() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.nickname_configured = true;
+        runtime.home_server_connected = false;
+
+        trigger_online_tab_entry(&mut core, &mut runtime);
+
+        assert!(runtime.join_prompt_active);
+        assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
+        assert_eq!(runtime.join_prompt_button, JoinPromptButton::Join);
+        assert!(runtime.join_code_input.is_empty());
+    }
+
+    #[test]
+    fn online_tab_ctrl_l_leaves_room() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
         let mut audio = NullAudioEngine::new();
@@ -9301,10 +9394,28 @@ mod tests {
         assert!(handle_online_inline_input(
             &mut core,
             &mut audio,
-            KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
             &mut runtime,
         ));
         assert!(core.online.session.is_none());
+    }
+
+    #[test]
+    fn online_tab_l_is_page_shortcut() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        core.online_host_room("tester");
+
+        assert!(!handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(core.online.session.is_some());
     }
 
     #[test]
@@ -9319,7 +9430,7 @@ mod tests {
         assert!(handle_online_inline_input(
             &mut core,
             &mut audio,
-            KeyEvent::new(KeyCode::Char('L'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL),
             &mut runtime,
         ));
 

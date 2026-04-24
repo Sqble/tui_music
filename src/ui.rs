@@ -44,6 +44,8 @@ pub struct OnlinePasswordPromptView {
 
 pub struct JoinPromptModalView {
     pub invite_code: String,
+    pub input_selected: bool,
+    pub primary_selected: bool,
     pub paste_selected: bool,
     pub room_name_mode: bool,
     pub nickname_mode: bool,
@@ -575,13 +577,13 @@ pub fn draw(
     frame.render_widget(control_block, vertical[3]);
 
     let key_hint = if core.header_section == HeaderSection::Stats {
-        "Keys: Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top, Tab tabs"
+        "Keys: h/j/k/l pages, Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top"
     } else if core.header_section == HeaderSection::Lyrics {
-        "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions, Tab tabs"
+        "Keys: h/j/k/l pages, Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: Enter select/join, Ctrl+n shared now, l leave room, o mode, q quality, t hide/show code, 2 copy code, Tab tabs"
+        "Keys: h/j/k/l pages, Enter select/join, Ctrl+n shared now, Ctrl+l leave room, o mode, q quality, t hide/show code, 2 copy code"
     } else {
-        "Keys: Enter play, Backspace back, n next, b previous, a/d scrub, m repeat, v shuffle, / actions, t tray, Ctrl+C quit"
+        "Keys: h/j/k/l pages, Enter play, Backspace back, n next, b previous, a/d scrub, m repeat, v shuffle, / actions, t tray, Ctrl+C quit"
     };
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(key_hint, Style::default().fg(colors.muted)),
@@ -800,7 +802,7 @@ fn draw_online_password_prompt_inline(
             Style::default().fg(colors.muted),
         )),
         Line::from(Span::styled(
-            "Tab - Switch tabs",
+            "h/j/k/l - Switch pages",
             Style::default().fg(colors.muted),
         )),
     ];
@@ -841,7 +843,15 @@ fn join_prompt_help_line(modal: &JoinPromptModalView) -> &'static str {
     } else if modal.room_name_mode {
         "Type room name. Enter continues. Esc goes back to room directory."
     } else {
-        "Type homeserver address or room link. Server-only opens room directory; link with /room/<name> auto-joins."
+        "Show public servers, or select Server / Link to type a homeserver or room link."
+    }
+}
+
+fn join_prompt_primary_label(modal: &JoinPromptModalView) -> &'static str {
+    if modal.connect_mode {
+        "[ Show Public Servers ]"
+    } else {
+        "[ Continue ]"
     }
 }
 
@@ -870,22 +880,43 @@ fn draw_join_prompt_inline(
         Line::from(vec![
             Span::styled(
                 join_prompt_input_label(modal),
-                Style::default().fg(colors.muted),
-            ),
-            Span::styled(": ", Style::default().fg(colors.muted)),
-            Span::styled(modal.invite_code.as_str(), Style::default().fg(colors.text)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(
-                "[ Continue ]",
-                if modal.paste_selected {
-                    Style::default().fg(colors.muted)
-                } else {
+                if modal.input_selected {
                     Style::default()
                         .fg(colors.text)
                         .bg(colors.selected_bg)
                         .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(colors.muted)
+                },
+            ),
+            Span::styled(
+                ": ",
+                if modal.input_selected {
+                    Style::default().fg(colors.text).bg(colors.selected_bg)
+                } else {
+                    Style::default().fg(colors.muted)
+                },
+            ),
+            Span::styled(
+                modal.invite_code.as_str(),
+                if modal.input_selected {
+                    Style::default().fg(colors.text).bg(colors.selected_bg)
+                } else {
+                    Style::default().fg(colors.text)
+                },
+            ),
+        ]),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(
+                join_prompt_primary_label(modal),
+                if modal.primary_selected {
+                    Style::default()
+                        .fg(colors.text)
+                        .bg(colors.selected_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(colors.muted)
                 },
             ),
             Span::raw("   "),
@@ -926,11 +957,15 @@ fn draw_join_prompt_inline(
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "Enter - Continue",
+            "Enter - Activate selected",
             Style::default().fg(colors.muted),
         )),
         Line::from(Span::styled(
-            "Left/Right/Up/Down - Select button",
+            "Left/Right/Up/Down/Tab - Select field/button",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            "Type - Edit selected text field",
             Style::default().fg(colors.muted),
         )),
         Line::from(Span::styled(
@@ -938,7 +973,7 @@ fn draw_join_prompt_inline(
             Style::default().fg(colors.muted),
         )),
         Line::from(Span::styled(
-            "Tab - Switch tabs",
+            "h/j/k/l - Switch pages",
             Style::default().fg(colors.muted),
         )),
     ];
@@ -1123,7 +1158,10 @@ fn header_tabs_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'sta
         if section == selected {
             style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         }
-        spans.push(Span::styled(section.label(), style));
+        spans.push(Span::styled(
+            format!("{} {}", section.shortcut(), section.label()),
+            style,
+        ));
     }
 
     Line::from(spans)
@@ -1131,19 +1169,22 @@ fn header_tabs_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'sta
 
 fn header_tabs_width() -> u16 {
     let labels = [
-        HeaderSection::Library.label(),
-        HeaderSection::Lyrics.label(),
-        HeaderSection::Stats.label(),
-        HeaderSection::Online.label(),
+        HeaderSection::Library,
+        HeaderSection::Lyrics,
+        HeaderSection::Stats,
+        HeaderSection::Online,
     ];
-    let labels_len: usize = labels.iter().map(|label| label.len()).sum();
+    let labels_len: usize = labels
+        .iter()
+        .map(|section| section.label().len() + section.shortcut().len_utf8() + 1)
+        .sum();
     let separators_len = " -- ".len() * labels.len().saturating_sub(1);
     (labels_len + separators_len) as u16
 }
 
 fn header_switch_hint_line(colors: &ThemePalette) -> Line<'static> {
     Line::from(Span::styled(
-        "Press Tab to switch",
+        "h/j/k/l pages",
         Style::default()
             .fg(colors.switch_hint)
             .add_modifier(Modifier::BOLD),

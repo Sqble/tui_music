@@ -22,7 +22,7 @@ Full documentation available at **https://tunetui.online**
 - Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\.config\tunetui\state.json` on Windows)
 - Stats sidecar in config dir with metadata-keyed listen events/aggregates
 - Keyboard-driven TUI with actions panel search, recent actions, and overflow scrollbar
-- Right-aligned status tabs with `Tab` cycling (Library, Lyrics, Stats, Online)
+- Right-aligned status tabs with direct page keys (`h` Library, `j` Lyrics, `k` Stats, `l` Online)
 - Song Info panel renders now-playing embedded album art as cached Unicode color raster
 - Stats tab with totals, ASCII charts, and range-filtered recent listen log
 - Lyrics tab with live line sync from `.lrc` sidecars or embedded metadata
@@ -46,7 +46,7 @@ Download `tune.exe` from releases and run. No installation required.
 
 ### Adding Music
 
-1. Press `Tab` to switch to Library tab
+1. Press `h` to switch to Library page
 2. Press `/` to open actions panel
 3. Select "Add directory"
 4. Choose your music folder
@@ -67,8 +67,9 @@ Download `tune.exe` from releases and run. No installation required.
 | `=` `+` | Volume up |
 | `-` `_` | Volume down |
 | `/` | Open actions panel |
-| `Tab` | Cycle tabs (Library/Lyrics/Stats/Online) |
+| `h` `j` `k` `l` | Switch pages (Library/Lyrics/Stats/Online) |
 | `Ctrl+n` | In Online tab, start shared queue playback / next shared item |
+| `Ctrl+l` | In Online tab, leave room |
 | `Ctrl+c` | Quit |
 
 Queue tools are available from the actions panel in Library (`/`), including root entries for `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online).
@@ -79,18 +80,18 @@ Use the actions panel entry "View audio quality + spectrograph" to run one-time 
 A public server is available at **tunetui.online** — anyone can use it to host or join rooms.
 
 **Host a room:**
-1. `Tab` to Online tab
-2. `h` to host
-3. Enter room name (optional password)
+1. Press `l` for Online page
+2. Select `[+] Create Room`
+3. Enter room name and optional password
 4. Share invite code
 
 **Join a room:**
-1. `Tab` to Online tab  
-2. `j` to join
-3. Enter server (`tunetui.online`) or room link in the embedded Online panel
+1. Press `l` for Online page  
+2. Press Enter on `[ Show Public Servers ]`, or select `Server / Link` to type a custom server/link
+3. Select a room from the directory
 4. Enter invite code (and password if needed)
 
-Homeserver, room creation, and password prompts stay embedded in the Online tab so `Tab` still switches tabs normally.
+Homeserver, room creation, and password prompts stay embedded in the Online page; use `h`/`j`/`k`/`l` to switch pages.
 
 **Online quick control:**
 - In Online tab, `Ctrl+n` starts shared queue playback immediately (or jumps to the next shared item)

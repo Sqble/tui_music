@@ -62,21 +62,21 @@ impl StatsFilterFocus {
 }
 
 impl HeaderSection {
-    pub fn next(self) -> Self {
-        match self {
-            Self::Library => Self::Lyrics,
-            Self::Lyrics => Self::Stats,
-            Self::Stats => Self::Online,
-            Self::Online => Self::Library,
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Library => "Library",
             Self::Lyrics => "Lyrics",
             Self::Stats => "Stats",
             Self::Online => "Online",
+        }
+    }
+
+    pub fn shortcut(self) -> char {
+        match self {
+            Self::Library => 'h',
+            Self::Lyrics => 'j',
+            Self::Stats => 'k',
+            Self::Online => 'l',
         }
     }
 }
@@ -739,8 +739,8 @@ impl TuneCore {
         self.set_status(&format!("Repeat: {}", self.repeat_mode.label()));
     }
 
-    pub fn cycle_header_section(&mut self) {
-        self.header_section = self.header_section.next();
+    pub fn set_header_section(&mut self, section: HeaderSection) {
+        self.header_section = section;
         self.set_status(&format!("Section: {}", self.header_section.label()));
     }
 
@@ -2319,18 +2319,13 @@ mod tests {
     }
 
     #[test]
-    fn cycle_header_section_wraps_and_updates_status() {
+    fn set_header_section_updates_status() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
-        assert_eq!(core.header_section, HeaderSection::Library);
 
-        core.cycle_header_section();
-        assert_eq!(core.header_section, HeaderSection::Lyrics);
-        assert_eq!(core.status, "Section: Lyrics");
+        core.set_header_section(HeaderSection::Online);
 
-        core.cycle_header_section();
-        core.cycle_header_section();
-        core.cycle_header_section();
-        assert_eq!(core.header_section, HeaderSection::Library);
+        assert_eq!(core.header_section, HeaderSection::Online);
+        assert_eq!(core.status, "Section: Online");
     }
 
     #[test]
