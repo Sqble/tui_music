@@ -103,6 +103,23 @@ fn palette(theme: Theme) -> ThemePalette {
             popup_selected_bg: Color::Rgb(45, 70, 99),
             switch_hint: Color::Rgb(255, 122, 165),
         },
+        Theme::System => ThemePalette {
+            bg: Color::Reset,
+            panel_bg: Color::Reset,
+            content_panel_bg: Color::Reset,
+            content_panel_alt_bg: Color::Reset,
+            border: Color::Blue,
+            text: Color::Reset,
+            muted: Color::DarkGray,
+            accent: Color::Cyan,
+            alert: Color::Yellow,
+            playlist: Color::Blue,
+            all_songs: Color::Yellow,
+            selected_bg: Color::DarkGray,
+            popup_bg: Color::Reset,
+            popup_selected_bg: Color::DarkGray,
+            switch_hint: Color::Magenta,
+        },
         Theme::PitchBlack => ThemePalette {
             bg: Color::Rgb(0, 0, 0),
             panel_bg: Color::Rgb(20, 20, 20),
@@ -3056,6 +3073,16 @@ mod tests {
         let line = room_directory_line("[lock] demo 1/8", Style::default(), &colors);
         assert_eq!(line.spans[0].content.as_ref(), "[lock]");
         assert_eq!(line.spans[0].style.fg, Some(colors.alert));
+    }
+
+    #[test]
+    fn system_palette_uses_terminal_colors() {
+        let colors = palette(Theme::System);
+
+        assert_eq!(colors.bg, Color::Reset);
+        assert_eq!(colors.text, Color::Reset);
+        assert_eq!(colors.accent, Color::Cyan);
+        assert_eq!(colors.border, Color::Blue);
     }
 
     #[test]

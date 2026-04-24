@@ -14,6 +14,7 @@ pub enum PlaybackMode {
 pub enum Theme {
     #[default]
     Dark,
+    System,
     PitchBlack,
     Galaxy,
     Matrix,

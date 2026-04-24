@@ -35,7 +35,7 @@ Full documentation available at **https://tunetui.online**
 - Selected output speaker persists across launches with fallback to default
 - Linux TUI sessions suppress backend stderr splash and bias output buffering toward underrun-resistant playback
 - Volume level persists across launches
-- Playback settings: loudness normalization, crossfade, scrub length, stats tracking, top songs rows, missing-cover fallback template, themes
+- Playback settings: loudness normalization, crossfade, scrub length, stats tracking, top songs rows, missing-cover fallback template, themes including terminal/system colors on Linux
 - Online tab: TCP host/client room sync, room-code handshake, collaborative/host-only modes, shared queue, password-encrypted invite codes
 - Clipboard fallback to OSC 52 for SSH
 - Auto-save on state-changing actions
@@ -155,7 +155,9 @@ Files:
 - `stats.json` — Listen history and statistics
 - `lyrics/` — LRC sidecar files
 
-Themes (actions panel → Playback settings): Dark, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy
+Themes (actions panel → Theme): Dark, System / Terminal, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy
+
+The System / Terminal theme uses terminal ANSI/default colors, so Linux desktops that theme the terminal palette, including Omarchy/Hyprland setups, can make TuneTUI follow the active desktop theme without TuneTUI parsing desktop-specific files.
 
 ## Fuzzing
 

@@ -4791,28 +4791,56 @@ fn online_delay_settings_options(core: &TuneCore) -> Vec<String> {
 }
 
 fn theme_options(theme: Theme) -> Vec<String> {
-    [
+    selectable_themes()
+        .iter()
+        .copied()
+        .map(|entry| {
+            if entry == theme {
+                format!("* {}", theme_label(entry))
+            } else {
+                theme_label(entry).to_string()
+            }
+        })
+        .collect()
+}
+
+fn selectable_themes() -> &'static [Theme] {
+    &[
         Theme::Dark,
+        Theme::System,
         Theme::PitchBlack,
         Theme::Galaxy,
         Theme::Matrix,
         Theme::Demonic,
         Theme::CottonCandy,
     ]
-    .into_iter()
-    .map(|entry| {
-        if entry == theme {
-            format!("* {}", theme_label(entry))
-        } else {
-            theme_label(entry).to_string()
-        }
-    })
-    .collect()
+}
+
+fn selected_theme_index(theme: Theme) -> usize {
+    match theme {
+        Theme::Ocean => selectable_themes()
+            .iter()
+            .position(|entry| *entry == Theme::Dark)
+            .unwrap_or(0),
+        Theme::Forest => selectable_themes()
+            .iter()
+            .position(|entry| *entry == Theme::Matrix)
+            .unwrap_or(0),
+        Theme::Sunset => selectable_themes()
+            .iter()
+            .position(|entry| *entry == Theme::CottonCandy)
+            .unwrap_or(0),
+        current => selectable_themes()
+            .iter()
+            .position(|entry| *entry == current)
+            .unwrap_or(0),
+    }
 }
 
 fn theme_label(theme: Theme) -> &'static str {
     match theme {
         Theme::Dark => "Dark",
+        Theme::System => "System / Terminal",
         Theme::PitchBlack => "Pitch Black",
         Theme::Galaxy => "Galaxy",
         Theme::Matrix => "Matrix",
@@ -5097,7 +5125,7 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
         ActionPanelState::PlaybackSettings { .. } => 9,
         ActionPanelState::OnlineDelaySettings { .. } => 6,
-        ActionPanelState::ThemeSettings { .. } => 6,
+        ActionPanelState::ThemeSettings { .. } => selectable_themes().len(),
         ActionPanelState::OnlineNickname { .. } => 1,
         ActionPanelState::LyricsImportTxt { .. } => 3,
         ActionPanelState::MetadataEditor { state, .. } => state.options().len(),
@@ -5414,14 +5442,7 @@ fn handle_action_panel_input_with_recent(
                         core.dirty = true;
                     }
                     RootActionId::Theme => {
-                        let selected = match core.theme {
-                            Theme::Dark | Theme::Ocean => 0,
-                            Theme::PitchBlack => 1,
-                            Theme::Galaxy => 2,
-                            Theme::Matrix | Theme::Forest => 3,
-                            Theme::Demonic => 4,
-                            Theme::CottonCandy | Theme::Sunset => 5,
-                        };
+                        let selected = selected_theme_index(core.theme);
                         *panel = ActionPanelState::ThemeSettings { selected };
                         core.dirty = true;
                     }
@@ -5771,14 +5792,10 @@ fn handle_action_panel_input_with_recent(
                 }
             },
             ActionPanelState::ThemeSettings { selected } => {
-                core.theme = match selected {
-                    0 => Theme::Dark,
-                    1 => Theme::PitchBlack,
-                    2 => Theme::Galaxy,
-                    3 => Theme::Matrix,
-                    4 => Theme::Demonic,
-                    _ => Theme::CottonCandy,
-                };
+                core.theme = selectable_themes()
+                    .get(selected)
+                    .copied()
+                    .unwrap_or(Theme::Dark);
                 core.status = format!("Theme: {}", theme_label(core.theme));
                 core.dirty = true;
                 auto_save_state(core, &*audio);
@@ -7551,8 +7568,16 @@ mod tests {
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
-        assert_eq!(core.theme, Theme::PitchBlack);
-        assert_eq!(core.status, "Theme: Pitch Black");
+        assert_eq!(core.theme, Theme::System);
+        assert_eq!(core.status, "Theme: System / Terminal");
+    }
+
+    #[test]
+    fn theme_options_include_system_terminal_theme() {
+        let options = theme_options(Theme::System);
+
+        assert!(options.contains(&String::from("* System / Terminal")));
+        assert_eq!(options.len(), selectable_themes().len());
     }
 
     #[test]
