@@ -53,6 +53,41 @@ const HOME_ROOM_EMPTY_GRACE_PERIOD: Duration = Duration::from_secs(3);
 const HOME_ROOM_MAX_CONNECTIONS_MIN: u16 = 2;
 const HOME_ROOM_MAX_CONNECTIONS_MAX: u16 = 32;
 
+#[derive(Debug, Clone, Copy)]
+enum HostLogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
+impl HostLogLevel {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Warn => "WARN",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+fn host_log(enabled: bool, level: HostLogLevel, message: impl std::fmt::Display) {
+    if !enabled {
+        return;
+    }
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    eprintln!("{timestamp_ms} {} {message}", level.label());
+}
+
+fn room_port_range_label(room_port_range: Option<(u16, u16)>) -> String {
+    match room_port_range {
+        Some((start, end)) => format!("{start}-{end}"),
+        None => String::from("dynamic"),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HomeRoomDirectoryEntry {
     pub room_name: String,
@@ -190,9 +225,25 @@ impl OnlineNetwork {
 
     pub fn start_host_with_max(
         bind_addr: &str,
+        session: OnlineSession,
+        expected_password: Option<String>,
+        max_peers: usize,
+    ) -> anyhow::Result<Self> {
+        Self::start_host_with_max_and_logging(
+            bind_addr,
+            session,
+            expected_password,
+            max_peers,
+            false,
+        )
+    }
+
+    fn start_host_with_max_and_logging(
+        bind_addr: &str,
         mut session: OnlineSession,
         expected_password: Option<String>,
         max_peers: usize,
+        log_events: bool,
     ) -> anyhow::Result<Self> {
         let listener = TcpListener::bind(bind_addr)
             .with_context(|| format!("failed to bind online host at {bind_addr}"))?;
@@ -205,6 +256,19 @@ impl OnlineNetwork {
 
         let (cmd_tx, cmd_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
+        host_log(
+            log_events,
+            HostLogLevel::Info,
+            format_args!(
+                "room host listening room={} bind={} max_peers={} locked={}",
+                session.room_code,
+                bound_addr,
+                max_peers,
+                expected_password
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+            ),
+        );
 
         thread::spawn(move || {
             host_loop(
@@ -214,6 +278,7 @@ impl OnlineNetwork {
                 max_peers,
                 cmd_rx,
                 event_tx,
+                log_events,
             )
         });
 
@@ -373,6 +438,14 @@ pub fn start_home_server(
     bind_addr: &str,
     room_port_range: Option<(u16, u16)>,
 ) -> anyhow::Result<HomeServerHandle> {
+    start_home_server_with_logging(bind_addr, room_port_range, false)
+}
+
+fn start_home_server_with_logging(
+    bind_addr: &str,
+    room_port_range: Option<(u16, u16)>,
+    log_events: bool,
+) -> anyhow::Result<HomeServerHandle> {
     let listener = TcpListener::bind(bind_addr)
         .with_context(|| format!("failed to bind home server at {bind_addr}"))?;
     listener
@@ -382,18 +455,42 @@ pub fn start_home_server(
     let bind = listener
         .local_addr()
         .context("failed to get local home addr")?;
+    host_log(
+        log_events,
+        HostLogLevel::Info,
+        format_args!(
+            "home server listening bind={bind_addr} local={bind} room_ports={}",
+            room_port_range_label(room_port_range)
+        ),
+    );
     let bind_addr_for_closure = bind_addr.to_string();
     let join_handle = thread::spawn(move || {
         let mut rooms: HashMap<String, HostedRoom> = HashMap::new();
         loop {
             if shutdown_rx.try_recv().is_ok() {
+                host_log(
+                    log_events,
+                    HostLogLevel::Info,
+                    "home server shutdown requested",
+                );
                 break;
             }
 
             for room in rooms.values_mut() {
                 while let Some(event) = room.network.try_recv_event() {
                     if let NetworkEvent::SessionSync(session) = event {
-                        room.current_connections = session.participants.len() as u16;
+                        let current_connections = session.participants.len() as u16;
+                        if current_connections != room.current_connections {
+                            host_log(
+                                log_events,
+                                HostLogLevel::Info,
+                                format_args!(
+                                    "room connections changed room={} current={} max={}",
+                                    room.room_name, current_connections, room.max_connections
+                                ),
+                            );
+                        }
+                        room.current_connections = current_connections;
                     }
                 }
             }
@@ -415,27 +512,67 @@ pub fn start_home_server(
             }
             for key in rooms_to_close {
                 if let Some(room) = rooms.remove(&key) {
+                    host_log(
+                        log_events,
+                        HostLogLevel::Info,
+                        format_args!("room closed room={} reason=empty", room.room_name),
+                    );
                     room.network.shutdown();
                 }
             }
 
             match listener.accept() {
-                Ok((mut stream, _)) => {
+                Ok((mut stream, peer_addr)) => {
+                    host_log(
+                        log_events,
+                        HostLogLevel::Info,
+                        format_args!("home request accepted peer={peer_addr}"),
+                    );
                     let _ = stream.set_nonblocking(false);
                     let mut reader = BufReader::new(match stream.try_clone() {
                         Ok(clone) => clone,
-                        Err(_) => continue,
+                        Err(err) => {
+                            host_log(
+                                log_events,
+                                HostLogLevel::Warn,
+                                format_args!(
+                                    "home request clone failed peer={peer_addr} error={err}"
+                                ),
+                            );
+                            continue;
+                        }
                     });
                     let mut line = String::new();
                     let read = reader.read_line(&mut line).unwrap_or_default();
                     if read == 0 {
+                        host_log(
+                            log_events,
+                            HostLogLevel::Warn,
+                            format_args!("home request empty peer={peer_addr}"),
+                        );
                         continue;
                     }
                     let request = serde_json::from_str::<HomeRequest>(line.trim_end());
                     let response = match request {
-                        Ok(HomeRequest::Verify) => HomeResponse::Ok,
+                        Ok(HomeRequest::Verify) => {
+                            host_log(
+                                log_events,
+                                HostLogLevel::Info,
+                                format_args!("home verify peer={peer_addr}"),
+                            );
+                            HomeResponse::Ok
+                        }
                         Ok(HomeRequest::ListRooms { query }) => {
                             let query = query.unwrap_or_default().to_ascii_lowercase();
+                            host_log(
+                                log_events,
+                                HostLogLevel::Info,
+                                format_args!(
+                                    "home list rooms peer={peer_addr} query={} rooms={}",
+                                    query,
+                                    rooms.len()
+                                ),
+                            );
                             let mut items: Vec<HomeRoomDirectoryEntry> = rooms
                                 .values()
                                 .filter(|room| {
@@ -454,6 +591,11 @@ pub fn start_home_server(
                             HomeResponse::Rooms { rooms: items }
                         }
                         Ok(HomeRequest::ResolveRoom { room_name }) => {
+                            host_log(
+                                log_events,
+                                HostLogLevel::Info,
+                                format_args!("home resolve room peer={peer_addr} room={room_name}"),
+                            );
                             match room_by_name(&rooms, &room_name) {
                                 Some(room) => HomeResponse::RoomResolved {
                                     room: home_room_resolved_wire(
@@ -474,7 +616,24 @@ pub fn start_home_server(
                             max_connections,
                         }) => {
                             let name = room_name.trim();
+                            let locked = password
+                                .as_deref()
+                                .is_some_and(|value| !value.trim().is_empty());
+                            host_log(
+                                log_events,
+                                HostLogLevel::Info,
+                                format_args!(
+                                    "home create room requested peer={peer_addr} room={name} owner={owner_nickname} max={max_connections} locked={locked}"
+                                ),
+                            );
                             if name.is_empty() {
+                                host_log(
+                                    log_events,
+                                    HostLogLevel::Warn,
+                                    format_args!(
+                                        "home create room rejected peer={peer_addr} reason=missing_name"
+                                    ),
+                                );
                                 HomeResponse::Error {
                                     message: String::from("room name is required"),
                                 }
@@ -482,6 +641,13 @@ pub fn start_home_server(
                                 ..=HOME_ROOM_MAX_CONNECTIONS_MAX)
                                 .contains(&max_connections)
                             {
+                                host_log(
+                                    log_events,
+                                    HostLogLevel::Warn,
+                                    format_args!(
+                                        "home create room rejected peer={peer_addr} room={name} reason=invalid_max max={max_connections}"
+                                    ),
+                                );
                                 HomeResponse::Error {
                                     message: format!(
                                         "max connections must be {}..={} ",
@@ -490,6 +656,13 @@ pub fn start_home_server(
                                     ),
                                 }
                             } else if room_by_name(&rooms, name).is_some() {
+                                host_log(
+                                    log_events,
+                                    HostLogLevel::Warn,
+                                    format_args!(
+                                        "home create room rejected peer={peer_addr} room={name} reason=duplicate"
+                                    ),
+                                );
                                 HomeResponse::Error {
                                     message: String::from("room already exists"),
                                 }
@@ -507,6 +680,7 @@ pub fn start_home_server(
                                         .filter(|value| !value.is_empty())
                                         .map(str::to_string),
                                     usize::from(max_connections),
+                                    log_events,
                                 ) {
                                     Ok(network) => {
                                         let room_port = network
@@ -529,6 +703,13 @@ pub fn start_home_server(
                                                 empty_since: None,
                                             },
                                         );
+                                        host_log(
+                                            log_events,
+                                            HostLogLevel::Info,
+                                            format_args!(
+                                                "room created room={name} port={room_port} max={max_connections} locked={locked}"
+                                            ),
+                                        );
                                         match room_by_name(&rooms, name) {
                                             Some(room) => HomeResponse::RoomResolved {
                                                 room: home_room_resolved_wire(
@@ -544,27 +725,53 @@ pub fn start_home_server(
                                             },
                                         }
                                     }
-                                    Err(err) => HomeResponse::Error {
-                                        message: format!("failed to create room host: {err}"),
-                                    },
+                                    Err(err) => {
+                                        host_log(
+                                            log_events,
+                                            HostLogLevel::Error,
+                                            format_args!(
+                                                "room create failed room={name} error={err}"
+                                            ),
+                                        );
+                                        HomeResponse::Error {
+                                            message: format!("failed to create room host: {err}"),
+                                        }
+                                    }
                                 }
                             }
                         }
-                        Err(err) => HomeResponse::Error {
-                            message: format!("invalid request: {err}"),
-                        },
+                        Err(err) => {
+                            host_log(
+                                log_events,
+                                HostLogLevel::Warn,
+                                format_args!("home request invalid peer={peer_addr} error={err}"),
+                            );
+                            HomeResponse::Error {
+                                message: format!("invalid request: {err}"),
+                            }
+                        }
                     };
                     let _ = send_json_line(&mut stream, &response);
                 }
                 Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(16));
                 }
-                Err(_) => {
+                Err(err) => {
+                    host_log(
+                        log_events,
+                        HostLogLevel::Warn,
+                        format_args!("home request accept failed error={err}"),
+                    );
                     thread::sleep(Duration::from_millis(30));
                 }
             }
         }
         for (_, room) in rooms {
+            host_log(
+                log_events,
+                HostLogLevel::Info,
+                format_args!("room closed room={} reason=server_shutdown", room.room_name),
+            );
             room.network.shutdown();
         }
     });
@@ -583,7 +790,7 @@ pub fn run_home_server_forever_with_ports(
     bind_addr: &str,
     room_port_range: Option<(u16, u16)>,
 ) -> anyhow::Result<()> {
-    let _handle = start_home_server(bind_addr, room_port_range)?;
+    let _handle = start_home_server_with_logging(bind_addr, room_port_range, true)?;
     loop {
         thread::sleep(Duration::from_millis(1000));
     }
@@ -719,19 +926,26 @@ fn start_room_host_for_home_server(
     session: OnlineSession,
     password: Option<String>,
     max_connections: usize,
+    log_events: bool,
 ) -> anyhow::Result<OnlineNetwork> {
     if let Some((start_port, end_port)) = room_port_range {
         let mut last_err: Option<anyhow::Error> = None;
         for port in start_port..=end_port {
             let room_bind = SocketAddr::new(home_bind_addr.ip(), port).to_string();
-            match OnlineNetwork::start_host_with_max(
+            match OnlineNetwork::start_host_with_max_and_logging(
                 &room_bind,
                 session.clone(),
                 password.clone(),
                 max_connections,
+                log_events,
             ) {
                 Ok(network) => return Ok(network),
                 Err(err) => {
+                    host_log(
+                        log_events,
+                        HostLogLevel::Warn,
+                        format_args!("room port bind failed addr={room_bind} error={err}"),
+                    );
                     last_err = Some(err);
                 }
             }
@@ -747,7 +961,13 @@ fn start_room_host_for_home_server(
     }
 
     let room_bind = SocketAddr::new(home_bind_addr.ip(), 0).to_string();
-    OnlineNetwork::start_host_with_max(&room_bind, session, password, max_connections)
+    OnlineNetwork::start_host_with_max_and_logging(
+        &room_bind,
+        session,
+        password,
+        max_connections,
+        log_events,
+    )
 }
 
 fn room_by_name<'a>(
@@ -1450,6 +1670,7 @@ fn host_loop(
     max_peers: usize,
     cmd_rx: Receiver<NetworkCommand>,
     event_tx: Sender<NetworkEvent>,
+    log_events: bool,
 ) {
     let (inbound_tx, inbound_rx) = mpsc::channel::<Inbound>();
     let mut peers: HashMap<u32, PeerConnection> = HashMap::new();
@@ -1469,11 +1690,24 @@ fn host_loop(
                         let _ = event_tx.send(NetworkEvent::Status(String::from(
                             "Online stream setup failed",
                         )));
+                        host_log(
+                            log_events,
+                            HostLogLevel::Warn,
+                            format_args!("room peer setup failed room={}", session.room_code),
+                        );
                         continue;
                     }
                     let _ = stream.set_nodelay(true);
                     let peer_id = next_peer_id;
                     next_peer_id = next_peer_id.saturating_add(1);
+                    host_log(
+                        log_events,
+                        HostLogLevel::Info,
+                        format_args!(
+                            "room peer accepted room={} peer_id={peer_id}",
+                            session.room_code
+                        ),
+                    );
                     let inbound_tx_clone = inbound_tx.clone();
                     thread::spawn(move || host_peer_reader(peer_id, stream, inbound_tx_clone));
                 }
@@ -1481,6 +1715,11 @@ fn host_loop(
                 Err(err) => {
                     let _ =
                         event_tx.send(NetworkEvent::Status(format!("Online accept failed: {err}")));
+                    host_log(
+                        log_events,
+                        HostLogLevel::Warn,
+                        format_args!("room accept failed room={} error={err}", session.room_code),
+                    );
                     break;
                 }
             }
@@ -1501,6 +1740,7 @@ fn host_loop(
                         pending_pings: &mut pending_pings,
                     },
                     &event_tx,
+                    log_events,
                 ),
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => break,
@@ -1514,6 +1754,11 @@ fn host_loop(
                         &mut peers,
                         &WireServerMessage::Status(String::from("Host ended session")),
                     );
+                    host_log(
+                        log_events,
+                        HostLogLevel::Info,
+                        format_args!("room host shutdown room={}", session.room_code),
+                    );
                     return;
                 }
                 Ok(NetworkCommand::LocalAction(action)) => {
@@ -1523,6 +1768,12 @@ fn host_loop(
                         .unwrap_or_else(|| String::from("host"));
                     let action_to_broadcast = action.clone();
                     apply_action_to_session(session, action, &origin);
+                    log_local_action(
+                        log_events,
+                        &session.room_code,
+                        &origin,
+                        &action_to_broadcast,
+                    );
                     broadcast_action(&mut peers, &action_to_broadcast, &origin);
                     let _ = event_tx.send(NetworkEvent::SessionSync(Box::new(session.clone())));
                 }
@@ -1534,6 +1785,14 @@ fn host_loop(
                         let _ = event_tx.send(NetworkEvent::Status(String::from(
                             "Stream request missing source peer",
                         )));
+                        host_log(
+                            log_events,
+                            HostLogLevel::Warn,
+                            format_args!(
+                                "stream request rejected room={} reason=missing_source",
+                                session.room_code
+                            ),
+                        );
                         continue;
                     };
                     let Some((peer_id, peer)) = peers
@@ -1543,6 +1802,14 @@ fn host_loop(
                         let _ = event_tx.send(NetworkEvent::Status(format!(
                             "Source peer offline: {source_nickname}",
                         )));
+                        host_log(
+                            log_events,
+                            HostLogLevel::Warn,
+                            format_args!(
+                                "stream request rejected room={} source={} reason=offline",
+                                session.room_code, source_nickname
+                            ),
+                        );
                         continue;
                     };
                     let request_id = next_request_id();
@@ -1555,6 +1822,14 @@ fn host_loop(
                         let _ = event_tx.send(NetworkEvent::Status(format!(
                             "Peer stream request failed: {err}",
                         )));
+                        host_log(
+                            log_events,
+                            HostLogLevel::Warn,
+                            format_args!(
+                                "stream request send failed room={} source={} error={err}",
+                                session.room_code, source_nickname
+                            ),
+                        );
                     }
                 }
                 Err(TryRecvError::Empty) => break,
@@ -1589,6 +1864,7 @@ fn host_loop(
                     },
                     &reason,
                     &event_tx,
+                    log_events,
                 );
             }
             for (peer_id, peer) in &peers {
@@ -1619,6 +1895,7 @@ fn handle_inbound(
     max_peers: usize,
     state: InboundState<'_>,
     event_tx: &Sender<NetworkEvent>,
+    log_events: bool,
 ) {
     let InboundState {
         peers,
@@ -1636,6 +1913,14 @@ fn handle_inbound(
             stream,
         } => {
             if room_code.to_ascii_uppercase() != session.room_code {
+                host_log(
+                    log_events,
+                    HostLogLevel::Warn,
+                    format_args!(
+                        "peer rejected room={} peer_id={peer_id} nickname={nickname} reason=room_code_mismatch requested={room_code}",
+                        session.room_code
+                    ),
+                );
                 let mut stream = stream;
                 let _ = send_json_line(
                     &mut stream,
@@ -1649,6 +1934,15 @@ fn handle_inbound(
             }
 
             if peers.len().saturating_add(1) > max_peers {
+                host_log(
+                    log_events,
+                    HostLogLevel::Warn,
+                    format_args!(
+                        "peer rejected room={} peer_id={peer_id} nickname={nickname} reason=room_full current={} max={max_peers}",
+                        session.room_code,
+                        peers.len()
+                    ),
+                );
                 let mut stream = stream;
                 let _ = send_json_line(
                     &mut stream,
@@ -1665,6 +1959,14 @@ fn handle_inbound(
                 .values()
                 .any(|peer| peer.nickname.eq_ignore_ascii_case(&nickname))
             {
+                host_log(
+                    log_events,
+                    HostLogLevel::Warn,
+                    format_args!(
+                        "peer rejected room={} peer_id={peer_id} nickname={nickname} reason=nickname_in_use",
+                        session.room_code
+                    ),
+                );
                 let mut stream = stream;
                 let _ = send_json_line(
                     &mut stream,
@@ -1680,6 +1982,14 @@ fn handle_inbound(
             if expected_password.map(str::trim).unwrap_or("")
                 != password.as_deref().map(str::trim).unwrap_or("")
             {
+                host_log(
+                    log_events,
+                    HostLogLevel::Warn,
+                    format_args!(
+                        "peer rejected room={} peer_id={peer_id} nickname={nickname} reason=invalid_password",
+                        session.room_code
+                    ),
+                );
                 let mut stream = stream;
                 let _ = send_json_line(
                     &mut stream,
@@ -1703,6 +2013,14 @@ fn handle_inbound(
             )
             .is_err()
             {
+                host_log(
+                    log_events,
+                    HostLogLevel::Warn,
+                    format_args!(
+                        "peer rejected room={} peer_id={peer_id} nickname={nickname} reason=ack_failed",
+                        session.room_code
+                    ),
+                );
                 return;
             }
 
@@ -1741,6 +2059,18 @@ fn handle_inbound(
                     writer: Arc::new(Mutex::new(writer)),
                 },
             );
+            if let Some(peer) = peers.get(&peer_id) {
+                host_log(
+                    log_events,
+                    HostLogLevel::Info,
+                    format_args!(
+                        "peer joined room={} peer_id={peer_id} nickname={} participants={} max={max_peers}",
+                        session.room_code,
+                        peer.nickname,
+                        session.participants.len()
+                    ),
+                );
+            }
             broadcast_state(peers, session);
             let _ = event_tx.send(NetworkEvent::SessionSync(Box::new(session.clone())));
         }
@@ -1756,6 +2086,12 @@ fn handle_inbound(
             };
             let action_to_broadcast = local_action.clone();
             apply_action_to_session(session, local_action, &origin);
+            log_local_action(
+                log_events,
+                &session.room_code,
+                &origin,
+                &action_to_broadcast,
+            );
             if let Some(updated) = requested_nickname.filter(|name| !name.is_empty())
                 && session
                     .participants
@@ -1809,6 +2145,14 @@ fn handle_inbound(
                 source_nickname.as_deref(),
             ) {
                 let upstream_request_id = next_request_id();
+                host_log(
+                    log_events,
+                    HostLogLevel::Info,
+                    format_args!(
+                        "stream relay requested room={} requester={} source_peer_id={} request_id={request_id}",
+                        session.room_code, requester_peer.nickname, source_peer_id
+                    ),
+                );
                 pending_relay_requests.insert(
                     (source_peer_id, upstream_request_id),
                     RelayStreamRequest {
@@ -1854,6 +2198,16 @@ fn handle_inbound(
             }
 
             let quality = session.quality;
+            host_log(
+                log_events,
+                HostLogLevel::Info,
+                format_args!(
+                    "stream file requested room={} requester={} request_id={request_id} quality={}",
+                    session.room_code,
+                    requester_peer.nickname,
+                    quality.label()
+                ),
+            );
             thread::spawn(move || {
                 if let Err(err) =
                     stream_file_to_client(&requester_writer, &path, request_id, quality)
@@ -2092,6 +2446,7 @@ fn handle_inbound(
                 },
                 "Peer disconnected",
                 event_tx,
+                log_events,
             );
         }
         Inbound::ReadError { peer_id, error } => {
@@ -2107,6 +2462,7 @@ fn handle_inbound(
                 },
                 &format!("Peer socket error: {error}"),
                 event_tx,
+                log_events,
             );
         }
     }
@@ -2118,6 +2474,7 @@ fn disconnect_peer(
     state: &mut InboundState<'_>,
     reason: &str,
     event_tx: &Sender<NetworkEvent>,
+    log_events: bool,
 ) {
     let InboundState {
         peers,
@@ -2218,6 +2575,15 @@ fn disconnect_peer(
     }
 
     let suffix = nickname.unwrap_or_else(|| format!("peer-{peer_id}"));
+    host_log(
+        log_events,
+        HostLogLevel::Info,
+        format_args!(
+            "peer disconnected room={} peer_id={peer_id} nickname={suffix} reason={reason} participants={}",
+            session.room_code,
+            session.participants.len()
+        ),
+    );
     let _ = event_tx.send(NetworkEvent::Status(format!("{reason}: {suffix}")));
 }
 
@@ -2277,6 +2643,113 @@ fn peer_display_name(peers: &HashMap<u32, PeerConnection>, peer_id: u32) -> Stri
         .get(&peer_id)
         .map(|peer| peer.nickname.clone())
         .unwrap_or_else(|| format!("peer-{peer_id}"))
+}
+
+fn log_local_action(enabled: bool, room_code: &str, origin: &str, action: &LocalAction) {
+    if !enabled {
+        return;
+    }
+
+    match action {
+        LocalAction::SetMode(mode) => host_log(
+            true,
+            HostLogLevel::Info,
+            format_args!(
+                "room action room={room_code} origin={origin} type=set_mode mode={}",
+                mode.label()
+            ),
+        ),
+        LocalAction::SetQuality(quality) => host_log(
+            true,
+            HostLogLevel::Info,
+            format_args!(
+                "room action room={room_code} origin={origin} type=set_quality quality={}",
+                quality.label()
+            ),
+        ),
+        LocalAction::SetNickname { nickname } => host_log(
+            true,
+            HostLogLevel::Info,
+            format_args!(
+                "room action room={room_code} origin={origin} type=set_nickname nickname={}",
+                nickname.trim()
+            ),
+        ),
+        LocalAction::QueueAdd(item) => host_log(
+            true,
+            HostLogLevel::Info,
+            format_args!(
+                "room action room={room_code} origin={origin} type=queue_add title={} delivery={}",
+                item.title,
+                item.delivery.label()
+            ),
+        ),
+        LocalAction::QueueInsertAt { index, item } => host_log(
+            true,
+            HostLogLevel::Info,
+            format_args!(
+                "room action room={room_code} origin={origin} type=queue_insert index={index} title={} delivery={}",
+                item.title,
+                item.delivery.label()
+            ),
+        ),
+        LocalAction::QueueRemoveAt { index, .. } => host_log(
+            true,
+            HostLogLevel::Info,
+            format_args!(
+                "room action room={room_code} origin={origin} type=queue_remove index={index}"
+            ),
+        ),
+        LocalAction::QueueMove {
+            from_index,
+            to_index,
+            ..
+        } => host_log(
+            true,
+            HostLogLevel::Info,
+            format_args!(
+                "room action room={room_code} origin={origin} type=queue_move from={from_index} to={to_index}"
+            ),
+        ),
+        LocalAction::QueueConsume { .. } => host_log(
+            true,
+            HostLogLevel::Info,
+            format_args!("room action room={room_code} origin={origin} type=queue_consume"),
+        ),
+        LocalAction::DelayUpdate {
+            manual_extra_delay_ms,
+            auto_ping_delay,
+        } => host_log(
+            true,
+            HostLogLevel::Info,
+            format_args!(
+                "room action room={room_code} origin={origin} type=delay_update manual_ms={manual_extra_delay_ms} auto_ping={auto_ping_delay}"
+            ),
+        ),
+        LocalAction::Transport(envelope) => host_log(
+            true,
+            HostLogLevel::Info,
+            format_args!(
+                "room action room={room_code} origin={origin} type=transport command={}",
+                transport_command_label(&envelope.command)
+            ),
+        ),
+    }
+}
+
+fn transport_command_label(command: &crate::online::TransportCommand) -> &'static str {
+    match command {
+        crate::online::TransportCommand::StopPlayback => "stop",
+        crate::online::TransportCommand::SetPaused { paused } => {
+            if *paused {
+                "pause"
+            } else {
+                "resume"
+            }
+        }
+        crate::online::TransportCommand::PlayTrack { .. } => "play_track",
+        crate::online::TransportCommand::SetPlaybackState { .. } => "set_playback_state",
+    }
 }
 
 fn apply_action_to_session(
@@ -4569,6 +5042,7 @@ mod tests {
             },
             "Peer disconnected",
             &event_tx,
+            false,
         );
 
         assert!(
@@ -4655,6 +5129,7 @@ mod tests {
             },
             "Peer disconnected",
             &event_tx,
+            false,
         );
 
         assert_eq!(session.shared_queue.len(), 1);
@@ -4725,6 +5200,7 @@ mod tests {
             },
             "Peer disconnected",
             &event_tx,
+            false,
         );
 
         assert_eq!(session.participants.len(), 2);

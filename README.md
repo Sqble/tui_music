@@ -126,6 +126,7 @@ tune --host --ip 0.0.0.0
 ```
 - Default port: **7878**
 - Room port range: **9000-9100** (default)
+- Headless `--host` writes timestamped server logs to stderr for startup, room creation/cleanup, joins, disconnects, rejected requests, queue/control actions, and stream requests. `--host --app` keeps the TUI path quiet.
 
 **Server + app in one process:**
 ```bash
