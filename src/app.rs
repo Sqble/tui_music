@@ -167,6 +167,7 @@ struct OnlineRuntime {
     join_code_input: String,
     join_prompt_button: JoinPromptButton,
     join_directory_active: bool,
+    join_directory_focus: RoomDirectoryFocus,
     join_directory_search: String,
     join_directory_selected: usize,
     join_directory_rooms: Vec<HomeRoomDirectoryEntry>,
@@ -229,6 +230,7 @@ impl OnlineRuntime {
         self.password_prompt_mode = OnlinePasswordPromptMode::Host;
         self.password_input.clear();
         self.join_directory_active = false;
+        self.join_directory_focus = RoomDirectoryFocus::Rooms;
         self.join_directory_search.clear();
         self.join_directory_selected = 0;
         self.join_directory_rooms.clear();
@@ -294,6 +296,7 @@ impl OnlineRuntime {
         Some(crate::ui::OnlineRoomDirectoryModalView {
             server_addr: self.pending_join_server_addr.clone(),
             search: self.join_directory_search.clone(),
+            search_selected: matches!(self.join_directory_focus, RoomDirectoryFocus::Search),
             selected,
             rooms: rendered,
         })
@@ -331,6 +334,12 @@ enum OnlinePasswordPromptMode {
 enum HostInviteModalButton {
     Copy,
     Ok,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoomDirectoryFocus {
+    Search,
+    Rooms,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1627,6 +1636,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
         join_code_input: String::new(),
         join_prompt_button: JoinPromptButton::Join,
         join_directory_active: false,
+        join_directory_focus: RoomDirectoryFocus::Rooms,
         join_directory_search: String::new(),
         join_directory_selected: 0,
         join_directory_rooms: Vec::new(),
@@ -2689,6 +2699,7 @@ fn handle_online_inline_input(
         match key.code {
             KeyCode::Esc => {
                 online_runtime.join_directory_active = false;
+                online_runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
                 online_runtime.join_directory_search.clear();
                 online_runtime.join_directory_selected = 0;
                 online_runtime.join_directory_rooms.clear();
@@ -2701,14 +2712,36 @@ fn handle_online_inline_input(
                 core.dirty = true;
                 return true;
             }
+            KeyCode::Tab | KeyCode::Right => {
+                online_runtime.join_directory_focus = match online_runtime.join_directory_focus {
+                    RoomDirectoryFocus::Search => RoomDirectoryFocus::Rooms,
+                    RoomDirectoryFocus::Rooms => RoomDirectoryFocus::Search,
+                };
+                core.dirty = true;
+                return true;
+            }
+            KeyCode::BackTab | KeyCode::Left => {
+                online_runtime.join_directory_focus = match online_runtime.join_directory_focus {
+                    RoomDirectoryFocus::Search => RoomDirectoryFocus::Rooms,
+                    RoomDirectoryFocus::Rooms => RoomDirectoryFocus::Search,
+                };
+                core.dirty = true;
+                return true;
+            }
             KeyCode::Up => {
                 let visible = filtered_room_entries(
                     &online_runtime.join_directory_rooms,
                     &online_runtime.join_directory_search,
                 );
                 let total_count = visible.len() + 1;
-                if online_runtime.join_directory_selected == 0 {
+                if online_runtime.join_directory_focus == RoomDirectoryFocus::Search {
+                    online_runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
                     online_runtime.join_directory_selected = total_count - 1;
+                    core.dirty = true;
+                    return true;
+                }
+                if online_runtime.join_directory_selected == 0 {
+                    online_runtime.join_directory_focus = RoomDirectoryFocus::Search;
                 } else {
                     online_runtime.join_directory_selected -= 1;
                 }
@@ -2721,18 +2754,31 @@ fn handle_online_inline_input(
                     &online_runtime.join_directory_search,
                 );
                 let total_count = visible.len() + 1;
-                online_runtime.join_directory_selected =
-                    (online_runtime.join_directory_selected + 1) % total_count;
+                if online_runtime.join_directory_focus == RoomDirectoryFocus::Search {
+                    online_runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
+                    online_runtime.join_directory_selected = 0;
+                } else if online_runtime.join_directory_selected + 1 >= total_count {
+                    online_runtime.join_directory_focus = RoomDirectoryFocus::Search;
+                } else {
+                    online_runtime.join_directory_selected += 1;
+                }
                 core.dirty = true;
                 return true;
             }
             KeyCode::Backspace => {
+                if online_runtime.join_directory_focus != RoomDirectoryFocus::Search {
+                    return true;
+                }
                 online_runtime.join_directory_search.pop();
                 online_runtime.join_directory_selected = 0;
                 core.dirty = true;
                 return true;
             }
             KeyCode::Enter => {
+                if online_runtime.join_directory_focus == RoomDirectoryFocus::Search {
+                    core.dirty = true;
+                    return true;
+                }
                 if online_runtime.join_directory_selected == 0 {
                     online_runtime.join_directory_active = false;
                     online_runtime.join_prompt_active = true;
@@ -2790,6 +2836,12 @@ fn handle_online_inline_input(
                 return true;
             }
             KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if online_runtime.join_directory_focus != RoomDirectoryFocus::Search {
+                    if header_section_shortcut(key).is_some() {
+                        return false;
+                    }
+                    return true;
+                }
                 online_runtime.join_directory_search.push(ch);
                 online_runtime.join_directory_selected = 0;
                 core.dirty = true;
@@ -2820,6 +2872,7 @@ fn handle_online_inline_input(
                 if was_host_room_name && online_runtime.home_server_connected {
                     online_runtime.pending_join_room_name = None;
                     online_runtime.join_directory_active = true;
+                    online_runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
                     online_runtime.join_directory_selected = 0;
                     core.status = String::from("Room creation cancelled");
                 } else {
@@ -3146,6 +3199,7 @@ fn handle_online_password_prompt_input(
                 online_runtime.pending_join_room_name = None;
                 if online_runtime.home_server_connected {
                     online_runtime.join_directory_active = true;
+                    online_runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
                     online_runtime.join_directory_selected = 0;
                     core.status = String::from("Room creation cancelled");
                 } else {
@@ -3155,6 +3209,7 @@ fn handle_online_password_prompt_input(
                 online_runtime.pending_join_room_name = None;
                 if online_runtime.home_server_connected {
                     online_runtime.join_directory_active = true;
+                    online_runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
                     online_runtime.join_directory_selected = 0;
                 }
                 core.status = String::from("Password entry cancelled");
@@ -3569,6 +3624,7 @@ fn load_home_room_directory(
             online_runtime.join_directory_rooms = rooms;
             online_runtime.join_directory_search.clear();
             online_runtime.join_directory_selected = 0;
+            online_runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
             online_runtime.join_directory_active = true;
             online_runtime.last_directory_refresh_at = Instant::now();
             core.status = String::from(ok_status);
@@ -6579,6 +6635,7 @@ mod tests {
             join_code_input: String::new(),
             join_prompt_button: JoinPromptButton::Join,
             join_directory_active: false,
+            join_directory_focus: RoomDirectoryFocus::Rooms,
             join_directory_search: String::new(),
             join_directory_selected: 0,
             join_directory_rooms: Vec::new(),
@@ -9217,6 +9274,104 @@ mod tests {
     }
 
     #[test]
+    fn online_room_directory_list_focus_does_not_consume_page_shortcut() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.join_directory_active = true;
+        runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
+
+        assert!(!handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(runtime.join_directory_search.is_empty());
+    }
+
+    #[test]
+    fn online_room_directory_search_focus_consumes_typing() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.join_directory_active = true;
+        runtime.join_directory_focus = RoomDirectoryFocus::Search;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.join_directory_search, "h");
+    }
+
+    #[test]
+    fn online_room_directory_tab_toggles_search_focus() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.join_directory_active = true;
+        runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.join_directory_focus, RoomDirectoryFocus::Search);
+    }
+
+    #[test]
+    fn online_room_directory_up_selects_search_from_first_room_item() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.join_directory_active = true;
+        runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
+        runtime.join_directory_selected = 0;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.join_directory_focus, RoomDirectoryFocus::Search);
+    }
+
+    #[test]
+    fn online_room_directory_down_selects_first_room_from_search() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        runtime.local_nickname = String::from("tester");
+        runtime.join_directory_active = true;
+        runtime.join_directory_focus = RoomDirectoryFocus::Search;
+        runtime.join_directory_selected = 0;
+
+        assert!(handle_online_inline_input(
+            &mut core,
+            &mut audio,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert_eq!(runtime.join_directory_focus, RoomDirectoryFocus::Rooms);
+        assert_eq!(runtime.join_directory_selected, 0);
+    }
+
+    #[test]
     fn online_room_name_prompt_allows_page_shortcut_chars_as_input() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.header_section = HeaderSection::Online;
@@ -9310,6 +9465,7 @@ mod tests {
         runtime.local_nickname = String::from("tester");
         runtime.join_prompt_active = true;
         runtime.join_prompt_mode = JoinPromptMode::Connect;
+        runtime.join_prompt_button = JoinPromptButton::Input;
         runtime.join_code_input = String::from("127.0.0.1:1/room/missing");
 
         assert!(handle_online_inline_input(
@@ -9334,6 +9490,7 @@ mod tests {
         runtime.local_nickname = String::from("tester");
         runtime.join_prompt_active = true;
         runtime.join_prompt_mode = JoinPromptMode::Connect;
+        runtime.join_prompt_button = JoinPromptButton::Input;
         runtime.join_code_input = String::from("127.0.0.1:1");
 
         assert!(handle_online_inline_input(

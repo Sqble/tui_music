@@ -55,6 +55,7 @@ pub struct JoinPromptModalView {
 pub struct OnlineRoomDirectoryModalView {
     pub server_addr: String,
     pub search: String,
+    pub search_selected: bool,
     pub selected: usize,
     pub rooms: Vec<String>,
 }
@@ -635,14 +636,21 @@ fn draw_room_directory_inline(
         )),
         Line::from(Span::styled(
             format!("Search: {}", dir.search),
-            Style::default().fg(colors.accent),
+            if dir.search_selected {
+                Style::default()
+                    .fg(colors.text)
+                    .bg(colors.selected_bg)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(colors.accent)
+            },
         )),
         Line::from(""),
     ];
 
     let max_rooms = horizontal[0].height.saturating_sub(8) as usize;
     for (index, room_line) in dir.rooms.iter().enumerate().take(max_rooms) {
-        let style = if index == dir.selected {
+        let style = if index == dir.selected && !dir.search_selected {
             Style::default()
                 .fg(colors.text)
                 .bg(colors.selected_bg)
@@ -697,7 +705,7 @@ fn draw_room_directory_inline(
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "Up/Down - Navigate",
+            "Up/Down - Select search/rooms",
             Style::default().fg(colors.muted),
         )),
         Line::from(Span::styled(
@@ -709,7 +717,11 @@ fn draw_room_directory_inline(
             Style::default().fg(colors.muted),
         )),
         Line::from(Span::styled(
-            "Type - Search rooms",
+            "Tab/Left/Right - Toggle search/list",
+            Style::default().fg(colors.muted),
+        )),
+        Line::from(Span::styled(
+            "Type - Search only when search selected",
             Style::default().fg(colors.muted),
         )),
     ];
