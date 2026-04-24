@@ -122,20 +122,21 @@ On Linux, TuneTUI uses a larger output buffer when the device exposes a safe ran
 
 **Headless server:**
 ```bash
-tune --host --ip 0.0.0.0
+tune --host --host-ip 0.0.0.0
 ```
 - Default port: **7878**
 - Room port range: **9000-9100** (default)
+- `--host-ip` is the address the server binds to. Use `0.0.0.0` to listen on all IPv4 interfaces.
 - Headless `--host` writes timestamped server logs to stderr for startup, room creation/cleanup, joins, disconnects, rejected requests, queue/control actions, and stream requests. `--host --app` keeps the TUI path quiet.
 
 **Server + app in one process:**
 ```bash
-tune --host --app --ip 0.0.0.0
+tune --host --app --host-ip 0.0.0.0
 ```
 
 **Custom port/range:**
 ```bash
-tune --host --ip 0.0.0.0:9000 --room-port-range 9000-9100
+tune --host --host-ip 0.0.0.0:9000 --room-port-range 9000-9100
 ```
 
 **Connect to a server:**
@@ -143,6 +144,7 @@ tune --host --ip 0.0.0.0:9000 --room-port-range 9000-9100
 tune --ip 192.168.1.100   # defaults to port 7878
 tune --ip 192.168.1.100:9000
 ```
+- `--ip` is the server address the app connects to.
 
 ## Configuration
 

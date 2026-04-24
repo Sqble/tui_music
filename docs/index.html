@@ -425,23 +425,24 @@ cargo build --release</code></pre>
             <pre><code>tune --help</code></pre>
             
             <h3>Run only the home server (headless):</h3>
-            <pre><code>tune --host --ip 0.0.0.0</code></pre>
+            <pre><code>tune --host --host-ip 0.0.0.0</code></pre>
             <p>This runs the server on port <strong>7878</strong> (default).</p>
+            <p><code>--host-ip</code> is the address the server binds to. Use <code>0.0.0.0</code> to listen on all IPv4 interfaces.</p>
 
             <h3>Run server + TUI app together:</h3>
-            <pre><code>tune --host --app --ip 0.0.0.0</code></pre>
+            <pre><code>tune --host --app --host-ip 0.0.0.0</code></pre>
             <p>This starts both the server and the client app in one process.</p>
 
             <h3>Custom port:</h3>
-            <pre><code>tune --host --ip 0.0.0.0:9000</code></pre>
+            <pre><code>tune --host --host-ip 0.0.0.0:9000</code></pre>
 
             <h3>Custom room port range:</h3>
-            <pre><code>tune --host --ip 0.0.0.0 --room-port-range 9000-9100</code></pre>
+            <pre><code>tune --host --host-ip 0.0.0.0 --room-port-range 9000-9100</code></pre>
             <p>Default room range is <strong>9000-9100</strong>.</p>
 
             <h3>Connect to your server from another machine:</h3>
             <pre><code>tune --ip 192.168.1.100</code></pre>
-            <p>Replace with your server's IP or domain.</p>
+            <p><code>--ip</code> is the server address the app connects to. Replace with your server's IP or domain.</p>
 
             <h2><span class="prompt">›</span> Port Requirements</h2>
             <ul>
