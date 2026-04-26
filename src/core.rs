@@ -111,6 +111,8 @@ pub struct TuneCore {
     pub browser_shared_queue: bool,
     pub browser_entries: Vec<BrowserEntry>,
     pub selected_browser: usize,
+    pub library_search_query: String,
+    pub library_search_focused: bool,
     pub dirty: bool,
     pub status: String,
     pub stats_enabled: bool,
@@ -171,6 +173,8 @@ impl TuneCore {
             browser_shared_queue: false,
             browser_entries: Vec::new(),
             selected_browser: 0,
+            library_search_query: String::new(),
+            library_search_focused: false,
             dirty: true,
             status: String::from("Ready"),
             stats_enabled: state.stats_enabled,
@@ -580,7 +584,9 @@ impl TuneCore {
                 None
             }
             BrowserEntryKind::Track => {
-                if let Some(name) = &self.browser_playlist {
+                if !self.library_search_query.is_empty() {
+                    self.queue = self.queue_from_paths(&self.browser_track_paths());
+                } else if let Some(name) = &self.browser_playlist {
                     if let Some(tracks) = self
                         .playlists
                         .get(name)
@@ -599,7 +605,8 @@ impl TuneCore {
                     self.queue = self.metadata_sorted_library_queue();
                 }
                 self.rebuild_shuffle_order();
-                self.current_queue_index = if self.browser_playlist.is_some()
+                self.current_queue_index = if !self.library_search_query.is_empty()
+                    || self.browser_playlist.is_some()
                     || self.browser_all_songs
                     || self.browser_path.is_some()
                 {
@@ -656,6 +663,9 @@ impl TuneCore {
     }
 
     pub fn navigate_back(&mut self) {
+        self.library_search_query.clear();
+        self.library_search_focused = false;
+
         if self.browser_playlist.take().is_some() {
             self.selected_browser = 0;
             self.refresh_browser_entries();
@@ -1965,7 +1975,29 @@ impl TuneCore {
     fn refresh_browser_entries(&mut self) {
         let mut entries = Vec::with_capacity(self.tracks.len().max(self.folders.len()));
 
-        if let Some(name) = &self.browser_playlist {
+        if !self.library_search_query.is_empty() {
+            let query_lower = self.library_search_query.to_ascii_lowercase();
+            let queue = self.metadata_sorted_library_queue();
+            entries.reserve_exact(queue.len());
+            for idx in queue {
+                if let Some(track) = self.tracks.get(idx) {
+                    let haystack = format!(
+                        "{} {} {}",
+                        track.title,
+                        track.artist.as_deref().unwrap_or(""),
+                        track.album.as_deref().unwrap_or("")
+                    )
+                    .to_ascii_lowercase();
+                    if haystack.contains(&query_lower) {
+                        entries.push(BrowserEntry {
+                            kind: BrowserEntryKind::Track,
+                            label: config::sanitize_display_text(&track.title),
+                            path: track.path.clone(),
+                        });
+                    }
+                }
+            }
+        } else if let Some(name) = &self.browser_playlist {
             entries.push(BrowserEntry {
                 kind: BrowserEntryKind::Back,
                 path: PathBuf::new(),
@@ -2135,6 +2167,15 @@ impl TuneCore {
             self.selected_browser = self.selected_browser.min(self.browser_entries.len() - 1);
         }
         self.dirty = true;
+    }
+
+    pub fn clear_library_search(&mut self) {
+        if self.library_search_query.is_empty() && !self.library_search_focused {
+            return;
+        }
+        self.library_search_query.clear();
+        self.library_search_focused = false;
+        self.refresh_browser_entries();
     }
 
     fn track_label_from_path(&self, path: &Path) -> String {
@@ -2875,6 +2916,7 @@ mod tests {
             path: folder,
             label: String::from("[DIR] folder"),
         }];
+        core.selected_browser = 0;
 
         core.add_selected_to_playlist("mix");
 
@@ -2898,6 +2940,7 @@ mod tests {
             path: PathBuf::from("source"),
             label: String::from("[PL] source"),
         }];
+        core.selected_browser = 0;
 
         core.add_selected_to_playlist("target");
 
@@ -2931,6 +2974,7 @@ mod tests {
             path: PathBuf::new(),
             label: String::from("[ALL] All Songs"),
         }];
+        core.selected_browser = 0;
 
         core.add_selected_to_playlist("mix");
 
@@ -3285,5 +3329,114 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn library_search_filters_tracks_globally_case_insensitive() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("alpha.mp3"),
+                title: String::from("Alpha Song"),
+                artist: Some(String::from("Alpha Artist")),
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("beta.mp3"),
+                title: String::from("Beta Song"),
+                artist: None,
+                album: Some(String::from("Beta Album")),
+            },
+            Track {
+                path: PathBuf::from("gamma.mp3"),
+                title: String::from("Gamma Song"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.browser_path = Some(PathBuf::from("some_folder"));
+        core.refresh_browser_entries();
+
+        core.library_search_query = String::from("beta");
+        core.refresh_browser_entries();
+        assert_eq!(core.browser_entries.len(), 1);
+        assert_eq!(core.browser_entries[0].label, "Beta Song");
+
+        core.library_search_query = String::from("SONG");
+        core.refresh_browser_entries();
+        assert_eq!(core.browser_entries.len(), 3);
+
+        core.library_search_query = String::from("artist");
+        core.refresh_browser_entries();
+        assert_eq!(core.browser_entries.len(), 1);
+        assert_eq!(core.browser_entries[0].label, "Alpha Song");
+
+        core.library_search_query = String::from("album");
+        core.refresh_browser_entries();
+        assert_eq!(core.browser_entries.len(), 1);
+        assert_eq!(core.browser_entries[0].label, "Beta Song");
+
+        core.library_search_query = String::from("nonexistent");
+        core.refresh_browser_entries();
+        assert!(core.browser_entries.is_empty());
+    }
+
+    #[test]
+    fn library_search_ignores_current_folder_and_shows_all_matches() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("folder_a/one.mp3"),
+                title: String::from("One"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("folder_b/two.mp3"),
+                title: String::from("Two"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.browser_path = Some(PathBuf::from("folder_a"));
+        core.refresh_browser_entries();
+
+        core.library_search_query = String::from("two");
+        core.refresh_browser_entries();
+        assert_eq!(core.browser_entries.len(), 1);
+        assert_eq!(core.browser_entries[0].label, "Two");
+    }
+
+    #[test]
+    fn library_clear_search_restores_previous_view() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![
+            Track {
+                path: PathBuf::from("a.mp3"),
+                title: String::from("A"),
+                artist: None,
+                album: None,
+            },
+            Track {
+                path: PathBuf::from("b.mp3"),
+                title: String::from("B"),
+                artist: None,
+                album: None,
+            },
+        ];
+        core.track_lookup = build_track_lookup(&core.tracks);
+        core.browser_all_songs = true;
+        core.refresh_browser_entries();
+        assert_eq!(core.browser_entries.len(), 3); // Back + A + B
+
+        core.library_search_query = String::from("a");
+        core.refresh_browser_entries();
+        assert_eq!(core.browser_entries.len(), 1); // A
+
+        core.clear_library_search();
+        assert!(core.library_search_query.is_empty());
+        assert_eq!(core.browser_entries.len(), 3); // Back + A + B
     }
 }

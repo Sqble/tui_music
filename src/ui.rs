@@ -321,17 +321,16 @@ pub fn draw(
     frame.render_widget(Clear, body[1]);
 
     if core.header_section == HeaderSection::Library {
-        let items: Vec<ListItem> = core
+        let list_items: Vec<ListItem> = core
             .browser_entries
             .iter()
             .enumerate()
-            .map(|entry| {
-                let marker = if core.is_browser_entry_playing(entry.0) {
+            .map(|(i, entry)| {
+                let marker = if core.is_browser_entry_playing(i) {
                     "  > "
                 } else {
                     "    "
                 };
-                let entry = entry.1;
                 let kind_style = match entry.kind {
                     BrowserEntryKind::Back => Style::default().fg(colors.alert),
                     BrowserEntryKind::Folder => Style::default().fg(colors.accent),
@@ -349,10 +348,9 @@ pub fn draw(
             })
             .collect();
 
-        let mut state = ListState::default();
-        state.select((!core.browser_entries.is_empty()).then_some(core.selected_browser));
-
-        let library_title = if let Some(name) = &core.browser_playlist {
+        let library_title = if !core.library_search_query.is_empty() {
+            String::from("Library / Search")
+        } else if let Some(name) = &core.browser_playlist {
             format!("Library / Playlist / {name}")
         } else if core.browser_all_songs {
             String::from("Library / All Songs")
@@ -366,13 +364,48 @@ pub fn draw(
             String::from("Library")
         };
 
-        let list = List::new(items)
-            .block(panel_block(
-                &library_title,
-                colors.content_panel_bg,
-                colors.text,
-                colors.border,
-            ))
+        let block = panel_block(
+            &library_title,
+            colors.content_panel_bg,
+            colors.text,
+            colors.border,
+        );
+        frame.render_widget(block, body[0]);
+
+        let library_inner = body[0].inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        });
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(library_inner);
+
+        let search_text = if core.library_search_query.is_empty() {
+            String::from("Search")
+        } else {
+            format!("Search: {}", core.library_search_query)
+        };
+        let search_style = if core.library_search_focused {
+            Style::default()
+                .fg(colors.text)
+                .bg(colors.selected_bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(colors.muted)
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(search_text, search_style))),
+            chunks[0],
+        );
+
+        let list_area = chunks[1];
+        let mut state = ListState::default();
+        if !core.browser_entries.is_empty() && !core.library_search_focused {
+            state.select(Some(core.selected_browser));
+        }
+
+        let list = List::new(list_items)
             .highlight_style(
                 Style::default()
                     .bg(colors.selected_bg)
@@ -380,13 +413,9 @@ pub fn draw(
                     .add_modifier(Modifier::BOLD),
             )
             .highlight_symbol("-> ");
-        frame.render_stateful_widget(list, body[0], &mut state);
+        frame.render_stateful_widget(list, list_area, &mut state);
 
-        let library_inner = body[0].inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        });
-        let library_viewport_lines = usize::from(library_inner.height);
+        let library_viewport_lines = usize::from(list_area.height);
         let total_library_rows = core.browser_entries.len();
         if library_viewport_lines > 0 && list_overflows(total_library_rows, library_viewport_lines)
         {
@@ -584,7 +613,7 @@ pub fn draw(
     } else if core.header_section == HeaderSection::Online {
         "Keys: h/j/k/l pages, Enter select/join, Ctrl+n shared now, Ctrl+l leave room, o mode, q quality, t hide/show code, 2 copy code"
     } else {
-        "Keys: h/j/k/l pages, Enter play, Backspace back, n next, b previous, a/d scrub, m repeat, v shuffle, / actions, t tray, Ctrl+C quit"
+        "Keys: h/j/k/l pages, Enter play, Backspace back, Ctrl+f search, n next, b previous, a/d scrub, m repeat, v shuffle, / actions, t tray, Ctrl+C quit"
     };
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(key_hint, Style::default().fg(colors.muted)),

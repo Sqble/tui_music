@@ -68,6 +68,9 @@ Download `tune.exe` from releases and run. No installation required.
 | `-` `_` | Volume down |
 | `/` | Open actions panel |
 | `h` `j` `k` `l` | Switch pages (Library/Lyrics/Stats/Online) |
+| `Ctrl+f` | In Library, focus the search bar |
+| type | When search is focused, type to filter tracks globally |
+| `Esc` / `Backspace` | Clear search filter (or navigate back when empty) |
 | `Ctrl+n` | In Online tab, start shared queue playback / next shared item |
 | `Ctrl+l` | In Online tab, leave room |
 | `Ctrl+c` | Quit |

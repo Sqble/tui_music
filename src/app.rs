@@ -1889,9 +1889,61 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                         }
                     }
                 }
-                KeyCode::Down => core.select_next(),
-                KeyCode::Up => core.select_prev(),
+                KeyCode::Char(ch)
+                    if key.modifiers.contains(KeyModifiers::CONTROL)
+                        && ch.eq_ignore_ascii_case(&'f')
+                        && core.header_section == HeaderSection::Library =>
+                {
+                    core.library_search_focused = true;
+                    core.dirty = true;
+                }
+                KeyCode::Char(ch)
+                    if core.header_section == HeaderSection::Library
+                        && core.library_search_focused
+                        && !key.modifiers.intersects(
+                            KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER,
+                        )
+                        && !ch.is_control() =>
+                {
+                    core.library_search_query.push(ch);
+                    core.refresh_browser_view();
+                    core.dirty = true;
+                }
+                KeyCode::Down => {
+                    if core.header_section == HeaderSection::Library && core.library_search_focused
+                    {
+                        core.library_search_focused = false;
+                        if !core.browser_entries.is_empty() {
+                            core.selected_browser = 0;
+                        }
+                        core.dirty = true;
+                    } else {
+                        core.select_next();
+                    }
+                }
+                KeyCode::Up => {
+                    if core.header_section == HeaderSection::Library && core.library_search_focused
+                    {
+                        // already at search, stay
+                    } else if core.header_section == HeaderSection::Library
+                        && core.selected_browser == 0
+                    {
+                        core.library_search_focused = true;
+                        core.dirty = true;
+                    } else {
+                        core.select_prev();
+                    }
+                }
                 KeyCode::Enter => {
+                    if core.header_section == HeaderSection::Library && core.library_search_focused
+                    {
+                        core.library_search_focused = false;
+                        if !core.browser_entries.is_empty() {
+                            core.selected_browser = 0;
+                        }
+                        core.dirty = true;
+                        continue;
+                    }
                     if local_playback_locked_by_host_only(&core) {
                         core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
                         core.dirty = true;
@@ -1909,7 +1961,47 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                         }
                     }
                 }
-                KeyCode::Left | KeyCode::Backspace => core.navigate_back(),
+                KeyCode::Esc
+                    if core.header_section == HeaderSection::Library
+                        && (core.library_search_focused
+                            || !core.library_search_query.is_empty()) =>
+                {
+                    core.library_search_focused = false;
+                    core.library_search_query.clear();
+                    core.refresh_browser_view();
+                    core.dirty = true;
+                }
+                KeyCode::Left => {
+                    if core.header_section == HeaderSection::Library
+                        && !core.library_search_query.is_empty()
+                    {
+                        core.library_search_focused = false;
+                        core.library_search_query.clear();
+                        core.refresh_browser_view();
+                        core.dirty = true;
+                    } else {
+                        core.navigate_back();
+                    }
+                }
+                KeyCode::Backspace => {
+                    if core.header_section == HeaderSection::Library
+                        && core.library_search_focused
+                        && !core.library_search_query.is_empty()
+                    {
+                        core.library_search_query.pop();
+                        core.refresh_browser_view();
+                        core.dirty = true;
+                    } else if core.header_section == HeaderSection::Library
+                        && (core.library_search_focused || !core.library_search_query.is_empty())
+                    {
+                        core.library_search_focused = false;
+                        core.library_search_query.clear();
+                        core.refresh_browser_view();
+                        core.dirty = true;
+                    } else {
+                        core.navigate_back();
+                    }
+                }
                 KeyCode::Char(' ') => {
                     if local_playback_locked_by_host_only(&core) {
                         core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
