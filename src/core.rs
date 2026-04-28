@@ -727,8 +727,9 @@ impl TuneCore {
     }
 
     pub fn set_shuffle_enabled(&mut self, enabled: bool) {
+        let was_enabled = self.shuffle_enabled;
         self.shuffle_enabled = enabled;
-        if self.shuffle_enabled && self.shuffle_order.len() != self.queue.len() {
+        if self.shuffle_enabled && (!was_enabled || self.shuffle_order.len() != self.queue.len()) {
             self.rebuild_shuffle_order();
         }
         if self.browser_local_queue {
@@ -2692,6 +2693,20 @@ mod tests {
 
         assert_eq!(seen.len(), 4);
         assert_eq!(core.next_track_path(), None);
+    }
+
+    #[test]
+    fn enabling_shuffle_rebuilds_existing_order() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.queue = vec![0, 1, 2];
+        core.shuffle_enabled = false;
+        core.shuffle_order = vec![0, 0, 0];
+
+        core.set_shuffle_enabled(true);
+
+        let mut sorted_order = core.shuffle_order.clone();
+        sorted_order.sort_unstable();
+        assert_eq!(sorted_order, vec![0, 1, 2]);
     }
 
     #[test]
