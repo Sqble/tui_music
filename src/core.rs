@@ -18,6 +18,8 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserEntryKind {
     Back,
+    AddDirectory,
+    CreatePlaylist,
     Folder,
     Playlist,
     AllSongs,
@@ -520,6 +522,10 @@ impl TuneCore {
         };
 
         match entry.kind {
+            BrowserEntryKind::AddDirectory | BrowserEntryKind::CreatePlaylist => {
+                self.set_status("Use Enter to open this Library action");
+                None
+            }
             BrowserEntryKind::Back => {
                 self.navigate_back();
                 None
@@ -1916,7 +1922,9 @@ impl TuneCore {
                         .collect()
                 })
                 .unwrap_or_default(),
-            BrowserEntryKind::Back => Vec::new(),
+            BrowserEntryKind::Back
+            | BrowserEntryKind::AddDirectory
+            | BrowserEntryKind::CreatePlaylist => Vec::new(),
         }
     }
 
@@ -2116,7 +2124,7 @@ impl TuneCore {
                 entries.extend(files);
             }
         } else {
-            entries.reserve_exact(self.folders.len() + self.playlists.len() + 1);
+            entries.reserve_exact(self.folders.len() + self.playlists.len() + 3);
             for folder in &self.folders {
                 let cleaned = config::strip_windows_verbatim_prefix(folder);
                 let label = cleaned
@@ -2159,6 +2167,16 @@ impl TuneCore {
             }
 
             entries.sort_by_cached_key(|entry| entry.label.to_ascii_lowercase());
+            entries.push(BrowserEntry {
+                kind: BrowserEntryKind::AddDirectory,
+                path: PathBuf::new(),
+                label: String::from("[+] Add Directory"),
+            });
+            entries.push(BrowserEntry {
+                kind: BrowserEntryKind::CreatePlaylist,
+                path: PathBuf::new(),
+                label: String::from("[+] New Playlist"),
+            });
         }
 
         self.browser_entries = entries;
@@ -2502,6 +2520,17 @@ mod tests {
                 .iter()
                 .any(|entry| entry.kind == BrowserEntryKind::AllSongs)
         );
+    }
+
+    #[test]
+    fn root_browser_includes_add_shortcuts() {
+        let core = TuneCore::from_persisted(PersistedState::default());
+        let last_two = &core.browser_entries[core.browser_entries.len() - 2..];
+
+        assert_eq!(last_two[0].kind, BrowserEntryKind::AddDirectory);
+        assert_eq!(last_two[0].label, "[+] Add Directory");
+        assert_eq!(last_two[1].kind, BrowserEntryKind::CreatePlaylist);
+        assert_eq!(last_two[1].label, "[+] New Playlist");
     }
 
     #[test]

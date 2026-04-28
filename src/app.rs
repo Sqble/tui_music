@@ -736,26 +736,19 @@ fn duration_to_recorded_seconds(duration: Duration) -> u32 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RootActionId {
-    AddDirectory,
     AddSelectedToPlaylist,
     AddNowPlayingToPlaylist,
-    OpenLocalQueue,
-    OpenSharedQueue,
     AddSelectedToQueueEnd,
     AddSelectedToQueueNext,
     RemoveSelectedFromQueue,
     MoveSelectedQueueItemToNext,
-    PlaybackOrder,
     PlaybackSettings,
-    PlayPlaylist,
     RemoveSelectedFromPlaylist,
-    CreatePlaylist,
     RemovePlaylist,
     RemoveDirectory,
     RescanLibrary,
     AudioDriverSettings,
     Theme,
-    SaveState,
     ClearListenHistory,
     MetadataEditor,
     AudioQualityInspector,
@@ -764,27 +757,20 @@ enum RootActionId {
     ClosePanel,
 }
 
-const ROOT_ACTIONS: [RootActionId; 26] = [
-    RootActionId::AddDirectory,
+const ROOT_ACTIONS: [RootActionId; 19] = [
     RootActionId::AddSelectedToPlaylist,
     RootActionId::AddNowPlayingToPlaylist,
-    RootActionId::OpenLocalQueue,
-    RootActionId::OpenSharedQueue,
     RootActionId::AddSelectedToQueueEnd,
     RootActionId::AddSelectedToQueueNext,
     RootActionId::RemoveSelectedFromQueue,
     RootActionId::MoveSelectedQueueItemToNext,
-    RootActionId::PlaybackOrder,
     RootActionId::PlaybackSettings,
-    RootActionId::PlayPlaylist,
     RootActionId::RemoveSelectedFromPlaylist,
-    RootActionId::CreatePlaylist,
     RootActionId::RemovePlaylist,
     RootActionId::RemoveDirectory,
     RootActionId::RescanLibrary,
     RootActionId::AudioDriverSettings,
     RootActionId::Theme,
-    RootActionId::SaveState,
     RootActionId::ClearListenHistory,
     RootActionId::MetadataEditor,
     RootActionId::AudioQualityInspector,
@@ -795,7 +781,7 @@ const ROOT_ACTIONS: [RootActionId; 26] = [
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RootVisibleAction {
-    action: RootActionId,
+    action: Option<RootActionId>,
     label: String,
 }
 
@@ -874,26 +860,19 @@ impl AudioQualityPanelState {
 
 fn root_action_label(action: RootActionId) -> &'static str {
     match action {
-        RootActionId::AddDirectory => "Add directory",
         RootActionId::AddSelectedToPlaylist => "Add selected item to playlist",
         RootActionId::AddNowPlayingToPlaylist => "Add now playing song to playlist",
-        RootActionId::OpenLocalQueue => "Open local queue",
-        RootActionId::OpenSharedQueue => "Open shared queue",
         RootActionId::AddSelectedToQueueEnd => "Add selection to queue end",
         RootActionId::AddSelectedToQueueNext => "Add selection to queue next",
         RootActionId::RemoveSelectedFromQueue => "Remove selected queue item",
         RootActionId::MoveSelectedQueueItemToNext => "Move selected queue item to next",
-        RootActionId::PlaybackOrder => "Playback order and repeat",
         RootActionId::PlaybackSettings => "Playback settings",
-        RootActionId::PlayPlaylist => "Play playlist",
         RootActionId::RemoveSelectedFromPlaylist => "Remove selected from playlist",
-        RootActionId::CreatePlaylist => "Create playlist",
         RootActionId::RemovePlaylist => "Remove playlist",
         RootActionId::RemoveDirectory => "Remove directory",
         RootActionId::RescanLibrary => "Rescan library",
         RootActionId::AudioDriverSettings => "Audio driver settings",
         RootActionId::Theme => "Theme",
-        RootActionId::SaveState => "Save state",
         RootActionId::ClearListenHistory => "Clear listen history (backup)",
         RootActionId::MetadataEditor => "Edit selected track metadata",
         RootActionId::AudioQualityInspector => "View audio quality + spectrograph",
@@ -914,9 +893,40 @@ fn root_action_matches_query(action: RootActionId, query_lower: &str) -> bool {
     if query_lower.is_empty() {
         return true;
     }
-    root_action_label(action)
+    root_action_search_label(action)
         .to_ascii_lowercase()
         .contains(query_lower)
+}
+
+fn root_action_category(action: RootActionId) -> &'static str {
+    match action {
+        RootActionId::PlaybackSettings | RootActionId::AudioDriverSettings => "Settings",
+        RootActionId::AddSelectedToPlaylist
+        | RootActionId::AddNowPlayingToPlaylist
+        | RootActionId::RemoveSelectedFromPlaylist
+        | RootActionId::RemovePlaylist => "Playlist",
+        RootActionId::AddSelectedToQueueEnd
+        | RootActionId::AddSelectedToQueueNext
+        | RootActionId::RemoveSelectedFromQueue
+        | RootActionId::MoveSelectedQueueItemToNext => "Queue",
+        RootActionId::RemoveDirectory
+        | RootActionId::RescanLibrary
+        | RootActionId::MetadataEditor
+        | RootActionId::AudioQualityInspector => "Library",
+        RootActionId::Theme => "Appearance",
+        RootActionId::ClearListenHistory => "Stats",
+        RootActionId::MinimizeToTray => "Window",
+        RootActionId::ImportTxtToLyrics => "Lyrics",
+        RootActionId::ClosePanel => "Actions",
+    }
+}
+
+fn root_action_search_label(action: RootActionId) -> String {
+    format!(
+        "{} > {}",
+        root_action_category(action),
+        root_action_label(action)
+    )
 }
 
 fn root_visible_actions(
@@ -925,40 +935,113 @@ fn root_visible_actions(
 ) -> Vec<RootVisibleAction> {
     let query_lower = query.trim().to_ascii_lowercase();
     let mut seen = [false; ROOT_ACTIONS.len()];
-    let mut visible = Vec::with_capacity(ROOT_ACTIONS.len());
+    let mut visible = Vec::with_capacity(ROOT_ACTIONS.len().saturating_mul(2));
+    let mut recent_header_added = false;
 
     for action in recent_root_actions.iter().copied() {
         let index = root_action_index(action);
         if seen[index] || !root_action_matches_query(action, &query_lower) {
             continue;
         }
-        seen[index] = true;
-        visible.push(RootVisibleAction {
-            action,
-            label: format!("Recent: {}", root_action_label(action)),
-        });
-    }
-
-    for action in ROOT_ACTIONS {
-        let index = root_action_index(action);
-        if seen[index] || !root_action_matches_query(action, &query_lower) {
-            continue;
+        if !recent_header_added {
+            visible.push(RootVisibleAction {
+                action: None,
+                label: String::from("Recent"),
+            });
+            recent_header_added = true;
         }
         seen[index] = true;
         visible.push(RootVisibleAction {
-            action,
-            label: String::from(root_action_label(action)),
+            action: Some(action),
+            label: format!("  {}", root_action_label(action)),
         });
+    }
+
+    for category in [
+        "Settings",
+        "Playlist",
+        "Queue",
+        "Library",
+        "Appearance",
+        "Stats",
+        "Window",
+        "Lyrics",
+        "Actions",
+    ] {
+        let mut header_added = false;
+        for action in ROOT_ACTIONS {
+            if root_action_category(action) != category {
+                continue;
+            }
+            let index = root_action_index(action);
+            if seen[index] || !root_action_matches_query(action, &query_lower) {
+                continue;
+            }
+            if !header_added {
+                visible.push(RootVisibleAction {
+                    action: None,
+                    label: category.to_string(),
+                });
+                header_added = true;
+            }
+            seen[index] = true;
+            visible.push(RootVisibleAction {
+                action: Some(action),
+                label: format!("  {}", root_action_label(action)),
+            });
+        }
     }
 
     visible
 }
 
+fn selectable_root_index(visible_actions: &[RootVisibleAction], selected: usize) -> usize {
+    if visible_actions
+        .get(selected)
+        .and_then(|entry| entry.action)
+        .is_some()
+    {
+        return selected;
+    }
+    visible_actions
+        .iter()
+        .position(|entry| entry.action.is_some())
+        .unwrap_or(0)
+}
+
 fn root_selected_for_action(action: RootActionId, recent_root_actions: &[RootActionId]) -> usize {
     root_visible_actions("", recent_root_actions)
         .iter()
-        .position(|entry| entry.action == action)
+        .position(|entry| entry.action == Some(action))
         .unwrap_or(0)
+}
+
+fn update_root_panel_selection(
+    panel: &mut ActionPanelState,
+    recent_root_actions: &[RootActionId],
+    move_next: bool,
+) {
+    let ActionPanelState::Root { selected, query } = panel else {
+        return;
+    };
+    let visible_actions = root_visible_actions(query, recent_root_actions);
+    if visible_actions.is_empty() {
+        *selected = 0;
+        return;
+    }
+
+    let current = selectable_root_index(&visible_actions, *selected);
+    for step in 1..=visible_actions.len() {
+        let index = if move_next {
+            (current + step) % visible_actions.len()
+        } else {
+            (current + visible_actions.len() - step) % visible_actions.len()
+        };
+        if visible_actions[index].action.is_some() {
+            *selected = index;
+            return;
+        }
+    }
 }
 
 fn update_recent_root_actions(recent_root_actions: &mut Vec<RootActionId>, action: RootActionId) {
@@ -981,12 +1064,6 @@ enum ActionPanelState {
     Root {
         selected: usize,
         query: String,
-    },
-    PlaybackOrder {
-        selected: usize,
-    },
-    PlaylistPlay {
-        selected: usize,
     },
     PlaylistAdd {
         selected: usize,
@@ -1068,6 +1145,7 @@ impl ActionPanelState {
             Self::Closed => None,
             Self::Root { selected, query } => {
                 let visible_actions = root_visible_actions(query, recent_root_actions);
+                let selected = selectable_root_index(&visible_actions, *selected);
                 Some(crate::ui::ActionPanelView {
                     title: String::from("Actions"),
                     hint: String::from("Type search  Enter select  Esc close  Up/Down navigate"),
@@ -1080,35 +1158,7 @@ impl ActionPanelState {
                             .map(|entry| entry.label)
                             .collect()
                     },
-                    selected: *selected,
-                })
-            }
-            Self::PlaybackOrder { selected } => Some(crate::ui::ActionPanelView {
-                title: String::from("Playback Order"),
-                hint: String::from("Enter toggle/cycle  Backspace back"),
-                search_query: None,
-                options: vec![
-                    format!(
-                        "Shuffle: {}",
-                        if core.shuffle_enabled { "On" } else { "Off" }
-                    ),
-                    format!("Repeat: {}", core.repeat_mode.label()),
-                    String::from("Back"),
-                ],
-                selected: *selected,
-            }),
-            Self::PlaylistPlay { selected } => {
-                let playlists = sorted_playlist_names(core);
-                Some(crate::ui::ActionPanelView {
-                    title: String::from("Play Playlist"),
-                    hint: String::from("Enter play  Backspace back"),
-                    search_query: None,
-                    options: if playlists.is_empty() {
-                        vec![String::from("(no playlists)")]
-                    } else {
-                        playlists
-                    },
-                    selected: *selected,
+                    selected,
                 })
             }
             Self::PlaylistAdd { selected } => {
@@ -1256,15 +1306,15 @@ impl ActionPanelState {
             }),
             Self::AddDirectory { selected, input } => Some(crate::ui::ActionPanelView {
                 title: String::from("Add Directory"),
-                hint: String::from("Enter choose folder  Down type path"),
+                hint: String::from("Type path or Down choose folder"),
                 search_query: None,
                 options: vec![
-                    String::from("Choose folder externally"),
                     if input.is_empty() {
                         String::from("Path: ")
                     } else {
                         format!("Path: {input}")
                     },
+                    String::from("Choose folder externally"),
                 ],
                 selected: *selected,
             }),
@@ -1944,6 +1994,10 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                         core.dirty = true;
                         continue;
                     }
+                    if open_selected_library_action(&core, &mut action_panel) {
+                        core.dirty = true;
+                        continue;
+                    }
                     if local_playback_locked_by_host_only(&core) {
                         core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
                         core.dirty = true;
@@ -2131,12 +2185,6 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 }
                 KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'r') => {
                     request_library_rescan(&mut core, &mut library_runtime)
-                }
-                KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'s') => {
-                    if let Err(err) = save_state_with_audio(&mut core, &*audio) {
-                        core.status = format!("save error: {err:#}");
-                        core.dirty = true;
-                    }
                 }
                 KeyCode::Char('/') => {
                     action_panel.open();
@@ -4711,6 +4759,30 @@ fn sorted_folder_paths(core: &TuneCore) -> Vec<PathBuf> {
     paths
 }
 
+fn open_selected_library_action(core: &TuneCore, panel: &mut ActionPanelState) -> bool {
+    let Some(entry) = core.browser_entries.get(core.selected_browser) else {
+        return false;
+    };
+
+    match entry.kind {
+        BrowserEntryKind::AddDirectory => {
+            *panel = ActionPanelState::AddDirectory {
+                selected: 0,
+                input: String::new(),
+            };
+            true
+        }
+        BrowserEntryKind::CreatePlaylist => {
+            *panel = ActionPanelState::PlaylistCreate {
+                selected: 0,
+                input: String::new(),
+            };
+            true
+        }
+        _ => false,
+    }
+}
+
 fn metadata_editor_state_for_selection(core: &TuneCore) -> Option<MetadataEditorState> {
     let entry = core.selected_browser_entry()?;
     let target_paths = core.selected_paths_for_browser_selection();
@@ -4759,8 +4831,11 @@ fn metadata_editor_state_for_selection(core: &TuneCore) -> Option<MetadataEditor
             album_input: String::new(),
             confirm_all_songs_cover_copy: true,
         }),
-        BrowserEntryKind::QueueLocal | BrowserEntryKind::QueueShared => None,
-        BrowserEntryKind::Back => None,
+        BrowserEntryKind::QueueLocal
+        | BrowserEntryKind::QueueShared
+        | BrowserEntryKind::AddDirectory
+        | BrowserEntryKind::CreatePlaylist
+        | BrowserEntryKind::Back => None,
     }
 }
 
@@ -4908,6 +4983,11 @@ fn playback_settings_options(core: &TuneCore) -> Vec<String> {
         core.online_nickname.clone()
     };
     vec![
+        format!(
+            "Shuffle: {}",
+            if core.shuffle_enabled { "On" } else { "Off" }
+        ),
+        format!("Repeat: {}", core.repeat_mode.label()),
         format!(
             "Loudness normalization: {}",
             if core.loudness_normalization {
@@ -5117,8 +5197,6 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
 
     match panel {
         ActionPanelState::Root { selected, .. }
-        | ActionPanelState::PlaybackOrder { selected }
-        | ActionPanelState::PlaylistPlay { selected }
         | ActionPanelState::PlaylistAdd { selected }
         | ActionPanelState::PlaylistAddNowPlaying { selected }
         | ActionPanelState::PlaylistCreate { selected, .. }
@@ -5186,12 +5264,12 @@ fn handle_action_panel_input_with_recent(
 
     if let ActionPanelState::AddDirectory { selected, input } = panel {
         match key {
-            KeyCode::Char(ch) if *selected == 1 => {
+            KeyCode::Char(ch) if *selected == 0 => {
                 input.push(ch);
                 core.dirty = true;
                 return;
             }
-            KeyCode::Backspace if *selected == 1 && !input.is_empty() => {
+            KeyCode::Backspace if *selected == 0 && !input.is_empty() => {
                 input.pop();
                 core.dirty = true;
                 return;
@@ -5294,15 +5372,13 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::Root { query, .. } => {
             root_visible_actions(query, recent_root_actions).len()
         }
-        ActionPanelState::PlaybackOrder { .. } => 3,
-        ActionPanelState::PlaylistPlay { .. }
-        | ActionPanelState::PlaylistAdd { .. }
+        ActionPanelState::PlaylistAdd { .. }
         | ActionPanelState::PlaylistAddNowPlaying { .. }
         | ActionPanelState::PlaylistRemove { .. } => sorted_playlist_names(core).len().max(1),
         ActionPanelState::PlaylistCreate { .. } => 1,
         ActionPanelState::AudioSettings { .. } => 3,
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
-        ActionPanelState::PlaybackSettings { .. } => 9,
+        ActionPanelState::PlaybackSettings { .. } => 11,
         ActionPanelState::OnlineDelaySettings { .. } => 6,
         ActionPanelState::ThemeSettings { .. } => selectable_themes().len(),
         ActionPanelState::OnlineNickname { .. } => 1,
@@ -5313,12 +5389,14 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::RemoveDirectory { .. } => sorted_folder_paths(core).len().max(1),
     };
 
-    if let ActionPanelState::Root { selected, .. } = panel {
+    if let ActionPanelState::Root { selected, query } = panel {
+        let visible_actions = root_visible_actions(query, recent_root_actions);
         if option_count == 0 {
             *selected = 0;
         } else if *selected >= option_count {
             *selected = option_count - 1;
         }
+        *selected = selectable_root_index(&visible_actions, *selected);
     }
 
     match key {
@@ -5327,29 +5405,23 @@ fn handle_action_panel_input_with_recent(
             core.dirty = true;
         }
         KeyCode::Up => {
-            update_panel_selection(panel, option_count, false);
+            if matches!(panel, ActionPanelState::Root { .. }) {
+                update_root_panel_selection(panel, recent_root_actions, false);
+            } else {
+                update_panel_selection(panel, option_count, false);
+            }
             core.dirty = true;
         }
         KeyCode::Down => {
-            update_panel_selection(panel, option_count, true);
+            if matches!(panel, ActionPanelState::Root { .. }) {
+                update_root_panel_selection(panel, recent_root_actions, true);
+            } else {
+                update_panel_selection(panel, option_count, true);
+            }
             core.dirty = true;
         }
         KeyCode::Left | KeyCode::Backspace => {
             *panel = match panel {
-                ActionPanelState::PlaybackOrder { .. } => ActionPanelState::Root {
-                    selected: root_selected_for_action(
-                        RootActionId::PlaybackOrder,
-                        recent_root_actions,
-                    ),
-                    query: String::new(),
-                },
-                ActionPanelState::PlaylistPlay { .. } => ActionPanelState::Root {
-                    selected: root_selected_for_action(
-                        RootActionId::PlayPlaylist,
-                        recent_root_actions,
-                    ),
-                    query: String::new(),
-                },
                 ActionPanelState::PlaylistAdd { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
                         RootActionId::AddSelectedToPlaylist,
@@ -5364,13 +5436,7 @@ fn handle_action_panel_input_with_recent(
                     ),
                     query: String::new(),
                 },
-                ActionPanelState::PlaylistCreate { .. } => ActionPanelState::Root {
-                    selected: root_selected_for_action(
-                        RootActionId::CreatePlaylist,
-                        recent_root_actions,
-                    ),
-                    query: String::new(),
-                },
+                ActionPanelState::PlaylistCreate { .. } => ActionPanelState::Closed,
                 ActionPanelState::PlaylistRemove { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
                         RootActionId::RemovePlaylist,
@@ -5393,15 +5459,9 @@ fn handle_action_panel_input_with_recent(
                     query: String::new(),
                 },
                 ActionPanelState::OnlineDelaySettings { .. } => {
-                    ActionPanelState::PlaybackSettings { selected: 6 }
+                    ActionPanelState::PlaybackSettings { selected: 8 }
                 }
-                ActionPanelState::AddDirectory { .. } => ActionPanelState::Root {
-                    selected: root_selected_for_action(
-                        RootActionId::AddDirectory,
-                        recent_root_actions,
-                    ),
-                    query: String::new(),
-                },
+                ActionPanelState::AddDirectory { .. } => ActionPanelState::Closed,
                 ActionPanelState::AudioOutput { .. } => {
                     ActionPanelState::AudioSettings { selected: 0 }
                 }
@@ -5410,7 +5470,7 @@ fn handle_action_panel_input_with_recent(
                     query: String::new(),
                 },
                 ActionPanelState::OnlineNickname { .. } => {
-                    ActionPanelState::PlaybackSettings { selected: 7 }
+                    ActionPanelState::PlaybackSettings { selected: 9 }
                 }
                 ActionPanelState::LyricsImportTxt { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
@@ -5449,7 +5509,9 @@ fn handle_action_panel_input_with_recent(
         KeyCode::Enter => match panel.clone() {
             ActionPanelState::Root { selected, query } => {
                 let visible_actions = root_visible_actions(&query, recent_root_actions);
-                let Some(selected_action) = visible_actions.get(selected).map(|entry| entry.action)
+                let selected = selectable_root_index(&visible_actions, selected);
+                let Some(selected_action) =
+                    visible_actions.get(selected).and_then(|entry| entry.action)
                 else {
                     core.status = String::from("No matching actions");
                     core.dirty = true;
@@ -5459,13 +5521,6 @@ fn handle_action_panel_input_with_recent(
                 update_recent_root_actions(recent_root_actions, selected_action);
 
                 match selected_action {
-                    RootActionId::AddDirectory => {
-                        *panel = ActionPanelState::AddDirectory {
-                            selected: 1,
-                            input: String::new(),
-                        };
-                        core.dirty = true;
-                    }
                     RootActionId::AddSelectedToPlaylist => {
                         if sorted_playlist_names(core).is_empty() {
                             core.status = String::from("No playlists available");
@@ -5485,14 +5540,6 @@ fn handle_action_panel_input_with_recent(
                             *panel = ActionPanelState::PlaylistAddNowPlaying { selected: 0 };
                             core.dirty = true;
                         }
-                    }
-                    RootActionId::OpenLocalQueue => {
-                        core.open_local_queue_view();
-                        panel.close();
-                    }
-                    RootActionId::OpenSharedQueue => {
-                        core.open_shared_queue_view();
-                        panel.close();
                     }
                     RootActionId::AddSelectedToQueueEnd => {
                         if core.viewing_shared_queue() {
@@ -5570,35 +5617,14 @@ fn handle_action_panel_input_with_recent(
                         auto_save_state(core, &*audio);
                         panel.close();
                     }
-                    RootActionId::PlaybackOrder => {
-                        *panel = ActionPanelState::PlaybackOrder { selected: 0 };
-                        core.dirty = true;
-                    }
                     RootActionId::PlaybackSettings => {
                         *panel = ActionPanelState::PlaybackSettings { selected: 0 };
                         core.dirty = true;
-                    }
-                    RootActionId::PlayPlaylist => {
-                        if sorted_playlist_names(core).is_empty() {
-                            core.status = String::from("No playlists available");
-                            core.dirty = true;
-                            panel.close();
-                        } else {
-                            *panel = ActionPanelState::PlaylistPlay { selected: 0 };
-                            core.dirty = true;
-                        }
                     }
                     RootActionId::RemoveSelectedFromPlaylist => {
                         core.remove_selected_from_current_playlist();
                         auto_save_state(core, &*audio);
                         panel.close();
-                    }
-                    RootActionId::CreatePlaylist => {
-                        *panel = ActionPanelState::PlaylistCreate {
-                            selected: 0,
-                            input: String::new(),
-                        };
-                        core.dirty = true;
                     }
                     RootActionId::RemovePlaylist => {
                         *panel = ActionPanelState::PlaylistRemove { selected: 0 };
@@ -5624,13 +5650,6 @@ fn handle_action_panel_input_with_recent(
                         let selected = selected_theme_index(core.theme);
                         *panel = ActionPanelState::ThemeSettings { selected };
                         core.dirty = true;
-                    }
-                    RootActionId::SaveState => {
-                        if let Err(err) = save_state_with_audio(core, &*audio) {
-                            core.status = format!("save error: {err:#}");
-                            core.dirty = true;
-                        }
-                        panel.close();
                     }
                     RootActionId::ClearListenHistory => {
                         core.clear_stats_requested = true;
@@ -5684,54 +5703,6 @@ fn handle_action_panel_input_with_recent(
                         core.dirty = true;
                     }
                 }
-            }
-            ActionPanelState::PlaybackOrder { selected } => {
-                if local_playback_locked_by_host_only(core) {
-                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
-                    core.dirty = true;
-                    panel.close();
-                    return;
-                }
-                match selected {
-                    0 => core.toggle_shuffle(),
-                    1 => core.cycle_repeat_mode(),
-                    _ => {
-                        *panel = ActionPanelState::Root {
-                            selected: root_selected_for_action(
-                                RootActionId::PlaybackOrder,
-                                recent_root_actions,
-                            ),
-                            query: String::new(),
-                        };
-                        core.dirty = true;
-                        return;
-                    }
-                }
-                auto_save_state(core, &*audio);
-                core.dirty = true;
-            }
-            ActionPanelState::PlaylistPlay { selected } => {
-                if local_playback_locked_by_host_only(core) {
-                    core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
-                    core.dirty = true;
-                    panel.close();
-                    return;
-                }
-                let playlists = sorted_playlist_names(core);
-                if let Some(name) = playlists.get(selected) {
-                    core.load_playlist_queue(name);
-                    if let Some(err) = core
-                        .next_track_path()
-                        .and_then(|path| audio.play(&path).err())
-                    {
-                        core.status = concise_audio_error(&err);
-                        core.dirty = true;
-                    }
-                } else {
-                    core.status = String::from("No playlists available");
-                    core.dirty = true;
-                }
-                panel.close();
             }
             ActionPanelState::PlaylistAdd { selected } => {
                 let playlists = sorted_playlist_names(core);
@@ -5850,6 +5821,28 @@ fn handle_action_panel_input_with_recent(
             }
             ActionPanelState::PlaybackSettings { selected } => match selected {
                 0 => {
+                    if local_playback_locked_by_host_only(core) {
+                        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                        core.dirty = true;
+                        panel.close();
+                        return;
+                    }
+                    core.toggle_shuffle();
+                    core.dirty = true;
+                    auto_save_state(core, &*audio);
+                }
+                1 => {
+                    if local_playback_locked_by_host_only(core) {
+                        core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
+                        core.dirty = true;
+                        panel.close();
+                        return;
+                    }
+                    core.cycle_repeat_mode();
+                    core.dirty = true;
+                    auto_save_state(core, &*audio);
+                }
+                2 => {
                     core.loudness_normalization = !core.loudness_normalization;
                     audio.set_loudness_normalization(core.loudness_normalization);
                     core.status = format!(
@@ -5863,20 +5856,20 @@ fn handle_action_panel_input_with_recent(
                     core.dirty = true;
                     auto_save_state(core, &*audio);
                 }
-                1 => {
+                3 => {
                     core.crossfade_seconds = next_crossfade_seconds(core.crossfade_seconds);
                     audio.set_crossfade_seconds(core.crossfade_seconds);
                     core.status = format!("Crossfade: {}", crossfade_label(core.crossfade_seconds));
                     core.dirty = true;
                     auto_save_state(core, &*audio);
                 }
-                2 => {
+                4 => {
                     core.scrub_seconds = next_scrub_seconds(core.scrub_seconds);
                     core.status = format!("Scrub length: {}", scrub_label(core.scrub_seconds));
                     core.dirty = true;
                     auto_save_state(core, &*audio);
                 }
-                3 => {
+                5 => {
                     core.stats_enabled = !core.stats_enabled;
                     core.status = format!(
                         "Stats tracking: {}",
@@ -5885,14 +5878,14 @@ fn handle_action_panel_input_with_recent(
                     core.dirty = true;
                     auto_save_state(core, &*audio);
                 }
-                4 => {
+                6 => {
                     core.stats_top_songs_count =
                         next_stats_top_songs_count(core.stats_top_songs_count);
                     core.status = format!("Stats top songs rows: {}", core.stats_top_songs_count);
                     core.dirty = true;
                     auto_save_state(core, &*audio);
                 }
-                5 => {
+                7 => {
                     core.fallback_cover_template = core.fallback_cover_template.next();
                     core.status = format!(
                         "Missing cover fallback: {}",
@@ -5901,11 +5894,11 @@ fn handle_action_panel_input_with_recent(
                     core.dirty = true;
                     auto_save_state(core, &*audio);
                 }
-                6 => {
+                8 => {
                     *panel = ActionPanelState::OnlineDelaySettings { selected: 0 };
                     core.dirty = true;
                 }
-                7 => {
+                9 => {
                     *panel = ActionPanelState::OnlineNickname {
                         selected: 0,
                         input: online_runtime
@@ -5942,7 +5935,7 @@ fn handle_action_panel_input_with_recent(
                     core.status = format!("Online nickname: {}", core.online_nickname);
                     core.dirty = true;
                 }
-                *panel = ActionPanelState::PlaybackSettings { selected: 7 };
+                *panel = ActionPanelState::PlaybackSettings { selected: 9 };
                 core.dirty = true;
             }
             ActionPanelState::OnlineDelaySettings { selected } => match selected {
@@ -5975,7 +5968,7 @@ fn handle_action_panel_input_with_recent(
                     auto_save_state(core, &*audio);
                 }
                 _ => {
-                    *panel = ActionPanelState::PlaybackSettings { selected: 6 };
+                    *panel = ActionPanelState::PlaybackSettings { selected: 8 };
                     core.dirty = true;
                 }
             },
@@ -6131,7 +6124,7 @@ fn handle_action_panel_input_with_recent(
                 }
             }
             ActionPanelState::AddDirectory { selected, input } => {
-                if selected == 1 {
+                if selected == 0 {
                     let trimmed = input.trim();
                     if trimmed.is_empty() {
                         core.status = String::from("Enter a folder path or choose externally");
@@ -6817,7 +6810,7 @@ mod tests {
     fn root_selected(action: RootActionId) -> usize {
         root_visible_actions("", &[])
             .iter()
-            .position(|entry| entry.action == action)
+            .position(|entry| entry.action == Some(action))
             .expect("root action should exist")
     }
 
@@ -6963,16 +6956,16 @@ mod tests {
     }
 
     #[test]
-    fn action_panel_playback_order_updates_shuffle_and_repeat() {
+    fn playback_settings_updates_shuffle_and_repeat() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: root_selected(RootActionId::PlaybackOrder),
+            selected: root_selected(RootActionId::PlaybackSettings),
             query: String::new(),
         };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
-        assert!(matches!(panel, ActionPanelState::PlaybackOrder { .. }));
+        assert!(matches!(panel, ActionPanelState::PlaybackSettings { .. }));
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(core.shuffle_enabled);
@@ -6981,7 +6974,7 @@ mod tests {
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
 
         assert_eq!(core.repeat_mode, crate::model::RepeatMode::All);
-        assert!(matches!(panel, ActionPanelState::PlaybackOrder { .. }));
+        assert!(matches!(panel, ActionPanelState::PlaybackSettings { .. }));
     }
 
     #[test]
@@ -6992,37 +6985,16 @@ mod tests {
     }
 
     #[test]
-    fn action_panel_playback_order_is_blocked_for_host_only_listener() {
+    fn playback_settings_order_controls_are_blocked_for_host_only_listener() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.online.session = Some(host_only_listener_session());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::PlaybackOrder { selected: 0 };
+        let mut panel = ActionPanelState::PlaybackSettings { selected: 0 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
 
         assert!(!core.shuffle_enabled);
         assert_eq!(core.repeat_mode, crate::model::RepeatMode::Off);
-        assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
-        assert!(matches!(panel, ActionPanelState::Closed));
-    }
-
-    #[test]
-    fn action_panel_playlist_play_is_blocked_for_host_only_listener() {
-        let mut state = PersistedState::default();
-        state.playlists.insert(
-            String::from("mix"),
-            crate::model::Playlist {
-                tracks: vec![PathBuf::from("song.mp3")],
-            },
-        );
-        let mut core = TuneCore::from_persisted(state);
-        core.online.session = Some(host_only_listener_session());
-        let mut audio = TestAudioEngine::new();
-        let mut panel = ActionPanelState::PlaylistPlay { selected: 0 };
-
-        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
-
-        assert!(audio.played.is_empty());
         assert_eq!(core.status, HOST_ONLY_LISTENER_LOCKED_STATUS);
         assert!(matches!(panel, ActionPanelState::Closed));
     }
@@ -7126,9 +7098,9 @@ mod tests {
     #[test]
     fn recent_root_actions_are_unique_and_capped_at_three() {
         let mut recent = Vec::new();
-        update_recent_root_actions(&mut recent, RootActionId::AddDirectory);
+        update_recent_root_actions(&mut recent, RootActionId::AudioDriverSettings);
         update_recent_root_actions(&mut recent, RootActionId::Theme);
-        update_recent_root_actions(&mut recent, RootActionId::SaveState);
+        update_recent_root_actions(&mut recent, RootActionId::MetadataEditor);
         update_recent_root_actions(&mut recent, RootActionId::Theme);
         update_recent_root_actions(&mut recent, RootActionId::PlaybackSettings);
 
@@ -7137,24 +7109,73 @@ mod tests {
             vec![
                 RootActionId::PlaybackSettings,
                 RootActionId::Theme,
-                RootActionId::SaveState,
+                RootActionId::MetadataEditor,
             ]
         );
     }
 
     #[test]
     fn root_visible_actions_prioritize_recent_without_duplicates() {
-        let visible = root_visible_actions("", &[RootActionId::Theme, RootActionId::AddDirectory]);
+        let visible = root_visible_actions(
+            "",
+            &[RootActionId::Theme, RootActionId::AudioDriverSettings],
+        );
 
-        assert_eq!(visible[0].action, RootActionId::Theme);
-        assert_eq!(visible[1].action, RootActionId::AddDirectory);
+        assert_eq!(visible[0].label, "Recent");
+        assert_eq!(visible[1].action, Some(RootActionId::Theme));
+        assert_eq!(visible[2].action, Some(RootActionId::AudioDriverSettings));
         assert_eq!(
             visible
                 .iter()
-                .filter(|entry| entry.action == RootActionId::Theme)
+                .filter(|entry| entry.action == Some(RootActionId::Theme))
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn root_visible_actions_group_playback_and_driver_settings() {
+        let visible = root_visible_actions("", &[]);
+
+        assert_eq!(visible[0].action, None);
+        assert_eq!(visible[0].label, "Settings");
+        assert_eq!(visible[1].action, Some(RootActionId::PlaybackSettings));
+        assert_eq!(visible[1].label, "  Playback settings");
+        assert_eq!(visible[2].action, Some(RootActionId::AudioDriverSettings));
+        assert_eq!(visible[2].label, "  Audio driver settings");
+    }
+
+    #[test]
+    fn root_selection_skips_category_headers() {
+        let visible = root_visible_actions("driver", &[]);
+        assert_eq!(selectable_root_index(&visible, 0), 1);
+
+        let mut panel = ActionPanelState::Root {
+            selected: 1,
+            query: String::from("driver"),
+        };
+        update_root_panel_selection(&mut panel, &[], true);
+        assert!(matches!(panel, ActionPanelState::Root { selected: 1, .. }));
+    }
+
+    #[test]
+    fn root_visible_actions_omit_library_shortcut_and_manual_save_entries() {
+        let labels: Vec<String> = root_visible_actions("", &[])
+            .into_iter()
+            .map(|entry| entry.label)
+            .collect();
+
+        for removed in [
+            "Add directory",
+            "Open local queue",
+            "Open shared queue",
+            "Playback order and repeat",
+            "Play playlist",
+            "Create playlist",
+            "Save state",
+        ] {
+            assert!(labels.iter().all(|label| !label.ends_with(removed)));
+        }
     }
 
     #[test]
@@ -7298,7 +7319,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
         let mut panel = ActionPanelState::Root {
-            selected: 1,
+            selected: root_selected(RootActionId::AddSelectedToPlaylist),
             query: String::new(),
         };
 
@@ -7314,7 +7335,7 @@ mod tests {
         let mut audio = TestAudioEngine::new();
         audio.current = Some(PathBuf::from("now.mp3"));
         let mut panel = ActionPanelState::Root {
-            selected: 2,
+            selected: root_selected(RootActionId::AddNowPlayingToPlaylist),
             query: String::new(),
         };
 
@@ -7331,7 +7352,7 @@ mod tests {
         let mut audio = TestAudioEngine::new();
         audio.current = Some(PathBuf::from("now.mp3"));
         let mut panel = ActionPanelState::Root {
-            selected: 2,
+            selected: root_selected(RootActionId::AddNowPlayingToPlaylist),
             query: String::new(),
         };
 
@@ -7356,15 +7377,17 @@ mod tests {
 
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root {
-            selected: 0,
-            query: String::new(),
-        };
+        let mut panel = ActionPanelState::Closed;
+        core.selected_browser = core
+            .browser_entries
+            .iter()
+            .position(|entry| entry.kind == BrowserEntryKind::AddDirectory)
+            .expect("add directory shortcut exists");
 
-        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(open_selected_library_action(&core, &mut panel));
         assert!(matches!(
             panel,
-            ActionPanelState::AddDirectory { selected: 1, .. }
+            ActionPanelState::AddDirectory { selected: 0, .. }
         ));
 
         for ch in dir.to_string_lossy().chars() {
@@ -7404,12 +7427,14 @@ mod tests {
     fn action_panel_create_playlist_from_input() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root {
-            selected: root_selected(RootActionId::CreatePlaylist),
-            query: String::new(),
-        };
+        let mut panel = ActionPanelState::Closed;
+        core.selected_browser = core
+            .browser_entries
+            .iter()
+            .position(|entry| entry.kind == BrowserEntryKind::CreatePlaylist)
+            .expect("new playlist shortcut exists");
 
-        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(open_selected_library_action(&core, &mut panel));
         assert!(matches!(
             panel,
             ActionPanelState::PlaylistCreate { selected: 0, .. }
@@ -7512,6 +7537,8 @@ mod tests {
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(matches!(panel, ActionPanelState::PlaybackSettings { .. }));
 
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Down);
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
         assert!(core.loudness_normalization);
         assert!(audio.loudness_normalization());
@@ -7555,7 +7582,7 @@ mod tests {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.fallback_cover_template = CoverArtTemplate::Aurora;
         let mut audio = TestAudioEngine::new();
-        let mut panel = ActionPanelState::PlaybackSettings { selected: 5 };
+        let mut panel = ActionPanelState::PlaybackSettings { selected: 7 };
 
         handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
 
@@ -7709,13 +7736,10 @@ mod tests {
             },
         );
 
-        assert!(matches!(
-            panel,
-            ActionPanelState::Root {
-                selected: 1,
-                query: _
-            }
-        ));
+        assert!(matches!(panel, ActionPanelState::Root { .. }));
+        if let ActionPanelState::Root { selected, .. } = panel {
+            assert_eq!(selected, root_selected(RootActionId::AudioDriverSettings));
+        }
     }
 
     #[test]

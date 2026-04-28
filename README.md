@@ -16,12 +16,13 @@ Full documentation available at **https://tunetui.online**
 - Independent shuffle and repeat controls (repeat off, playlist, or single track)
 - Main library queue order uses metadata titles (not file names)
 - Queue scope follows where you start playback (folder, playlist, or All Songs)
-- Queue tools in Library actions: open local/shared queue, add to end/next, remove item, move item to next
+- Library root shortcuts for `[+] Add Directory` and `[+] New Playlist`
+- Queue tools in Library/actions: local/shared queue entries in the Library root plus add-to-end/next, remove item, and move item to next actions
 - Single-instance behavior on Windows (new launches focus/restore existing app)
 - Automatic track advance when a song ends, including while minimized to tray (Windows)
 - Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\.config\tunetui\state.json` on Windows)
 - Stats sidecar in config dir with metadata-keyed listen events/aggregates
-- Keyboard-driven TUI with actions panel search, recent actions, and overflow scrollbar
+- Keyboard-driven TUI with color-coded categorized actions panel search, recent actions, and overflow scrollbar
 - Right-aligned status tabs with direct page keys (`h` Library, `j` Lyrics, `k` Stats, `l` Online)
 - Song Info panel renders now-playing embedded album art as cached Unicode color raster
 - Stats tab with totals, ASCII charts, and range-filtered recent listen log
@@ -47,9 +48,8 @@ Download `tune.exe` from releases and run. No installation required.
 ### Adding Music
 
 1. Press `h` to switch to Library page
-2. Press `/` to open actions panel
-3. Select "Add directory"
-4. Choose your music folder
+2. Select `[+] Add Directory`
+3. Choose your music folder or type its path
 
 ### Basic Controls
 
@@ -75,7 +75,7 @@ Download `tune.exe` from releases and run. No installation required.
 | `Ctrl+l` | In Online tab, leave room |
 | `Ctrl+c` | Quit |
 
-Queue tools are available from the actions panel in Library (`/`), including root entries for `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online).
+Queue views are available as `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online) in the Library root. Queue edit tools remain in the categorized actions panel (`/`).
 Use the actions panel entry "View audio quality + spectrograph" to run one-time analysis for the selected track (or now playing).
 
 ### Online / Listen Together

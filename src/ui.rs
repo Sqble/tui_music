@@ -4,7 +4,7 @@ use crate::core::HeaderSection;
 use crate::core::LyricsMode;
 use crate::core::StatsFilterFocus;
 use crate::core::TuneCore;
-use crate::model::{CoverArtTemplate, Theme};
+use crate::model::{CoverArtTemplate, RepeatMode, Theme};
 use crate::online::OnlineSession;
 use crate::stats::{ListenEvent, StatsRange, StatsSnapshot, StatsSort, TrendSeries};
 use image::imageops::FilterType;
@@ -84,7 +84,6 @@ struct ThemePalette {
     selected_bg: Color,
     popup_bg: Color,
     popup_selected_bg: Color,
-    switch_hint: Color,
 }
 
 fn palette(theme: Theme) -> ThemePalette {
@@ -104,7 +103,6 @@ fn palette(theme: Theme) -> ThemePalette {
             selected_bg: Color::Rgb(34, 55, 82),
             popup_bg: Color::Rgb(22, 33, 51),
             popup_selected_bg: Color::Rgb(45, 70, 99),
-            switch_hint: Color::Rgb(255, 122, 165),
         },
         Theme::System => ThemePalette {
             bg: Color::Reset,
@@ -121,7 +119,6 @@ fn palette(theme: Theme) -> ThemePalette {
             selected_bg: Color::DarkGray,
             popup_bg: Color::Reset,
             popup_selected_bg: Color::DarkGray,
-            switch_hint: Color::Magenta,
         },
         Theme::PitchBlack => ThemePalette {
             bg: Color::Rgb(0, 0, 0),
@@ -138,7 +135,6 @@ fn palette(theme: Theme) -> ThemePalette {
             selected_bg: Color::Rgb(26, 26, 26),
             popup_bg: Color::Rgb(10, 10, 10),
             popup_selected_bg: Color::Rgb(34, 34, 34),
-            switch_hint: Color::Rgb(255, 133, 168),
         },
         Theme::Galaxy => ThemePalette {
             bg: Color::Rgb(7, 8, 23),
@@ -155,7 +151,6 @@ fn palette(theme: Theme) -> ThemePalette {
             selected_bg: Color::Rgb(40, 37, 86),
             popup_bg: Color::Rgb(23, 21, 56),
             popup_selected_bg: Color::Rgb(58, 55, 110),
-            switch_hint: Color::Rgb(255, 140, 200),
         },
         Theme::Matrix => ThemePalette {
             bg: Color::Rgb(4, 12, 4),
@@ -172,7 +167,6 @@ fn palette(theme: Theme) -> ThemePalette {
             selected_bg: Color::Rgb(18, 43, 20),
             popup_bg: Color::Rgb(10, 26, 11),
             popup_selected_bg: Color::Rgb(24, 57, 26),
-            switch_hint: Color::Rgb(119, 255, 210),
         },
         Theme::Demonic => ThemePalette {
             bg: Color::Rgb(16, 2, 2),
@@ -189,7 +183,6 @@ fn palette(theme: Theme) -> ThemePalette {
             selected_bg: Color::Rgb(72, 17, 19),
             popup_bg: Color::Rgb(36, 8, 9),
             popup_selected_bg: Color::Rgb(88, 20, 22),
-            switch_hint: Color::Rgb(255, 109, 109),
         },
         Theme::CottonCandy => ThemePalette {
             bg: Color::Rgb(34, 21, 44),
@@ -206,7 +199,6 @@ fn palette(theme: Theme) -> ThemePalette {
             selected_bg: Color::Rgb(90, 49, 114),
             popup_bg: Color::Rgb(60, 34, 80),
             popup_selected_bg: Color::Rgb(110, 61, 139),
-            switch_hint: Color::Rgb(123, 248, 255),
         },
         Theme::Ocean => palette(Theme::Dark),
         Theme::Forest => palette(Theme::Matrix),
@@ -259,7 +251,7 @@ pub fn draw(
         ])
         .split(frame.area());
 
-    frame.render_widget(status_panel_block(&colors), vertical[0]);
+    frame.render_widget(status_panel_block(core, &colors), vertical[0]);
 
     let header_inner = vertical[0].inner(Margin {
         vertical: 0,
@@ -279,32 +271,7 @@ pub fn draw(
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  ", Style::default().fg(colors.muted)),
-        Span::styled(
-            format!("Tracks {}", core.tracks.len()),
-            Style::default().fg(colors.text),
-        ),
-        Span::styled("  |  ", Style::default().fg(colors.muted)),
-        Span::styled(
-            format!(
-                "Shuffle {} | Repeat {}",
-                if core.shuffle_enabled { "On" } else { "Off" },
-                core.repeat_mode.label()
-            ),
-            Style::default().fg(colors.alert),
-        ),
-        Span::styled("  |  ", Style::default().fg(colors.muted)),
-        Span::styled(
-            if core.online.session.is_some() {
-                "ONLINE"
-            } else {
-                "OFFLINE"
-            },
-            Style::default().fg(if core.online.session.is_some() {
-                colors.accent
-            } else {
-                colors.muted
-            }),
-        ),
+        Span::styled(APP_VERSION, Style::default().fg(colors.muted)),
     ]));
     frame.render_widget(header_left, header_chunks[0]);
 
@@ -333,6 +300,11 @@ pub fn draw(
                 };
                 let kind_style = match entry.kind {
                     BrowserEntryKind::Back => Style::default().fg(colors.alert),
+                    BrowserEntryKind::AddDirectory | BrowserEntryKind::CreatePlaylist => {
+                        Style::default()
+                            .fg(colors.accent)
+                            .add_modifier(Modifier::BOLD)
+                    }
                     BrowserEntryKind::Folder => Style::default().fg(colors.accent),
                     BrowserEntryKind::Playlist => Style::default().fg(colors.playlist),
                     BrowserEntryKind::AllSongs => Style::default().fg(colors.all_songs),
@@ -580,40 +552,26 @@ pub fn draw(
         }
     }
 
-    let timeline_text = timeline_line(audio, 42);
-    let timeline_block = Paragraph::new(Span::styled(
-        timeline_text,
-        Style::default().fg(colors.text),
-    ))
-    .block(panel_block(
-        "Timeline",
-        colors.panel_bg,
-        colors.text,
-        colors.border,
-    ))
-    .wrap(Wrap { trim: true });
-    frame.render_widget(timeline_block, vertical[2]);
+    draw_timeline_panel(frame, vertical[2], core, audio, &colors);
 
-    let control_text = control_line(audio, 16);
-    let control_block =
-        Paragraph::new(Span::styled(control_text, Style::default().fg(colors.text)))
-            .block(panel_block(
-                "Control",
-                colors.panel_bg,
-                colors.text,
-                colors.border,
-            ))
-            .wrap(Wrap { trim: true });
+    let control_block = Paragraph::new(control_line(audio, 16, &colors))
+        .block(panel_block(
+            "Control",
+            colors.panel_bg,
+            colors.text,
+            colors.border,
+        ))
+        .wrap(Wrap { trim: true });
     frame.render_widget(control_block, vertical[3]);
 
     let key_hint = if core.header_section == HeaderSection::Stats {
-        "Keys: h/j/k/l pages, Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top"
+        "Keys: Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top"
     } else if core.header_section == HeaderSection::Lyrics {
-        "Keys: h/j/k/l pages, Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions"
+        "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: h/j/k/l pages, Enter select/join, Ctrl+n shared now, Ctrl+l leave room, o mode, q quality, t hide/show code, 2 copy code"
+        "Keys: Enter select/join, Ctrl+n shared now, Ctrl+l leave room, o mode, q quality, t hide/show code, 2 copy code"
     } else {
-        "Keys: h/j/k/l pages, Enter play, Backspace back, Ctrl+f search, n next, b previous, a/d scrub, m repeat, v shuffle, / actions, t tray, Ctrl+C quit"
+        "Keys: Enter play, Backspace back, Ctrl+f search, / actions, t tray, Ctrl+C quit"
     };
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(key_hint, Style::default().fg(colors.muted)),
@@ -842,10 +800,6 @@ fn draw_online_password_prompt_inline(
             },
             Style::default().fg(colors.muted),
         )),
-        Line::from(Span::styled(
-            "h/j/k/l - Switch pages",
-            Style::default().fg(colors.muted),
-        )),
     ];
     let right = Paragraph::new(right_lines)
         .block(panel_block(
@@ -1011,10 +965,6 @@ fn draw_join_prompt_inline(
         )),
         Line::from(Span::styled(
             "Ctrl+V - Paste clipboard",
-            Style::default().fg(colors.muted),
-        )),
-        Line::from(Span::styled(
-            "h/j/k/l - Switch pages",
             Style::default().fg(colors.muted),
         )),
     ];
@@ -1221,15 +1171,6 @@ fn header_tabs_width() -> u16 {
         .sum();
     let separators_len = " -- ".len() * labels.len().saturating_sub(1);
     (labels_len + separators_len) as u16
-}
-
-fn header_switch_hint_line(colors: &ThemePalette) -> Line<'static> {
-    Line::from(Span::styled(
-        "h/j/k/l pages",
-        Style::default()
-            .fg(colors.switch_hint)
-            .add_modifier(Modifier::BOLD),
-    ))
 }
 
 fn draw_placeholder_section(
@@ -2359,7 +2300,203 @@ fn panel_block(title: &str, bg: Color, text: Color, border: Color) -> Block<'_> 
         .style(Style::default().bg(bg))
 }
 
-fn status_panel_block(colors: &ThemePalette) -> Block<'static> {
+fn draw_timeline_panel(
+    frame: &mut Frame,
+    area: Rect,
+    core: &TuneCore,
+    audio: &dyn AudioEngine,
+    colors: &ThemePalette,
+) {
+    frame.render_widget(
+        panel_block("Timeline", colors.panel_bg, colors.text, colors.border),
+        area,
+    );
+
+    let inner = area.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let controls = timeline_controls_line(core, colors);
+    let controls_width = (controls.width() as u16).min(inner.width);
+    let gap_width = u16::from(controls_width > 0 && controls_width < inner.width);
+    let timeline_width = inner.width.saturating_sub(controls_width + gap_width);
+
+    if timeline_width > 0 {
+        let timeline_bar_width = usize::from(timeline_width.saturating_sub(18)).clamp(8, 42);
+        let timeline_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: timeline_width,
+            height: inner.height,
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                timeline_line(audio, timeline_bar_width),
+                Style::default().fg(colors.text),
+            )),
+            timeline_area,
+        );
+    }
+
+    if controls_width > 0 {
+        let controls_area = Rect {
+            x: inner.x + inner.width.saturating_sub(controls_width),
+            y: inner.y,
+            width: controls_width,
+            height: inner.height,
+        };
+        frame.render_widget(
+            Paragraph::new(controls).alignment(Alignment::Right),
+            controls_area,
+        );
+    }
+}
+
+fn timeline_controls_line(core: &TuneCore, colors: &ThemePalette) -> Line<'static> {
+    let scrub = timeline_scrub_label(core.scrub_seconds);
+    let mut spans = Vec::with_capacity(19);
+    append_key_badge(
+        &mut spans,
+        "B",
+        "Previous",
+        Color::Rgb(95, 71, 138),
+        Color::Rgb(190, 164, 255),
+        colors.text,
+    );
+    spans.push(Span::raw(" "));
+    append_key_badge(
+        &mut spans,
+        "N",
+        "Next",
+        Color::Rgb(43, 94, 122),
+        Color::Rgb(139, 220, 255),
+        colors.text,
+    );
+    spans.push(Span::raw(" "));
+    append_key_badge(
+        &mut spans,
+        "A",
+        &format!("-{}", scrub),
+        Color::Rgb(105, 76, 37),
+        Color::Rgb(255, 204, 128),
+        colors.text,
+    );
+    spans.push(Span::raw(" "));
+    append_key_badge(
+        &mut spans,
+        "D",
+        &format!("+{}", scrub),
+        Color::Rgb(37, 105, 75),
+        Color::Rgb(134, 255, 190),
+        colors.text,
+    );
+    Line::from(spans)
+}
+
+fn append_key_badge(
+    spans: &mut Vec<Span<'static>>,
+    key: &str,
+    label: &str,
+    bg: Color,
+    border: Color,
+    text: Color,
+) {
+    spans.push(Span::styled(
+        "[",
+        Style::default()
+            .fg(border)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        format!(" {key} {label} "),
+        Style::default().fg(text).bg(bg),
+    ));
+    spans.push(Span::styled(
+        "]",
+        Style::default()
+            .fg(border)
+            .bg(bg)
+            .add_modifier(Modifier::BOLD),
+    ));
+}
+
+fn timeline_scrub_label(seconds: u16) -> String {
+    if seconds == 60 {
+        String::from("1m")
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn header_status_line(core: &TuneCore, colors: &ThemePalette) -> Line<'static> {
+    let tracks_bg = Color::Rgb(45, 72, 108);
+    let shuffle_bg = Color::Rgb(24, 87, 73);
+    let repeat_bg = Color::Rgb(80, 60, 112);
+    let online_bg = Color::Rgb(76, 69, 58);
+    let shuffle_style = if core.shuffle_enabled {
+        Style::default()
+            .fg(colors.accent)
+            .bg(shuffle_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(colors.muted).bg(shuffle_bg)
+    };
+    let repeat_style = match core.repeat_mode {
+        RepeatMode::Off => Style::default().fg(colors.muted).bg(repeat_bg),
+        RepeatMode::All => Style::default()
+            .fg(colors.playlist)
+            .bg(repeat_bg)
+            .add_modifier(Modifier::BOLD),
+        RepeatMode::One => Style::default()
+            .fg(colors.alert)
+            .bg(repeat_bg)
+            .add_modifier(Modifier::BOLD),
+    };
+    let online_style = if core.online.session.is_some() {
+        Style::default()
+            .fg(colors.accent)
+            .bg(online_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(colors.muted).bg(online_bg)
+    };
+
+    Line::from(vec![
+        Span::styled(
+            format!(" Tracks {} ", core.tracks.len()),
+            Style::default().fg(colors.text).bg(tracks_bg),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!(
+                " V Shuffle {} ",
+                if core.shuffle_enabled { "On" } else { "Off" }
+            ),
+            shuffle_style,
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!(" M Repeat {} ", core.repeat_mode.label()),
+            repeat_style,
+        ),
+        Span::raw(" "),
+        Span::styled(
+            if core.online.session.is_some() {
+                " ONLINE "
+            } else {
+                " OFFLINE "
+            },
+            online_style,
+        ),
+    ])
+}
+
+fn status_panel_block(core: &TuneCore, colors: &ThemePalette) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
         .title(Span::styled(
@@ -2368,8 +2505,7 @@ fn status_panel_block(colors: &ThemePalette) -> Block<'static> {
                 .fg(colors.text)
                 .add_modifier(Modifier::BOLD),
         ))
-        .title_bottom(Span::styled(APP_VERSION, Style::default().fg(colors.muted)))
-        .title_bottom(header_switch_hint_line(colors).alignment(Alignment::Right))
+        .title_bottom(header_status_line(core, colors).alignment(Alignment::Center))
         .border_style(Style::default().fg(colors.border))
         .style(Style::default().bg(colors.panel_bg))
 }
@@ -2378,7 +2514,11 @@ fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemeP
     let popup = centered_rect(frame.area(), 62, 58);
     frame.render_widget(Clear, popup);
 
-    let panel_block_widget = panel_block(&panel.title, colors.popup_bg, colors.text, colors.border);
+    let mut panel_block_widget =
+        panel_block(&panel.title, colors.popup_bg, colors.text, colors.border);
+    if panel.title == "Actions" {
+        panel_block_widget = panel_block_widget.title_alignment(Alignment::Center);
+    }
     frame.render_widget(panel_block_widget, popup);
 
     let inner = popup.inner(Margin {
@@ -2439,10 +2579,11 @@ fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemeP
         .map(|focused| centered_scroll_top(focused, list_height_usize))
         .unwrap_or(0);
 
+    let mut current_action_section = None;
     let items: Vec<ListItem> = panel
         .options
         .iter()
-        .map(|item| ListItem::new(action_panel_option_line(item, colors)))
+        .map(|item| action_panel_option_item(panel, item, colors, &mut current_action_section))
         .collect();
 
     let mut state = ListState::default()
@@ -2490,6 +2631,73 @@ fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemeP
         )),
         hint_area,
     );
+}
+
+fn action_panel_option_item(
+    panel: &ActionPanelView,
+    item: &str,
+    colors: &ThemePalette,
+    current_action_section: &mut Option<&'static str>,
+) -> ListItem<'static> {
+    let line = action_panel_option_line(item, colors);
+    if panel.title != "Actions" {
+        return ListItem::new(line);
+    }
+
+    if let Some(section) = action_panel_section_name(item) {
+        *current_action_section = Some(section);
+        let Some(bg) = action_panel_section_bg(section) else {
+            return ListItem::new(line);
+        };
+        return ListItem::new(Line::from(Span::styled(
+            item.to_string(),
+            Style::default()
+                .fg(colors.text)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        )))
+        .style(Style::default().bg(bg));
+    }
+
+    let Some(section) = *current_action_section else {
+        return ListItem::new(line);
+    };
+    let Some(bg) = action_panel_section_bg(section) else {
+        return ListItem::new(line);
+    };
+    ListItem::new(line).style(Style::default().bg(bg))
+}
+
+fn action_panel_section_name(item: &str) -> Option<&'static str> {
+    match item {
+        "Recent" => Some("Recent"),
+        "Settings" => Some("Settings"),
+        "Playlist" => Some("Playlist"),
+        "Queue" => Some("Queue"),
+        "Library" => Some("Library"),
+        "Appearance" => Some("Appearance"),
+        "Stats" => Some("Stats"),
+        "Window" => Some("Window"),
+        "Lyrics" => Some("Lyrics"),
+        "Actions" => Some("Actions"),
+        _ => None,
+    }
+}
+
+fn action_panel_section_bg(section: &str) -> Option<Color> {
+    match section {
+        "Recent" => Some(Color::Rgb(74, 52, 100)),
+        "Settings" => Some(Color::Rgb(65, 67, 108)),
+        "Playlist" => Some(Color::Rgb(43, 88, 63)),
+        "Queue" => Some(Color::Rgb(43, 94, 122)),
+        "Library" => Some(Color::Rgb(45, 72, 108)),
+        "Appearance" => Some(Color::Rgb(95, 71, 138)),
+        "Stats" => Some(Color::Rgb(105, 76, 37)),
+        "Window" => Some(Color::Rgb(76, 69, 58)),
+        "Lyrics" => Some(Color::Rgb(90, 55, 55)),
+        "Actions" => Some(Color::Rgb(80, 60, 112)),
+        _ => None,
+    }
 }
 
 fn action_panel_option_line(item: &str, colors: &ThemePalette) -> Line<'static> {
@@ -2939,15 +3147,45 @@ fn timeline_line(audio: &dyn AudioEngine, timeline_bar_width: usize) -> String {
     )
 }
 
-fn control_line(audio: &dyn AudioEngine, volume_bar_width: usize) -> String {
+fn control_line(
+    audio: &dyn AudioEngine,
+    volume_bar_width: usize,
+    colors: &ThemePalette,
+) -> Line<'static> {
     let volume_percent = (audio.volume() * 100.0).round() as u16;
     let volume_ratio = audio.volume().clamp(0.0, 1.0) as f64;
+    let mut spans = Vec::with_capacity(10);
 
-    format!(
-        "Vol {} {:>3}%  +/- adjust  Shift fine  |  A/D scrub",
-        progress_bar(Some(volume_ratio), volume_bar_width),
-        volume_percent
-    )
+    spans.push(Span::styled(
+        format!(
+            "Vol {} {:>3}%  ",
+            progress_bar(Some(volume_ratio), volume_bar_width),
+            volume_percent
+        ),
+        Style::default().fg(colors.text),
+    ));
+    append_key_badge(
+        &mut spans,
+        "-",
+        "Lower",
+        Color::Rgb(90, 55, 55),
+        Color::Rgb(255, 151, 151),
+        colors.text,
+    );
+    spans.push(Span::raw(" "));
+    append_key_badge(
+        &mut spans,
+        "+",
+        "Raise",
+        Color::Rgb(43, 88, 63),
+        Color::Rgb(136, 255, 184),
+        colors.text,
+    );
+    spans.push(Span::styled(
+        "  Shift fine",
+        Style::default().fg(colors.muted),
+    ));
+    Line::from(spans)
 }
 
 #[cfg(test)]
@@ -2984,6 +3222,36 @@ mod tests {
     }
 
     #[test]
+    fn action_panel_sections_have_distinct_backgrounds() {
+        let sections = [
+            "Recent",
+            "Settings",
+            "Playlist",
+            "Queue",
+            "Library",
+            "Appearance",
+            "Stats",
+            "Window",
+            "Lyrics",
+            "Actions",
+        ];
+        let mut backgrounds = Vec::with_capacity(sections.len());
+
+        for section in sections {
+            let bg = action_panel_section_bg(section).expect("section background");
+            assert!(!backgrounds.contains(&bg));
+            backgrounds.push(bg);
+        }
+    }
+
+    #[test]
+    fn action_panel_section_detection_only_matches_headers() {
+        assert_eq!(action_panel_section_name("Playlist"), Some("Playlist"));
+        assert_eq!(action_panel_section_name("  Remove playlist"), None);
+        assert_eq!(action_panel_section_name("(no matching actions)"), None);
+    }
+
+    #[test]
     fn timeline_line_only_shows_timeline_data() {
         let mut audio = crate::audio::NullAudioEngine::new();
         audio.set_volume(1.4);
@@ -2993,12 +3261,59 @@ mod tests {
     }
 
     #[test]
-    fn control_line_shows_volume_and_scrub_hints() {
+    fn control_line_shows_volume_hint_without_scrub() {
         let mut audio = crate::audio::NullAudioEngine::new();
         audio.set_volume(1.2);
-        let line = control_line(&audio, 10);
-        assert!(line.contains("Vol"));
-        assert!(line.contains("A/D scrub"));
+        let colors = palette(Theme::Dark);
+        let line = control_line(&audio, 10, &colors);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("Vol"));
+        assert!(text.contains("[ - Lower ] [ + Raise ]  Shift fine"));
+        assert!(!text.contains("scrub"));
+        assert_eq!(line.spans[1].style.bg, Some(Color::Rgb(90, 55, 55)));
+        assert_eq!(line.spans[5].style.bg, Some(Color::Rgb(43, 88, 63)));
+    }
+
+    #[test]
+    fn timeline_controls_line_shows_colored_key_badges() {
+        let mut core = TuneCore::from_persisted(crate::model::PersistedState::default());
+        core.scrub_seconds = 30;
+        let colors = palette(Theme::Dark);
+        let line = timeline_controls_line(&core, &colors);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, "[ B Previous ] [ N Next ] [ A -30s ] [ D +30s ]");
+        assert_eq!(line.spans[0].style.bg, Some(Color::Rgb(95, 71, 138)));
+        assert_eq!(line.spans[4].style.bg, Some(Color::Rgb(43, 94, 122)));
+        assert_eq!(line.spans[8].style.bg, Some(Color::Rgb(105, 76, 37)));
+        assert_eq!(line.spans[12].style.bg, Some(Color::Rgb(37, 105, 75)));
+    }
+
+    #[test]
+    fn header_status_text_shows_playback_state() {
+        let core = TuneCore::from_persisted(crate::model::PersistedState::default());
+        let colors = palette(Theme::Dark);
+        let line = header_status_line(&core, &colors);
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(text, " Tracks 0   V Shuffle Off   M Repeat Off   OFFLINE ");
+        assert_eq!(line.spans[0].style.bg, Some(Color::Rgb(45, 72, 108)));
+        assert_eq!(line.spans[2].style.bg, Some(Color::Rgb(24, 87, 73)));
+        assert_eq!(line.spans[4].style.bg, Some(Color::Rgb(80, 60, 112)));
+        assert_eq!(line.spans[6].style.bg, Some(Color::Rgb(76, 69, 58)));
     }
 
     #[test]
