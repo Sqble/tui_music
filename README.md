@@ -1,5 +1,7 @@
 # TuneTUI
 
+![visitor count](https://count.getloli.com/@:tunetui)
+
 Performance-oriented terminal music player for desktop terminal workflows.
 
 ## Documentation
