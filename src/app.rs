@@ -17,7 +17,7 @@ use arboard::Clipboard;
 use base64::Engine;
 use crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    KeyEventState, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use crossterm::terminal::{
@@ -5003,6 +5003,98 @@ fn apply_left_click(
                     publish_current_playback_state(core, &*audio, online_runtime);
                 }
             }
+        }
+        HitTarget::StatsRange(index) => {
+            let idx = (index % 4) as u8;
+            core.stats_focus = crate::core::StatsFilterFocus::Range(idx);
+            set_stats_range_by_index(core, idx);
+            core.status = format!("Range: {}", core.stats_range.label());
+            core.dirty = true;
+        }
+        HitTarget::StatsSort(index) => {
+            let idx = (index % 2) as u8;
+            core.stats_focus = crate::core::StatsFilterFocus::Sort(idx);
+            set_stats_sort_by_index(core, idx);
+            core.status = format!("Sort: {}", core.stats_sort.label());
+            core.dirty = true;
+        }
+        HitTarget::StatsArtistFilter => {
+            core.stats_focus = crate::core::StatsFilterFocus::Artist;
+            core.dirty = true;
+        }
+        HitTarget::StatsAlbumFilter => {
+            core.stats_focus = crate::core::StatsFilterFocus::Album;
+            core.dirty = true;
+        }
+        HitTarget::StatsSearchFilter => {
+            core.stats_focus = crate::core::StatsFilterFocus::Search;
+            core.dirty = true;
+        }
+        HitTarget::JoinPromptInput => {
+            online_runtime.join_prompt_button = JoinPromptButton::Input;
+            core.dirty = true;
+        }
+        HitTarget::JoinPromptPrimary => {
+            online_runtime.join_prompt_button = JoinPromptButton::Join;
+            let synthetic = KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::empty(),
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            };
+            handle_online_inline_input(core, audio, synthetic, online_runtime);
+        }
+        HitTarget::JoinPromptPaste => {
+            match paste_invite_from_clipboard(online_runtime) {
+                Ok(()) => {
+                    core.status = format!("Pasted input: {}", online_runtime.join_code_input);
+                }
+                Err(err) => {
+                    core.status = format!("Clipboard paste failed: {err}");
+                }
+            }
+            online_runtime.join_prompt_button = JoinPromptButton::Input;
+            core.dirty = true;
+        }
+        HitTarget::RoomDirectorySearch => {
+            online_runtime.join_directory_focus = RoomDirectoryFocus::Search;
+            core.dirty = true;
+        }
+        HitTarget::RoomDirectoryRoom(index) => {
+            online_runtime.join_directory_focus = RoomDirectoryFocus::Rooms;
+            online_runtime.join_directory_selected = index;
+            core.dirty = true;
+            let synthetic = KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::empty(),
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            };
+            handle_online_inline_input(core, audio, synthetic, online_runtime);
+        }
+        HitTarget::PasswordPromptInput => {
+            // Password prompt always accepts typing; click provides visual feedback only.
+            core.dirty = true;
+        }
+        HitTarget::HostInviteCopy => {
+            online_runtime.host_invite_button = HostInviteModalButton::Copy;
+            let synthetic = KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::empty(),
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            };
+            handle_host_invite_modal_input(core, synthetic, online_runtime);
+        }
+        HitTarget::HostInviteOk => {
+            online_runtime.host_invite_button = HostInviteModalButton::Ok;
+            let synthetic = KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::empty(),
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            };
+            handle_host_invite_modal_input(core, synthetic, online_runtime);
         }
         HitTarget::ActionRow(_)
         | HitTarget::ActionPanelBackground

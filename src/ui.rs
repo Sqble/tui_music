@@ -42,6 +42,21 @@ pub enum HitTarget {
     ActionRow(usize),
     ActionPanelBackground,
     ActionPanelInside,
+    // Stats
+    StatsRange(usize),
+    StatsSort(usize),
+    StatsArtistFilter,
+    StatsAlbumFilter,
+    StatsSearchFilter,
+    // Online inline / popup
+    JoinPromptInput,
+    JoinPromptPrimary,
+    JoinPromptPaste,
+    RoomDirectorySearch,
+    RoomDirectoryRoom(usize),
+    PasswordPromptInput,
+    HostInviteCopy,
+    HostInviteOk,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -771,6 +786,33 @@ fn draw_room_directory_inline(
         .wrap(Wrap { trim: true });
     frame.render_widget(left, horizontal[0]);
 
+    let inner = horizontal[0].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    // Search line is at inner.y + 3.
+    hit_map_push(
+        Rect {
+            x: inner.x,
+            y: inner.y + 3,
+            width: inner.width,
+            height: 1,
+        },
+        HitTarget::RoomDirectorySearch,
+    );
+    // Room lines start at inner.y + 5.
+    for (index, _) in dir.rooms.iter().enumerate().take(max_rooms) {
+        hit_map_push(
+            Rect {
+                x: inner.x,
+                y: inner.y + 5 + index as u16,
+                width: inner.width,
+                height: 1,
+            },
+            HitTarget::RoomDirectoryRoom(index),
+        );
+    }
+
     let right_lines = vec![
         Line::from(Span::styled(
             "Controls",
@@ -818,10 +860,9 @@ fn draw_room_directory_inline(
             Style::default().fg(colors.muted),
         )),
     ];
-
     let right = Paragraph::new(right_lines)
         .block(panel_block(
-            "Help",
+            "Online",
             colors.content_panel_alt_bg,
             colors.text,
             colors.border,
@@ -876,6 +917,21 @@ fn draw_online_password_prompt_inline(
         ))
         .wrap(Wrap { trim: true });
     frame.render_widget(left, horizontal[0]);
+
+    let inner = horizontal[0].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    // Password line is at inner.y + 5.
+    hit_map_push(
+        Rect {
+            x: inner.x,
+            y: inner.y + 5,
+            width: inner.width,
+            height: 1,
+        },
+        HitTarget::PasswordPromptInput,
+    );
 
     let right_lines = vec![
         Line::from(Span::styled(
@@ -1044,6 +1100,44 @@ fn draw_join_prompt_inline(
         .wrap(Wrap { trim: true });
     frame.render_widget(left, horizontal[0]);
 
+    let inner = horizontal[0].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    // Input line is at inner.y + 3.
+    hit_map_push(
+        Rect {
+            x: inner.x,
+            y: inner.y + 3,
+            width: inner.width,
+            height: 1,
+        },
+        HitTarget::JoinPromptInput,
+    );
+    // Buttons on inner.y + 5.
+    let primary_label = join_prompt_primary_label(modal);
+    let primary_w = primary_label.len() as u16;
+    hit_map_push(
+        Rect {
+            x: inner.x,
+            y: inner.y + 5,
+            width: primary_w,
+            height: 1,
+        },
+        HitTarget::JoinPromptPrimary,
+    );
+    let paste_w = "[ Paste clipboard ]".len() as u16;
+    let paste_x = inner.x + primary_w + 3;
+    hit_map_push(
+        Rect {
+            x: paste_x,
+            y: inner.y + 5,
+            width: paste_w,
+            height: 1,
+        },
+        HitTarget::JoinPromptPaste,
+    );
+
     let right_lines = vec![
         Line::from(Span::styled(
             "Help",
@@ -1168,6 +1262,39 @@ fn draw_join_prompt(frame: &mut Frame, modal: &JoinPromptModalView, colors: &The
         )),
     ];
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
+
+    // Input line at inner.y + 0.
+    hit_map_push(
+        Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: 1,
+        },
+        HitTarget::JoinPromptInput,
+    );
+    // Buttons at inner.y + 2.
+    let primary_w = "[ Continue ]".len() as u16;
+    hit_map_push(
+        Rect {
+            x: inner.x,
+            y: inner.y + 2,
+            width: primary_w,
+            height: 1,
+        },
+        HitTarget::JoinPromptPrimary,
+    );
+    let paste_w = "[ Paste clipboard ]".len() as u16;
+    let paste_x = inner.x + primary_w + 3;
+    hit_map_push(
+        Rect {
+            x: paste_x,
+            y: inner.y + 2,
+            width: paste_w,
+            height: 1,
+        },
+        HitTarget::JoinPromptPaste,
+    );
 }
 
 fn draw_host_invite_modal(frame: &mut Frame, modal: &HostInviteModalView, colors: &ThemePalette) {
@@ -1226,6 +1353,27 @@ fn draw_host_invite_modal(frame: &mut Frame, modal: &HostInviteModalView, colors
             .alignment(Alignment::Center)
             .wrap(Wrap { trim: true }),
         inner,
+    );
+
+    // Copy button at inner.y + 4.
+    hit_map_push(
+        Rect {
+            x: inner.x,
+            y: inner.y + 4,
+            width: inner.width,
+            height: 1,
+        },
+        HitTarget::HostInviteCopy,
+    );
+    // OK button at inner.y + 6.
+    hit_map_push(
+        Rect {
+            x: inner.x,
+            y: inner.y + 6,
+            width: inner.width,
+            height: 1,
+        },
+        HitTarget::HostInviteOk,
     );
 }
 
@@ -1942,6 +2090,94 @@ fn draw_stats_section(
         .wrap(Wrap { trim: false });
     frame.render_widget(left, horizontal[0]);
 
+    // Register mouse hit targets for stats filters.
+    let stats_inner = horizontal[0].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let scroll = core.stats_scroll as usize;
+    let inner_y = stats_inner.y;
+    let inner_x = stats_inner.x;
+
+    // Line 0: Range filters.
+    let line0 = 0usize;
+    if line0 >= scroll {
+        let y = inner_y + (line0 - scroll) as u16;
+        let mut x = inner_x + 6; // "Range "
+        for (idx, label) in [(0, "All"), (1, "Today"), (2, "7d"), (3, "30d")] {
+            let w = stats_choice_width(label) as u16;
+            hit_map_push(
+                Rect {
+                    x,
+                    y,
+                    width: w,
+                    height: 1,
+                },
+                HitTarget::StatsRange(idx),
+            );
+            x = x.saturating_add(w + 1);
+        }
+    }
+
+    // Line 1: Sort filters.
+    let line1 = 1usize;
+    if line1 >= scroll {
+        let y = inner_y + (line1 - scroll) as u16;
+        let mut x = inner_x + 6; // "Sort  "
+        for (idx, label) in [(0, "Listen"), (1, "Plays")] {
+            let w = stats_choice_width(label) as u16;
+            hit_map_push(
+                Rect {
+                    x,
+                    y,
+                    width: w,
+                    height: 1,
+                },
+                HitTarget::StatsSort(idx),
+            );
+            x = x.saturating_add(w + 1);
+        }
+    }
+
+    // Line 2: Text filters.
+    let line2 = 2usize;
+    if line2 >= scroll {
+        let y = inner_y + (line2 - scroll) as u16;
+        let mut x = inner_x;
+        let w = stats_text_box_width("Artist", &core.stats_artist_filter) as u16;
+        hit_map_push(
+            Rect {
+                x,
+                y,
+                width: w,
+                height: 1,
+            },
+            HitTarget::StatsArtistFilter,
+        );
+        x = x.saturating_add(w + 2); // "  "
+        let w = stats_text_box_width("Album", &core.stats_album_filter) as u16;
+        hit_map_push(
+            Rect {
+                x,
+                y,
+                width: w,
+                height: 1,
+            },
+            HitTarget::StatsAlbumFilter,
+        );
+        x = x.saturating_add(w + 2);
+        let w = stats_text_box_width("Search", &core.stats_search) as u16;
+        hit_map_push(
+            Rect {
+                x,
+                y,
+                width: w,
+                height: 1,
+            },
+            HitTarget::StatsSearchFilter,
+        );
+    }
+
     let stats_inner = horizontal[0].inner(Margin {
         vertical: 1,
         horizontal: 1,
@@ -1992,6 +2228,18 @@ fn draw_stats_section(
         ))
         .wrap(Wrap { trim: true });
     frame.render_widget(right, horizontal[1]);
+}
+
+fn stats_choice_width(label: &str) -> usize {
+    label.len() + 2
+}
+
+fn stats_text_box_width(label: &str, value: &str) -> usize {
+    if value.is_empty() {
+        label.len() + 5
+    } else {
+        label.len() + 4 + value.len()
+    }
 }
 
 fn stats_choice_box<'a>(
@@ -2096,7 +2344,16 @@ fn render_square_trend_graph(
         grid[y][x] = '█';
     }
 
-    let label_width = 4_usize;
+    let label_width = (0..height)
+        .step_by(2)
+        .map(|row_index| {
+            let row_value = ((height.saturating_sub(1).saturating_sub(row_index)) as f64
+                / (height.saturating_sub(1).max(1) as f64)
+                * (max_value as f64)) as u64;
+            short_metric_label(row_value, sort).len()
+        })
+        .max()
+        .unwrap_or(4);
     let mut lines = Vec::with_capacity(height + 4);
     lines.push(format!(
         "{} +{}+",
