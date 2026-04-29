@@ -23,6 +23,89 @@ use time::{OffsetDateTime, UtcOffset};
 const APP_TITLE: &str = "TuneTUI";
 const APP_VERSION: &str = "v1.0.0-alpha-3";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitTarget {
+    Tab(HeaderSection),
+    ToggleShuffle,
+    CycleRepeat,
+    OpenOnline,
+    LibrarySearchBar,
+    LibraryRow(usize),
+    Prev,
+    Next,
+    ScrubBack,
+    ScrubFwd,
+    VolumeDown,
+    VolumeUp,
+    VolumeBar { x: u16, width: u16 },
+    TimelineBar { x: u16, width: u16 },
+    ActionRow(usize),
+    ActionPanelBackground,
+    ActionPanelInside,
+}
+
+#[derive(Debug, Default, Clone)]
+pub struct HitMap {
+    entries: Vec<(Rect, HitTarget)>,
+}
+
+impl HitMap {
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn push(&mut self, rect: Rect, target: HitTarget) {
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        self.entries.push((rect, target));
+    }
+
+    pub fn hit(&self, x: u16, y: u16) -> Option<HitTarget> {
+        // Iterate in reverse so later registrations (e.g. modals/overlays) win
+        // over earlier ones drawn underneath.
+        self.entries.iter().rev().find_map(|(rect, target)| {
+            if x >= rect.x
+                && x < rect.x.saturating_add(rect.width)
+                && y >= rect.y
+                && y < rect.y.saturating_add(rect.height)
+            {
+                Some(*target)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn entries(&self) -> &[(Rect, HitTarget)] {
+        &self.entries
+    }
+}
+
+static HIT_MAP: OnceLock<Mutex<HitMap>> = OnceLock::new();
+
+fn hit_map_cell() -> &'static Mutex<HitMap> {
+    HIT_MAP.get_or_init(|| Mutex::new(HitMap::default()))
+}
+
+pub fn take_hit_map() -> HitMap {
+    let cell = hit_map_cell();
+    let mut guard = cell.lock().expect("hit map mutex poisoned");
+    std::mem::take(&mut *guard)
+}
+
+fn hit_map_clear() {
+    let cell = hit_map_cell();
+    let mut guard = cell.lock().expect("hit map mutex poisoned");
+    guard.clear();
+}
+
+fn hit_map_push(rect: Rect, target: HitTarget) {
+    let cell = hit_map_cell();
+    let mut guard = cell.lock().expect("hit map mutex poisoned");
+    guard.push(rect, target);
+}
+
 pub struct ActionPanelView {
     pub title: String,
     pub hint: String,
@@ -234,6 +317,7 @@ pub fn draw(
     stats_snapshot: Option<&StatsSnapshot>,
     overlays: OverlayViews<'_>,
 ) {
+    hit_map_clear();
     let colors = palette(core.theme);
     frame.render_widget(
         Block::default().style(Style::default().bg(colors.bg)),
@@ -252,6 +336,7 @@ pub fn draw(
         .split(frame.area());
 
     frame.render_widget(status_panel_block(core, &colors), vertical[0]);
+    register_status_pill_hits(vertical[0], core);
 
     let header_inner = vertical[0].inner(Margin {
         vertical: 0,
@@ -278,6 +363,7 @@ pub fn draw(
     let header_right =
         Paragraph::new(header_tabs_line(core.header_section, &colors)).alignment(Alignment::Right);
     frame.render_widget(header_right, header_chunks[1]);
+    register_header_tab_hits(header_chunks[1]);
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
@@ -370,6 +456,7 @@ pub fn draw(
             Paragraph::new(Line::from(Span::styled(search_text, search_style))),
             chunks[0],
         );
+        hit_map_push(chunks[0], HitTarget::LibrarySearchBar);
 
         let list_area = chunks[1];
         let mut state = ListState::default();
@@ -386,6 +473,24 @@ pub fn draw(
             )
             .highlight_symbol("-> ");
         frame.render_stateful_widget(list, list_area, &mut state);
+
+        let visible_rows = usize::from(list_area.height);
+        let offset = state.offset();
+        for visible_idx in 0..visible_rows {
+            let entry_idx = offset + visible_idx;
+            if entry_idx >= core.browser_entries.len() {
+                break;
+            }
+            hit_map_push(
+                Rect {
+                    x: list_area.x,
+                    y: list_area.y + visible_idx as u16,
+                    width: list_area.width,
+                    height: 1,
+                },
+                HitTarget::LibraryRow(entry_idx),
+            );
+        }
 
         let library_viewport_lines = usize::from(list_area.height);
         let total_library_rows = core.browser_entries.len();
@@ -563,6 +668,7 @@ pub fn draw(
         ))
         .wrap(Wrap { trim: true });
     frame.render_widget(control_block, vertical[3]);
+    register_control_line_hits(vertical[3], 16);
 
     let key_hint = if core.header_section == HeaderSection::Stats {
         "Keys: Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top"
@@ -1171,6 +1277,39 @@ fn header_tabs_width() -> u16 {
         .sum();
     let separators_len = " -- ".len() * labels.len().saturating_sub(1);
     (labels_len + separators_len) as u16
+}
+
+fn register_header_tab_hits(area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let total = header_tabs_width();
+    if total > area.width {
+        return;
+    }
+    // Right-aligned: tabs start at area.x + (area.width - total).
+    let mut x = area.x + (area.width - total);
+    let sections = [
+        HeaderSection::Library,
+        HeaderSection::Lyrics,
+        HeaderSection::Stats,
+        HeaderSection::Online,
+    ];
+    for (idx, section) in sections.into_iter().enumerate() {
+        if idx > 0 {
+            // " -- " separator (4 cells) is not clickable.
+            x = x.saturating_add(4);
+        }
+        let label_len = (section.label().len() + section.shortcut().len_utf8() + 1) as u16;
+        let rect = Rect {
+            x,
+            y: area.y,
+            width: label_len,
+            height: 1,
+        };
+        hit_map_push(rect, HitTarget::Tab(section));
+        x = x.saturating_add(label_len);
+    }
 }
 
 fn draw_placeholder_section(
@@ -2353,7 +2492,78 @@ fn draw_timeline_panel(
             Paragraph::new(controls).alignment(Alignment::Right),
             controls_area,
         );
+        register_timeline_control_hits(controls_area, core);
     }
+
+    if timeline_width > 0 {
+        let timeline_bar_width = usize::from(timeline_width.saturating_sub(18)).clamp(8, 42) as u16;
+        // Timeline text is "MM:SS / MM:SS [bar]" — bar starts after `time / time `
+        // which is 13 cells (5 + 3 + 5). Approximate hit zone: the entire timeline_area
+        // minus the leading 13 cells.
+        let bar_x = inner.x.saturating_add(13);
+        if inner.x.saturating_add(inner.width) > bar_x {
+            let max_bar_width = inner.x.saturating_add(timeline_width).saturating_sub(bar_x);
+            let bar_width = timeline_bar_width.min(max_bar_width);
+            if bar_width > 0 {
+                hit_map_push(
+                    Rect {
+                        x: bar_x,
+                        y: inner.y,
+                        width: bar_width,
+                        height: 1,
+                    },
+                    HitTarget::TimelineBar {
+                        x: bar_x,
+                        width: bar_width,
+                    },
+                );
+            }
+        }
+    }
+}
+
+fn register_timeline_control_hits(area: Rect, core: &TuneCore) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let scrub = timeline_scrub_label(core.scrub_seconds);
+    let badges: [(u16, HitTarget); 4] = [
+        (key_badge_width("B", "Previous"), HitTarget::Prev),
+        (key_badge_width("N", "Next"), HitTarget::Next),
+        (
+            key_badge_width("A", &format!("-{}", scrub)),
+            HitTarget::ScrubBack,
+        ),
+        (
+            key_badge_width("D", &format!("+{}", scrub)),
+            HitTarget::ScrubFwd,
+        ),
+    ];
+    let total: u16 = badges.iter().map(|(w, _)| *w).sum::<u16>() + 3; // 3 spaces between 4 badges
+    if total > area.width {
+        return;
+    }
+    let mut x = area.x + (area.width - total);
+    for (idx, (width, target)) in badges.iter().enumerate() {
+        if idx > 0 {
+            x = x.saturating_add(1);
+        }
+        hit_map_push(
+            Rect {
+                x,
+                y: area.y,
+                width: *width,
+                height: 1,
+            },
+            *target,
+        );
+        x = x.saturating_add(*width);
+    }
+}
+
+fn key_badge_width(key: &str, label: &str) -> u16 {
+    // "[" (1) + " " + key + " " + label + " " + "]" (1) = 5 + key + label
+    (5 + key.chars().count() + label.chars().count()) as u16
 }
 
 fn timeline_controls_line(core: &TuneCore, colors: &ThemePalette) -> Line<'static> {
@@ -2496,6 +2706,75 @@ fn header_status_line(core: &TuneCore, colors: &ThemePalette) -> Line<'static> {
     ])
 }
 
+fn register_status_pill_hits(area: Rect, core: &TuneCore) {
+    if area.width == 0 || area.height < 2 {
+        return;
+    }
+    // Title-bottom of the status block sits on the bottom border row.
+    let y = area.y + area.height - 1;
+    let tracks_label = format!(" Tracks {} ", core.tracks.len());
+    let shuffle_label = format!(
+        " V Shuffle {} ",
+        if core.shuffle_enabled { "On" } else { "Off" }
+    );
+    let repeat_label = format!(" M Repeat {} ", core.repeat_mode.label());
+    let online_label = if core.online.session.is_some() {
+        " ONLINE "
+    } else {
+        " OFFLINE "
+    };
+
+    let widths = [
+        tracks_label.chars().count() as u16,
+        1,
+        shuffle_label.chars().count() as u16,
+        1,
+        repeat_label.chars().count() as u16,
+        1,
+        online_label.chars().count() as u16,
+    ];
+    let total: u16 = widths.iter().sum();
+    if total == 0 || total > area.width {
+        return;
+    }
+    let mut x = area.x + (area.width - total) / 2;
+
+    // Tracks pill (no action - skip but advance cursor).
+    x = x.saturating_add(widths[0]);
+    x = x.saturating_add(widths[1]); // separator
+    hit_map_push(
+        Rect {
+            x,
+            y,
+            width: widths[2],
+            height: 1,
+        },
+        HitTarget::ToggleShuffle,
+    );
+    x = x.saturating_add(widths[2]);
+    x = x.saturating_add(widths[3]);
+    hit_map_push(
+        Rect {
+            x,
+            y,
+            width: widths[4],
+            height: 1,
+        },
+        HitTarget::CycleRepeat,
+    );
+    x = x.saturating_add(widths[4]);
+    x = x.saturating_add(widths[5]);
+    hit_map_push(
+        Rect {
+            x,
+            y,
+            width: widths[6],
+            height: 1,
+        },
+        HitTarget::OpenOnline,
+    );
+}
+
 fn status_panel_block(core: &TuneCore, colors: &ThemePalette) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -2511,8 +2790,13 @@ fn status_panel_block(core: &TuneCore, colors: &ThemePalette) -> Block<'static> 
 }
 
 fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemePalette) {
+    // Cover the whole frame with a "background" hit so clicks outside the popup
+    // close the panel. The popup itself overrides this with later registrations.
+    hit_map_push(frame.area(), HitTarget::ActionPanelBackground);
+
     let popup = centered_rect(frame.area(), 62, 58);
     frame.render_widget(Clear, popup);
+    hit_map_push(popup, HitTarget::ActionPanelInside);
 
     let mut panel_block_widget =
         panel_block(&panel.title, colors.popup_bg, colors.text, colors.border);
@@ -2599,6 +2883,23 @@ fn draw_action_panel(frame: &mut Frame, panel: &ActionPanelView, colors: &ThemeP
         )
         .highlight_symbol("-> ");
     frame.render_stateful_widget(list, list_area, &mut state);
+
+    let panel_offset = state.offset();
+    for visible_idx in 0..usize::from(list_area.height) {
+        let option_idx = panel_offset + visible_idx;
+        if option_idx >= panel.options.len() {
+            break;
+        }
+        hit_map_push(
+            Rect {
+                x: list_area.x,
+                y: list_area.y + visible_idx as u16,
+                width: list_area.width,
+                height: 1,
+            },
+            HitTarget::ActionRow(option_idx),
+        );
+    }
 
     if show_scrollbar {
         let scrollbar_area = Rect {
@@ -3147,6 +3448,63 @@ fn timeline_line(audio: &dyn AudioEngine, timeline_bar_width: usize) -> String {
     )
 }
 
+fn register_control_line_hits(area: Rect, volume_bar_width: u16) {
+    if area.width < 4 || area.height < 3 {
+        return;
+    }
+    let inner_x = area.x + 1;
+    let inner_y = area.y + 1;
+    let inner_width = area.width.saturating_sub(2);
+
+    let bar_x = inner_x.saturating_add(5);
+    let bar_width = volume_bar_width.min(inner_width.saturating_sub(5));
+    if bar_width > 0 {
+        hit_map_push(
+            Rect {
+                x: bar_x,
+                y: inner_y,
+                width: bar_width,
+                height: 1,
+            },
+            HitTarget::VolumeBar {
+                x: bar_x,
+                width: bar_width,
+            },
+        );
+    }
+
+    // Layout reproduced from control_line: "Vol [bar] {pct:>3}%  [ - Lower ] [ + Raise ]  Shift fine"
+    let lower_badge_w = key_badge_width("-", "Lower");
+    let raise_badge_w = key_badge_width("+", "Raise");
+    // 4 (Vol ) + 1 ([) + bar + 1 (]) + 1 ( ) + 3 (pct) + 1 (%) + 2 (  ) = bar + 13
+    let lower_x = inner_x.saturating_add(volume_bar_width).saturating_add(13);
+    let lower_end = lower_x.saturating_add(lower_badge_w);
+    if lower_end <= inner_x.saturating_add(inner_width) {
+        hit_map_push(
+            Rect {
+                x: lower_x,
+                y: inner_y,
+                width: lower_badge_w,
+                height: 1,
+            },
+            HitTarget::VolumeDown,
+        );
+        let raise_x = lower_end.saturating_add(1);
+        let raise_end = raise_x.saturating_add(raise_badge_w);
+        if raise_end <= inner_x.saturating_add(inner_width) {
+            hit_map_push(
+                Rect {
+                    x: raise_x,
+                    y: inner_y,
+                    width: raise_badge_w,
+                    height: 1,
+                },
+                HitTarget::VolumeUp,
+            );
+        }
+    }
+}
+
 fn control_line(
     audio: &dyn AudioEngine,
     volume_bar_width: usize,
@@ -3213,6 +3571,136 @@ mod tests {
     #[test]
     fn action_panel_scroll_top_uses_centered_strategy() {
         assert_eq!(centered_scroll_top(15, 6), 12);
+    }
+
+    #[test]
+    fn hit_map_returns_topmost_target() {
+        let mut map = HitMap::default();
+        map.push(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            HitTarget::ActionPanelBackground,
+        );
+        map.push(
+            Rect {
+                x: 2,
+                y: 2,
+                width: 4,
+                height: 4,
+            },
+            HitTarget::ActionPanelInside,
+        );
+        // Inside the popup -> popup wins (registered later).
+        assert_eq!(map.hit(3, 3), Some(HitTarget::ActionPanelInside));
+        // Outside the popup -> background.
+        assert_eq!(map.hit(8, 8), Some(HitTarget::ActionPanelBackground));
+    }
+
+    #[test]
+    fn hit_map_misses_outside_all_rects() {
+        let mut map = HitMap::default();
+        map.push(
+            Rect {
+                x: 5,
+                y: 5,
+                width: 3,
+                height: 3,
+            },
+            HitTarget::Tab(HeaderSection::Library),
+        );
+        assert!(map.hit(0, 0).is_none());
+        assert!(map.hit(8, 8).is_none()); // x is at rect.x + width, exclusive
+    }
+
+    #[test]
+    fn hit_map_skips_zero_sized_rects() {
+        let mut map = HitMap::default();
+        map.push(
+            Rect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            HitTarget::Prev,
+        );
+        assert_eq!(map.entries().len(), 0);
+    }
+
+    #[test]
+    fn key_badge_width_matches_rendered_text() {
+        // "[ B Previous ]" = 14 cells.
+        assert_eq!(key_badge_width("B", "Previous"), 14);
+        assert_eq!(key_badge_width("-", "Lower"), 11);
+        // "[ D +30s ]" = 10 cells.
+        assert_eq!(key_badge_width("D", "+30s"), 10);
+    }
+
+    #[test]
+    fn header_tab_hits_register_for_each_section() {
+        // Make sure register_header_tab_hits pushes 4 entries with HitTarget::Tab(*).
+        let cell = hit_map_cell();
+        cell.lock().unwrap().clear();
+        let area = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 1,
+        };
+        register_header_tab_hits(area);
+        let entries: Vec<_> = cell
+            .lock()
+            .unwrap()
+            .entries()
+            .iter()
+            .map(|(_, t)| *t)
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                HitTarget::Tab(HeaderSection::Library),
+                HitTarget::Tab(HeaderSection::Lyrics),
+                HitTarget::Tab(HeaderSection::Stats),
+                HitTarget::Tab(HeaderSection::Online),
+            ]
+        );
+    }
+
+    #[test]
+    fn timeline_control_hits_cover_four_badges() {
+        let mut core = TuneCore::from_persisted(crate::model::PersistedState::default());
+        core.scrub_seconds = 30;
+        let cell = hit_map_cell();
+        cell.lock().unwrap().clear();
+        register_timeline_control_hits(
+            Rect {
+                x: 10,
+                y: 5,
+                width: 60,
+                height: 1,
+            },
+            &core,
+        );
+        let entries: Vec<_> = cell
+            .lock()
+            .unwrap()
+            .entries()
+            .iter()
+            .map(|(_, t)| *t)
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                HitTarget::Prev,
+                HitTarget::Next,
+                HitTarget::ScrubBack,
+                HitTarget::ScrubFwd
+            ]
+        );
     }
 
     #[test]
