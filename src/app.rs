@@ -4076,6 +4076,12 @@ fn drain_online_network_events(
                     online_runtime.shutdown();
                     online_runtime.last_transport_seq = 0;
                     core.online.leave_room();
+                    online_runtime.home_server_connected = false;
+                    online_runtime.join_prompt_active = true;
+                    online_runtime.join_prompt_mode = JoinPromptMode::Connect;
+                    online_runtime.join_code_input.clear();
+                    online_runtime.join_prompt_button =
+                        default_join_prompt_button(JoinPromptMode::Connect);
                     core.status = format!("Disconnected from room: {message}");
                 }
                 core.dirty = true;

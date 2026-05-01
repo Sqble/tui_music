@@ -1434,10 +1434,10 @@ fn header_tabs_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'sta
         }
 
         let tab_color = match section {
-            HeaderSection::Library => colors.accent,
-            HeaderSection::Lyrics => Color::Rgb(231, 165, 255),
-            HeaderSection::Stats => Color::Rgb(255, 200, 116),
-            HeaderSection::Online => Color::Rgb(108, 221, 255),
+            HeaderSection::Library => Color::Rgb(190, 164, 255),
+            HeaderSection::Lyrics => Color::Rgb(139, 220, 255),
+            HeaderSection::Stats => Color::Rgb(255, 204, 128),
+            HeaderSection::Online => Color::Rgb(134, 255, 190),
         };
         let mut style = Style::default().fg(tab_color);
         if section == selected {
@@ -1578,10 +1578,10 @@ fn draw_online_section(
     };
     let code_width = code_display.chars().count() as u16;
 
-    let mode_bg = Color::Rgb(80, 60, 112);
-    let quality_bg = Color::Rgb(24, 87, 73);
-    let toggle_bg = Color::Rgb(76, 69, 58);
-    let copy_bg = Color::Rgb(45, 72, 108);
+    let mode_bg = Color::Rgb(95, 71, 138);
+    let quality_bg = Color::Rgb(43, 94, 122);
+    let toggle_bg = Color::Rgb(105, 76, 37);
+    let copy_bg = Color::Rgb(37, 105, 75);
 
     let mode_badge = format!(" O Mode: {} ", session.mode.label());
     let quality_badge = format!(" Q Stream Quality: {} ", session.quality.label());
@@ -3049,10 +3049,10 @@ fn timeline_scrub_label(seconds: u16) -> String {
 }
 
 fn header_status_line(core: &TuneCore, colors: &ThemePalette) -> Line<'static> {
-    let tracks_bg = Color::Rgb(45, 72, 108);
-    let shuffle_bg = Color::Rgb(24, 87, 73);
-    let repeat_bg = Color::Rgb(80, 60, 112);
-    let online_bg = Color::Rgb(76, 69, 58);
+    let tracks_bg = Color::Rgb(95, 71, 138);
+    let shuffle_bg = Color::Rgb(43, 94, 122);
+    let repeat_bg = Color::Rgb(105, 76, 37);
+    let online_bg = Color::Rgb(37, 105, 75);
     let shuffle_style = if core.shuffle_enabled {
         Style::default()
             .fg(colors.accent)
