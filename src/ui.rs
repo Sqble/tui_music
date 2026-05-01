@@ -55,8 +55,14 @@ pub enum HitTarget {
     RoomDirectorySearch,
     RoomDirectoryRoom(usize),
     PasswordPromptInput,
+    PasswordPromptContinue,
     HostInviteCopy,
     HostInviteOk,
+    // Online session controls
+    ToggleOnlineMode,
+    CycleStreamQuality,
+    ToggleRoomCodeReveal,
+    CopyRoomCode,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -138,6 +144,7 @@ pub struct OnlinePasswordPromptView {
     pub title: String,
     pub subtitle: String,
     pub masked_input: String,
+    pub continue_selected: bool,
 }
 
 pub struct JoinPromptModalView {
@@ -686,13 +693,13 @@ pub fn draw(
     register_control_line_hits(vertical[3], 16);
 
     let key_hint = if core.header_section == HeaderSection::Stats {
-        "Keys: Left/Right focus, Enter cycle, type filters, Backspace edit, Shift+Up top"
+        "Keys: Left/Right Focus, Enter Cycle, Type filters, Backspace Edit, Shift+Up Top"
     } else if core.header_section == HeaderSection::Lyrics {
-        "Keys: Ctrl+e edit/view, Up/Down line, Enter new line, Ctrl+t timestamp, / actions"
+        "Keys: Ctrl+E Edit/view, Up/Down Line, Enter New line, Ctrl+T Timestamp, / Actions"
     } else if core.header_section == HeaderSection::Online {
-        "Keys: Enter select/join, Ctrl+n shared now, Ctrl+l leave room, o mode, q quality, t hide/show code, 2 copy code"
+        "Keys: Enter Select/join, Ctrl+N Shared now, Ctrl+L Leave room"
     } else {
-        "Keys: Enter play, Backspace back, Ctrl+f search, / actions, t tray, Ctrl+C quit"
+        "Keys: Enter Play, Backspace Back, Ctrl+F Search, / Actions, T Tray, Ctrl+C Quit"
     };
     let footer = Paragraph::new(Line::from(vec![
         Span::styled(key_hint, Style::default().fg(colors.muted)),
@@ -882,6 +889,22 @@ fn draw_online_password_prompt_inline(
     } else {
         prompt.masked_input.clone()
     };
+    let input_style = if prompt.continue_selected {
+        Style::default().fg(colors.text)
+    } else {
+        Style::default()
+            .fg(colors.text)
+            .bg(colors.selected_bg)
+            .add_modifier(Modifier::BOLD)
+    };
+    let continue_style = if prompt.continue_selected {
+        Style::default()
+            .fg(colors.text)
+            .bg(colors.selected_bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(colors.muted)
+    };
     let left_lines = vec![
         Line::from(Span::styled(
             prompt.title.as_str(),
@@ -905,8 +928,10 @@ fn draw_online_password_prompt_inline(
         Line::from(""),
         Line::from(vec![
             Span::styled("Password: ", Style::default().fg(colors.muted)),
-            Span::styled(masked, Style::default().fg(colors.accent)),
+            Span::styled(masked, input_style),
         ]),
+        Line::from(""),
+        Line::from(Span::styled("[ Continue ]", continue_style)),
     ];
     let left = Paragraph::new(left_lines)
         .block(panel_block(
@@ -932,6 +957,17 @@ fn draw_online_password_prompt_inline(
         },
         HitTarget::PasswordPromptInput,
     );
+    // Continue button is at inner.y + 7.
+    let continue_w = "[ Continue ]".len() as u16;
+    hit_map_push(
+        Rect {
+            x: inner.x,
+            y: inner.y + 7,
+            width: continue_w,
+            height: 1,
+        },
+        HitTarget::PasswordPromptContinue,
+    );
 
     let right_lines = vec![
         Line::from(Span::styled(
@@ -950,6 +986,10 @@ fn draw_online_password_prompt_inline(
             Style::default().fg(colors.accent),
         )),
         Line::from(""),
+        Line::from(Span::styled(
+            "Tab/Up/Down - Toggle focus",
+            Style::default().fg(colors.muted),
+        )),
         Line::from(Span::styled(
             "Enter - Continue",
             Style::default().fg(colors.muted),
@@ -1404,7 +1444,11 @@ fn header_tabs_line(selected: HeaderSection, colors: &ThemePalette) -> Line<'sta
             style = style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
         }
         spans.push(Span::styled(
-            format!("{} {}", section.shortcut(), section.label()),
+            format!(
+                "{} {}",
+                section.shortcut().to_ascii_uppercase(),
+                section.label()
+            ),
             style,
         ));
     }
@@ -1532,12 +1576,32 @@ fn draw_online_section(
     } else {
         String::from("[hidden]")
     };
+    let code_width = code_display.chars().count() as u16;
+
+    let mode_bg = Color::Rgb(80, 60, 112);
+    let quality_bg = Color::Rgb(24, 87, 73);
+    let toggle_bg = Color::Rgb(76, 69, 58);
+    let copy_bg = Color::Rgb(45, 72, 108);
+
+    let mode_badge = format!(" O Mode: {} ", session.mode.label());
+    let quality_badge = format!(" Q Stream Quality: {} ", session.quality.label());
+    let toggle_badge = if overlays.room_code_revealed {
+        " T Hide ".to_string()
+    } else {
+        " T Show ".to_string()
+    };
+    let copy_badge = " 2 Copy ".to_string();
 
     let mut left_lines = vec![Line::from(vec![
-        Span::styled("Mode ", Style::default().fg(colors.muted)),
-        Span::styled(session.mode.label(), Style::default().fg(colors.text)),
-        Span::styled("  |  Stream ", Style::default().fg(colors.muted)),
-        Span::styled(session.quality.label(), Style::default().fg(colors.alert)),
+        Span::styled(
+            mode_badge.clone(),
+            Style::default().fg(colors.text).bg(mode_bg),
+        ),
+        Span::styled("  ", Style::default().fg(colors.muted)),
+        Span::styled(
+            quality_badge.clone(),
+            Style::default().fg(colors.text).bg(quality_bg),
+        ),
     ])];
 
     left_lines.push(Line::from(vec![
@@ -1548,9 +1612,15 @@ fn draw_online_section(
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled("  ", Style::default().fg(colors.muted)),
         Span::styled(
-            "  [t] show/hide  [2] copy",
-            Style::default().fg(colors.muted),
+            toggle_badge.clone(),
+            Style::default().fg(colors.text).bg(toggle_bg),
+        ),
+        Span::styled("  ", Style::default().fg(colors.muted)),
+        Span::styled(
+            copy_badge.clone(),
+            Style::default().fg(colors.text).bg(copy_bg),
         ),
     ]));
 
@@ -1587,6 +1657,84 @@ fn draw_online_section(
         ))
         .wrap(Wrap { trim: true });
     frame.render_widget(left, horizontal[0]);
+
+    // Register mouse hit targets for online session controls.
+    let inner_x = horizontal[0].x.saturating_add(1);
+    let inner_y = horizontal[0].y.saturating_add(1);
+    let inner_width = horizontal[0].width.saturating_sub(2);
+
+    let mode_badge_width = mode_badge.chars().count() as u16;
+    let sep_width = 5u16; // "  |  "
+    let quality_badge_width = quality_badge.chars().count() as u16;
+    let line0_total = mode_badge_width + sep_width + quality_badge_width;
+    if line0_total <= inner_width {
+        let mut x = inner_x;
+        hit_map_push(
+            Rect {
+                x,
+                y: inner_y,
+                width: mode_badge_width,
+                height: 1,
+            },
+            HitTarget::ToggleOnlineMode,
+        );
+        x = x.saturating_add(mode_badge_width);
+        x = x.saturating_add(sep_width);
+        hit_map_push(
+            Rect {
+                x,
+                y: inner_y,
+                width: quality_badge_width,
+                height: 1,
+            },
+            HitTarget::CycleStreamQuality,
+        );
+    }
+
+    let label_width = 10u16; // "Room code "
+    let toggle_width = toggle_badge.chars().count() as u16;
+    let copy_width = copy_badge.chars().count() as u16;
+    let line1_total = label_width
+        + code_width
+        + 2 // "  "
+        + toggle_width
+        + 2 // "  "
+        + copy_width;
+    if line1_total <= inner_width {
+        let mut x = inner_x;
+        x = x.saturating_add(label_width);
+        hit_map_push(
+            Rect {
+                x,
+                y: inner_y.saturating_add(1),
+                width: code_width,
+                height: 1,
+            },
+            HitTarget::ToggleRoomCodeReveal,
+        );
+        x = x.saturating_add(code_width);
+        x = x.saturating_add(2);
+        hit_map_push(
+            Rect {
+                x,
+                y: inner_y.saturating_add(1),
+                width: toggle_width,
+                height: 1,
+            },
+            HitTarget::ToggleRoomCodeReveal,
+        );
+        x = x.saturating_add(toggle_width);
+        x = x.saturating_add(2);
+        hit_map_push(
+            Rect {
+                x,
+                y: inner_y.saturating_add(1),
+                width: copy_width,
+                height: 1,
+            },
+            HitTarget::CopyRoomCode,
+        );
+    }
 
     let mut right_lines = Vec::new();
     if let Some(now_playing_line) = online_now_playing_line(session) {
@@ -2755,9 +2903,9 @@ fn draw_timeline_panel(
     if timeline_width > 0 {
         let timeline_bar_width = usize::from(timeline_width.saturating_sub(18)).clamp(8, 42) as u16;
         // Timeline text is "MM:SS / MM:SS [bar]" — bar starts after `time / time `
-        // which is 13 cells (5 + 3 + 5). Approximate hit zone: the entire timeline_area
-        // minus the leading 13 cells.
-        let bar_x = inner.x.saturating_add(13);
+        // which is 15 cells (5 + 3 + 5 + 2 spaces). Approximate hit zone: the entire timeline_area
+        // minus the leading 15 cells.
+        let bar_x = inner.x.saturating_add(15);
         if inner.x.saturating_add(inner.width) > bar_x {
             let max_bar_width = inner.x.saturating_add(timeline_width).saturating_sub(bar_x);
             let bar_width = timeline_bar_width.min(max_bar_width);

@@ -179,6 +179,7 @@ struct OnlineRuntime {
     host_max_connections_input: String,
     password_prompt_active: bool,
     password_prompt_mode: OnlinePasswordPromptMode,
+    password_prompt_focus: PasswordPromptFocus,
     password_input: String,
     pending_join_invite_code: String,
     room_code_revealed: bool,
@@ -228,6 +229,7 @@ impl OnlineRuntime {
         self.last_remote_transport_origin = None;
         self.password_prompt_active = false;
         self.password_prompt_mode = OnlinePasswordPromptMode::Host;
+        self.password_prompt_focus = PasswordPromptFocus::PasswordInput;
         self.password_input.clear();
         self.join_directory_active = false;
         self.join_directory_focus = RoomDirectoryFocus::Rooms;
@@ -308,18 +310,25 @@ impl OnlineRuntime {
         }
         let (title, subtitle) = match self.password_prompt_mode {
             OnlinePasswordPromptMode::Host => (
-                "Set Room Password",
-                "Optional. Leave empty for unlocked room.",
+                String::from("Set Room Password"),
+                String::from("Optional. Leave empty for unlocked room."),
             ),
-            OnlinePasswordPromptMode::Join => (
-                "Enter Room Password",
-                "Optional. Needed only for locked rooms.",
-            ),
+            OnlinePasswordPromptMode::Join => {
+                let room_name = self.pending_join_room_name.as_deref().unwrap_or("unknown");
+                (
+                    String::from("Enter Room Password"),
+                    format!("The room {room_name} requires a password."),
+                )
+            }
         };
         Some(crate::ui::OnlinePasswordPromptView {
-            title: String::from(title),
-            subtitle: String::from(subtitle),
+            title,
+            subtitle,
             masked_input: "*".repeat(self.password_input.chars().count()),
+            continue_selected: matches!(
+                self.password_prompt_focus,
+                PasswordPromptFocus::ContinueButton
+            ),
         })
     }
 }
@@ -328,6 +337,12 @@ impl OnlineRuntime {
 enum OnlinePasswordPromptMode {
     Host,
     Join,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PasswordPromptFocus {
+    PasswordInput,
+    ContinueButton,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1700,6 +1715,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
         host_max_connections_input: String::new(),
         password_prompt_active: false,
         password_prompt_mode: OnlinePasswordPromptMode::Host,
+        password_prompt_focus: PasswordPromptFocus::PasswordInput,
         password_input: String::new(),
         pending_join_invite_code: String::new(),
         room_code_revealed: false,
@@ -2961,6 +2977,8 @@ fn handle_online_inline_input(
                         if room.locked {
                             online_runtime.password_prompt_active = true;
                             online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
+                            online_runtime.password_prompt_focus =
+                                PasswordPromptFocus::PasswordInput;
                             online_runtime.password_input.clear();
                             core.status = String::from("Enter room password, then Enter");
                         } else {
@@ -3153,6 +3171,7 @@ fn handle_online_inline_input(
                     online_runtime.host_max_connections_input = String::from("8");
                     online_runtime.password_prompt_active = true;
                     online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
+                    online_runtime.password_prompt_focus = PasswordPromptFocus::PasswordInput;
                     online_runtime.password_input.clear();
                     core.status = String::from("Optional room password, then Enter");
                     core.dirty = true;
@@ -3197,6 +3216,8 @@ fn handle_online_inline_input(
                             online_runtime.join_prompt_mode = JoinPromptMode::Connect;
                             online_runtime.password_prompt_active = true;
                             online_runtime.password_prompt_mode = OnlinePasswordPromptMode::Join;
+                            online_runtime.password_prompt_focus =
+                                PasswordPromptFocus::PasswordInput;
                             online_runtime.password_input.clear();
                             core.status = String::from("Enter room password, then press Enter");
                         } else {
@@ -3337,6 +3358,7 @@ fn handle_online_password_prompt_input(
         KeyCode::Esc => {
             online_runtime.password_prompt_active = false;
             online_runtime.password_input.clear();
+            online_runtime.password_prompt_focus = PasswordPromptFocus::PasswordInput;
             online_runtime.pending_join_invite_code.clear();
             if matches!(
                 online_runtime.password_prompt_mode,
@@ -3363,7 +3385,21 @@ fn handle_online_password_prompt_input(
             core.dirty = true;
             true
         }
+        KeyCode::Tab | KeyCode::Up | KeyCode::Down => {
+            online_runtime.password_prompt_focus = match online_runtime.password_prompt_focus {
+                PasswordPromptFocus::PasswordInput => PasswordPromptFocus::ContinueButton,
+                PasswordPromptFocus::ContinueButton => PasswordPromptFocus::PasswordInput,
+            };
+            core.dirty = true;
+            true
+        }
         KeyCode::Backspace => {
+            if matches!(
+                online_runtime.password_prompt_focus,
+                PasswordPromptFocus::ContinueButton
+            ) {
+                return true;
+            }
             online_runtime.password_input.pop();
             core.status = format!(
                 "Password length: {}",
@@ -3378,6 +3414,7 @@ fn handle_online_password_prompt_input(
                 OnlinePasswordPromptMode::Host => {
                     online_runtime.password_prompt_active = false;
                     online_runtime.password_input.clear();
+                    online_runtime.password_prompt_focus = PasswordPromptFocus::PasswordInput;
                     start_host_with_password(core, online_runtime, password.as_str());
                 }
                 OnlinePasswordPromptMode::Join => {
@@ -3388,6 +3425,7 @@ fn handle_online_password_prompt_input(
                     };
                     online_runtime.password_prompt_active = false;
                     online_runtime.password_input.clear();
+                    online_runtime.password_prompt_focus = PasswordPromptFocus::PasswordInput;
                     online_runtime.pending_join_invite_code.clear();
                     let server_addr = online_runtime.pending_join_server_addr.clone();
                     join_home_room(
@@ -3402,6 +3440,12 @@ fn handle_online_password_prompt_input(
             true
         }
         KeyCode::Char(ch) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            if matches!(
+                online_runtime.password_prompt_focus,
+                PasswordPromptFocus::ContinueButton
+            ) {
+                return true;
+            }
             append_password_char(online_runtime, ch);
             core.status = format!(
                 "Password length: {}",
@@ -4881,6 +4925,58 @@ fn apply_left_click(
             trigger_online_tab_entry(core, online_runtime);
             core.dirty = true;
         }
+        HitTarget::ToggleOnlineMode => {
+            if let Some(session) = core.online.session.as_ref() {
+                let is_host = session.local_participant().is_some_and(|p| p.is_host);
+                let mode = session.mode;
+                if is_host {
+                    core.online_toggle_mode();
+                    if let Some(network) = &online_runtime.network {
+                        network.send_local_action(NetworkLocalAction::SetMode(mode));
+                    }
+                } else {
+                    core.status = String::from("Only host can change room mode");
+                }
+            }
+            core.dirty = true;
+        }
+        HitTarget::CycleStreamQuality => {
+            if let Some(session) = core.online.session.as_ref() {
+                let is_host = session.local_participant().is_some_and(|p| p.is_host);
+                let quality = session.quality;
+                if is_host {
+                    core.online_cycle_quality();
+                    if let Some(network) = &online_runtime.network {
+                        network.send_local_action(NetworkLocalAction::SetQuality(quality));
+                    }
+                } else {
+                    core.status = String::from("Only host can change stream quality");
+                }
+            }
+            core.dirty = true;
+        }
+        HitTarget::ToggleRoomCodeReveal => {
+            online_runtime.room_code_revealed = !online_runtime.room_code_revealed;
+            core.status = if online_runtime.room_code_revealed {
+                String::from("Room code shown")
+            } else {
+                String::from("Room code hidden")
+            };
+            core.dirty = true;
+        }
+        HitTarget::CopyRoomCode => {
+            if let Some(session) = core.online.session.as_ref() {
+                match copy_invite_to_clipboard(&session.room_code) {
+                    Ok(()) => {
+                        core.status = String::from("Copied room code");
+                    }
+                    Err(err) => {
+                        core.status = format!("Clipboard copy failed: {err}");
+                    }
+                }
+                core.dirty = true;
+            }
+        }
         HitTarget::Prev => {
             if local_playback_locked_by_host_only(core) {
                 core.status = String::from(HOST_ONLY_LISTENER_LOCKED_STATUS);
@@ -5073,8 +5169,18 @@ fn apply_left_click(
             handle_online_inline_input(core, audio, synthetic, online_runtime);
         }
         HitTarget::PasswordPromptInput => {
-            // Password prompt always accepts typing; click provides visual feedback only.
+            online_runtime.password_prompt_focus = PasswordPromptFocus::PasswordInput;
             core.dirty = true;
+        }
+        HitTarget::PasswordPromptContinue => {
+            online_runtime.password_prompt_focus = PasswordPromptFocus::ContinueButton;
+            let synthetic = KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::empty(),
+                kind: KeyEventKind::Press,
+                state: KeyEventState::empty(),
+            };
+            handle_online_password_prompt_input(core, synthetic, online_runtime);
         }
         HitTarget::HostInviteCopy => {
             online_runtime.host_invite_button = HostInviteModalButton::Copy;
@@ -7210,6 +7316,7 @@ mod tests {
             host_max_connections_input: String::new(),
             password_prompt_active: false,
             password_prompt_mode: OnlinePasswordPromptMode::Host,
+            password_prompt_focus: PasswordPromptFocus::PasswordInput,
             password_input: String::new(),
             pending_join_invite_code: String::new(),
             room_code_revealed: false,
@@ -10317,6 +10424,7 @@ mod tests {
         let mut runtime = test_online_runtime();
         runtime.password_prompt_active = true;
         runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
+        runtime.password_prompt_focus = PasswordPromptFocus::PasswordInput;
 
         assert!(handle_online_password_prompt_input(
             &mut core,
@@ -10336,6 +10444,7 @@ mod tests {
         runtime.pending_join_room_name = Some(String::from("test-room"));
         runtime.password_prompt_active = true;
         runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
+        runtime.password_prompt_focus = PasswordPromptFocus::PasswordInput;
         runtime.password_input = String::from("secret");
 
         assert!(handle_online_password_prompt_input(
@@ -10348,6 +10457,60 @@ mod tests {
         assert!(runtime.join_directory_active);
         assert!(runtime.pending_join_room_name.is_none());
         assert!(core.online.session.is_none());
+    }
+
+    #[test]
+    fn password_prompt_tab_toggles_focus() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut runtime = test_online_runtime();
+        runtime.password_prompt_active = true;
+        runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
+        runtime.password_prompt_focus = PasswordPromptFocus::PasswordInput;
+
+        assert!(handle_online_password_prompt_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(matches!(
+            runtime.password_prompt_focus,
+            PasswordPromptFocus::ContinueButton
+        ));
+
+        assert!(handle_online_password_prompt_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(matches!(
+            runtime.password_prompt_focus,
+            PasswordPromptFocus::PasswordInput
+        ));
+    }
+
+    #[test]
+    fn password_prompt_typing_blocked_when_continue_focused() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Online;
+        let mut runtime = test_online_runtime();
+        runtime.password_prompt_active = true;
+        runtime.password_prompt_mode = OnlinePasswordPromptMode::Host;
+        runtime.password_prompt_focus = PasswordPromptFocus::ContinueButton;
+
+        assert!(handle_online_password_prompt_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(runtime.password_input.is_empty());
+
+        assert!(handle_online_password_prompt_input(
+            &mut core,
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &mut runtime,
+        ));
+        assert!(runtime.password_input.is_empty());
     }
 
     #[test]
