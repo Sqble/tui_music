@@ -23,7 +23,7 @@ Full documentation available at **https://tunetui.online**
 - Library root shortcuts for `[+] Add Directory` and `[+] New Playlist`
 - Queue tools in Library: local/shared queue entries in the Library root plus quick add-to-end/next controls, remove item, and move item to next actions
 - Single-instance behavior on Windows (new launches focus/restore existing app)
-- Automatic track advance when a song ends, including while minimized to tray (Windows)
+- Automatic track advance when a song ends, including while minimized to tray (Windows and Linux desktops with a tray host)
 - Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\.config\tunetui\state.json` on Windows)
 - Stats sidecar in config dir with metadata-keyed listen events/aggregates
 - Keyboard-driven TUI with color-coded categorized actions panel search, recent actions, and overflow scrollbar
@@ -76,6 +76,7 @@ Download `tune.exe` from releases and run. No installation required.
 | `Ctrl+u` | Add selection to queue end |
 | `Ctrl+y` | Add selection to queue next |
 | `h` `j` `k` `l` | Switch pages (Library/Lyrics/Stats/Online) |
+| `t` | Minimize/collapse to tray |
 | `Ctrl+f` | In Library, focus the search bar |
 | type | When search is focused, type to filter tracks globally |
 | `Esc` / `Backspace` | Clear search filter (or navigate back when empty) |

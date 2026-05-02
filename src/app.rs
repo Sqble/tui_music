@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -1658,6 +1658,19 @@ fn apply_finished_library_scan(
     core.dirty = true;
 }
 
+fn request_minimize_to_tray(core: &mut TuneCore) {
+    core.status = match minimize_to_tray() {
+        TrayActionOutcome::Done(status) => String::from(status),
+        TrayActionOutcome::Unavailable(reason) => reason,
+    };
+    core.dirty = true;
+}
+
+enum TrayActionOutcome {
+    Done(&'static str),
+    Unavailable(String),
+}
+
 pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
     prepare_runtime_environment();
 
@@ -1793,7 +1806,9 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             core.dirty = true;
         }
 
-        pump_tray_events(&mut core);
+        if pump_tray_events(&mut core) {
+            terminal.clear()?;
+        }
         poll_library_scan(&mut core, &mut library_runtime);
         poll_selected_duration_lookup(&mut core, &mut duration_lookup_runtime);
         drain_online_network_events(&mut core, &mut *audio, &mut online_runtime);
@@ -2213,16 +2228,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                     }
                 }
                 KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'t') => {
-                    #[cfg(windows)]
-                    {
-                        minimize_to_tray();
-                        core.status = String::from("Minimized to tray");
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        core.status = String::from("Tray minimize is only available on Windows");
-                    }
-                    core.dirty = true;
+                    request_minimize_to_tray(&mut core);
                 }
                 KeyCode::Char('+') | KeyCode::Char('=') => {
                     let step = if key.code == KeyCode::Char('+')
@@ -6435,9 +6441,7 @@ fn handle_action_panel_input_with_recent(
                         core.dirty = true;
                     }
                     RootActionId::MinimizeToTray => {
-                        minimize_to_tray();
-                        core.status = String::from("Minimized to tray");
-                        core.dirty = true;
+                        request_minimize_to_tray(core);
                         panel.close();
                     }
                     RootActionId::ImportTxtToLyrics => {
@@ -7090,18 +7094,27 @@ static TRAY_RESTORE_REQUESTED: AtomicBool = AtomicBool::new(false);
 #[cfg(windows)]
 static TRAY_CONTROLLER: OnceLock<Mutex<TrayController>> = OnceLock::new();
 
-#[cfg(windows)]
-fn minimize_to_tray() {
+#[cfg(target_os = "linux")]
+static TRAY_CONTROLLER: OnceLock<Mutex<TrayController>> = OnceLock::new();
+
+#[cfg(any(windows, target_os = "linux"))]
+fn minimize_to_tray() -> TrayActionOutcome {
     if let Some(mut controller) = tray_controller() {
-        controller.minimize();
+        controller.minimize()
+    } else {
+        TrayActionOutcome::Unavailable(String::from("Tray controller is unavailable"))
     }
 }
 
-#[cfg(not(windows))]
-fn minimize_to_tray() {}
+#[cfg(not(any(windows, target_os = "linux")))]
+fn minimize_to_tray() -> TrayActionOutcome {
+    TrayActionOutcome::Unavailable(String::from(
+        "Tray minimize is not available on this platform",
+    ))
+}
 
 #[cfg(windows)]
-fn pump_tray_events(core: &mut TuneCore) {
+fn pump_tray_events(core: &mut TuneCore) -> bool {
     if let Some(mut controller) = tray_controller() {
         controller.pump();
     }
@@ -7113,11 +7126,25 @@ fn pump_tray_events(core: &mut TuneCore) {
         }
         core.status = String::from("Restored from tray");
         core.dirty = true;
+        return true;
+    }
+
+    false
+}
+
+#[cfg(target_os = "linux")]
+fn pump_tray_events(core: &mut TuneCore) -> bool {
+    if let Some(mut controller) = tray_controller() {
+        controller.pump(core)
+    } else {
+        false
     }
 }
 
-#[cfg(not(windows))]
-fn pump_tray_events(_core: &mut TuneCore) {}
+#[cfg(not(any(windows, target_os = "linux")))]
+fn pump_tray_events(_core: &mut TuneCore) -> bool {
+    false
+}
 
 #[cfg(windows)]
 fn cleanup_tray() {
@@ -7126,7 +7153,14 @@ fn cleanup_tray() {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn cleanup_tray() {
+    if let Some(mut controller) = tray_controller() {
+        controller.cleanup();
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn cleanup_tray() {}
 
 #[cfg(windows)]
@@ -7159,15 +7193,17 @@ impl TrayController {
         }
     }
 
-    fn minimize(&mut self) {
+    fn minimize(&mut self) -> TrayActionOutcome {
         use windows_sys::Win32::System::Console::GetConsoleWindow;
 
         unsafe {
             if self.ensure_window().is_none() {
-                return;
+                return TrayActionOutcome::Unavailable(String::from(
+                    "Could not create tray window",
+                ));
             }
             if !self.icon_visible && !self.show_icon() {
-                return;
+                return TrayActionOutcome::Unavailable(String::from("Could not create tray icon"));
             }
             let mut hidden = std::ptr::null_mut();
             let primary = tray_host_window();
@@ -7182,6 +7218,9 @@ impl TrayController {
 
             if !hidden.is_null() {
                 self.hidden_window = hidden as isize;
+                TrayActionOutcome::Done("Minimized to tray")
+            } else {
+                TrayActionOutcome::Unavailable(String::from("Could not hide terminal window"))
             }
         }
     }
@@ -7434,6 +7473,348 @@ fn to_wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+#[cfg(target_os = "linux")]
+fn tray_controller() -> Option<std::sync::MutexGuard<'static, TrayController>> {
+    let lock = TRAY_CONTROLLER.get_or_init(|| Mutex::new(TrayController::new()));
+    lock.lock().ok()
+}
+
+#[cfg(target_os = "linux")]
+enum LinuxTrayCommand {
+    Restore,
+}
+
+#[cfg(target_os = "linux")]
+struct TrayController {
+    handle: Option<ksni::blocking::Handle<LinuxTray>>,
+    command_tx: std::sync::mpsc::Sender<LinuxTrayCommand>,
+    command_rx: Receiver<LinuxTrayCommand>,
+    hidden_hyprland_window: Option<HyprlandHiddenWindow>,
+    terminal_hide_requested: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl TrayController {
+    fn new() -> Self {
+        let (command_tx, command_rx) = mpsc::channel();
+        Self {
+            handle: None,
+            command_tx,
+            command_rx,
+            hidden_hyprland_window: None,
+            terminal_hide_requested: false,
+        }
+    }
+
+    fn minimize(&mut self) -> TrayActionOutcome {
+        if let Err(err) = self.ensure_icon() {
+            return TrayActionOutcome::Unavailable(err);
+        }
+
+        if let Some(hidden) = try_hide_hyprland_window() {
+            self.hidden_hyprland_window = Some(hidden);
+            self.terminal_hide_requested = true;
+            return TrayActionOutcome::Done("Minimized to tray (Hyprland)");
+        }
+
+        request_terminal_iconify();
+        self.terminal_hide_requested = true;
+        TrayActionOutcome::Done("Tray icon shown; terminal minimize requested")
+    }
+
+    fn pump(&mut self, core: &mut TuneCore) -> bool {
+        let mut restored = false;
+        while let Ok(command) = self.command_rx.try_recv() {
+            match command {
+                LinuxTrayCommand::Restore => {
+                    self.restore();
+                    self.hide_icon();
+                    core.status = String::from("Restored from tray");
+                    core.dirty = true;
+                    restored = true;
+                }
+            }
+        }
+        restored
+    }
+
+    fn cleanup(&mut self) {
+        self.restore();
+        self.hide_icon();
+    }
+
+    fn restore(&mut self) {
+        let should_deiconify =
+            self.terminal_hide_requested || self.hidden_hyprland_window.is_some();
+        if let Some(hidden) = self.hidden_hyprland_window.take() {
+            restore_hyprland_window(hidden);
+        }
+        if should_deiconify {
+            request_terminal_deiconify();
+        }
+        self.terminal_hide_requested = false;
+    }
+
+    fn ensure_icon(&mut self) -> Result<(), String> {
+        if self
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_closed())
+        {
+            return Ok(());
+        }
+
+        use ksni::blocking::TrayMethods;
+
+        let tray = LinuxTray {
+            id: format!("tunetui-{}", std::process::id()),
+            command_tx: self.command_tx.clone(),
+        };
+        let handle = tray.spawn().map_err(linux_tray_error_message)?;
+        self.handle = Some(handle);
+        Ok(())
+    }
+
+    fn hide_icon(&mut self) {
+        if let Some(handle) = self.handle.take() {
+            handle.shutdown().wait();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct LinuxTray {
+    id: String,
+    command_tx: std::sync::mpsc::Sender<LinuxTrayCommand>,
+}
+
+#[cfg(target_os = "linux")]
+impl ksni::Tray for LinuxTray {
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn title(&self) -> String {
+        String::from("TuneTUI")
+    }
+
+    fn icon_name(&self) -> String {
+        String::from("multimedia-player")
+    }
+
+    fn icon_pixmap(&self) -> Vec<ksni::Icon> {
+        linux_tray_icon_pixmap()
+    }
+
+    fn tool_tip(&self) -> ksni::ToolTip {
+        ksni::ToolTip {
+            title: String::from("TuneTUI"),
+            description: String::from("Click to restore TuneTUI"),
+            icon_name: self.icon_name(),
+            icon_pixmap: self.icon_pixmap(),
+        }
+    }
+
+    fn activate(&mut self, _x: i32, _y: i32) {
+        let _ = self.command_tx.send(LinuxTrayCommand::Restore);
+    }
+
+    fn secondary_activate(&mut self, _x: i32, _y: i32) {
+        let _ = self.command_tx.send(LinuxTrayCommand::Restore);
+    }
+
+    fn menu(&self) -> Vec<ksni::MenuItem<Self>> {
+        use ksni::menu::StandardItem;
+
+        vec![
+            StandardItem {
+                label: String::from("Restore TuneTUI"),
+                icon_name: String::from("view-restore"),
+                activate: Box::new(|tray: &mut Self| {
+                    let _ = tray.command_tx.send(LinuxTrayCommand::Restore);
+                }),
+                ..Default::default()
+            }
+            .into(),
+        ]
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_tray_error_message(err: ksni::Error) -> String {
+    match err {
+        ksni::Error::WontShow => String::from(
+            "No Linux tray host found. Enable KDE tray, Waybar tray, or GNOME AppIndicator.",
+        ),
+        ksni::Error::Watcher(_) => format!(
+            "No Linux StatusNotifierWatcher found: {err}. Enable KDE tray, Waybar tray, or GNOME AppIndicator."
+        ),
+        ksni::Error::Dbus(_) => format!("Linux tray D-Bus setup failed: {err}"),
+        _ => format!("Linux tray setup failed: {err}"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HyprlandHiddenWindow {
+    address: String,
+    restore_workspace: String,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HyprlandActiveWindow {
+    address: String,
+    workspace_name: String,
+}
+
+#[cfg(target_os = "linux")]
+fn try_hide_hyprland_window() -> Option<HyprlandHiddenWindow> {
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
+
+    let window = hyprland_active_window()?;
+    let restore_workspace = if is_special_workspace(&window.workspace_name) {
+        hyprland_active_workspace_name()
+            .filter(|workspace| !is_special_workspace(workspace))
+            .unwrap_or_else(|| String::from("1"))
+    } else {
+        window.workspace_name.clone()
+    };
+
+    if is_special_workspace(&window.workspace_name) {
+        if hyprctl_dispatch(["togglespecialworkspace", "tunetui"]) {
+            return Some(HyprlandHiddenWindow {
+                address: window.address,
+                restore_workspace,
+            });
+        }
+        return None;
+    }
+
+    let destination = format!("special:tunetui,address:{}", window.address);
+    hyprctl_dispatch(["movetoworkspacesilent", destination.as_str()]).then_some(
+        HyprlandHiddenWindow {
+            address: window.address,
+            restore_workspace,
+        },
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn restore_hyprland_window(hidden: HyprlandHiddenWindow) {
+    let target_workspace = hyprland_active_workspace_name()
+        .filter(|workspace| !is_special_workspace(workspace))
+        .unwrap_or(hidden.restore_workspace);
+    let destination = format!("{target_workspace},address:{}", hidden.address);
+    let selector = format!("address:{}", hidden.address);
+
+    let _ = hyprctl_dispatch(["movetoworkspacesilent", destination.as_str()]);
+    let _ = hyprctl_dispatch(["workspace", target_workspace.as_str()]);
+    let _ = hyprctl_dispatch(["focuswindow", selector.as_str()]);
+}
+
+#[cfg(target_os = "linux")]
+fn hyprland_active_window() -> Option<HyprlandActiveWindow> {
+    let output = std::process::Command::new("hyprctl")
+        .args(["activewindow", "-j"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_hyprland_active_window(&output.stdout)
+}
+
+#[cfg(target_os = "linux")]
+fn hyprland_active_workspace_name() -> Option<String> {
+    let output = std::process::Command::new("hyprctl")
+        .args(["activeworkspace", "-j"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_hyprland_workspace_name(&output.stdout)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_hyprland_active_window(stdout: &[u8]) -> Option<HyprlandActiveWindow> {
+    let value: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    let address = value.get("address")?.as_str()?.to_string();
+    if address.is_empty() || address == "0x0" {
+        return None;
+    }
+    let workspace_name = value.get("workspace")?.get("name")?.as_str()?.to_string();
+
+    Some(HyprlandActiveWindow {
+        address,
+        workspace_name,
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn parse_hyprland_workspace_name(stdout: &[u8]) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    value.get("name")?.as_str().map(str::to_string)
+}
+
+#[cfg(target_os = "linux")]
+fn is_special_workspace(workspace: &str) -> bool {
+    workspace.starts_with("special:")
+}
+
+#[cfg(target_os = "linux")]
+fn hyprctl_dispatch<const N: usize>(args: [&str; N]) -> bool {
+    std::process::Command::new("hyprctl")
+        .arg("dispatch")
+        .args(args)
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[cfg(target_os = "linux")]
+fn request_terminal_iconify() {
+    let mut out = stdout();
+    let _ = out.write_all(b"\x1b[2t");
+    let _ = out.flush();
+}
+
+#[cfg(target_os = "linux")]
+fn request_terminal_deiconify() {
+    let mut out = stdout();
+    let _ = out.write_all(b"\x1b[1t\x1b[5t");
+    let _ = out.flush();
+}
+
+#[cfg(target_os = "linux")]
+fn linux_tray_icon_pixmap() -> Vec<ksni::Icon> {
+    const SIZE: i32 = 22;
+    let mut data = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let border = x == 0 || y == 0 || x == SIZE - 1 || y == SIZE - 1;
+            let stem = (9..=12).contains(&x) && (5..=16).contains(&y);
+            let top = (6..=16).contains(&x) && (5..=8).contains(&y);
+            let foot = (7..=15).contains(&x) && (15..=18).contains(&y);
+            let (a, r, g, b) = if stem || top || foot {
+                (255, 245, 248, 255)
+            } else if border {
+                (255, 37, 99, 235)
+            } else {
+                (255, 15, 23, 42)
+            };
+            data.extend_from_slice(&[a, r, g, b]);
+        }
+    }
+
+    vec![ksni::Icon {
+        width: SIZE,
+        height: SIZE,
+        data,
+    }]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7546,6 +7927,43 @@ mod tests {
             last_periodic_sync_at: Instant::now(),
             online_playback_source: OnlinePlaybackSource::LocalQueue,
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_hyprland_active_window_address_and_workspace() {
+        let json = br#"{
+            "address": "0x55f3ae5fb000",
+            "workspace": { "id": 3, "name": "3" }
+        }"#;
+
+        assert_eq!(
+            parse_hyprland_active_window(json),
+            Some(HyprlandActiveWindow {
+                address: String::from("0x55f3ae5fb000"),
+                workspace_name: String::from("3"),
+            })
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_hyprland_active_window_rejects_empty_address() {
+        let json = br#"{
+            "address": "0x0",
+            "workspace": { "name": "3" }
+        }"#;
+
+        assert_eq!(parse_hyprland_active_window(json), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parses_hyprland_workspace_name() {
+        assert_eq!(
+            parse_hyprland_workspace_name(br#"{ "id": 4, "name": "4" }"#),
+            Some(String::from("4"))
+        );
     }
 
     #[test]

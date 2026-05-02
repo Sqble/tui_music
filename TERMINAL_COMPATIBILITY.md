@@ -1,4 +1,6 @@
-# Windows Terminal Tray Compatibility
+# Tray Compatibility
+
+## Windows Terminal
 
 If TuneTUI is launched inside the new Windows Terminal, pressing `t` may only minimize the window instead of fully hiding it to the system tray.
 
@@ -11,6 +13,19 @@ Enable this Windows Terminal setting so tray behavior works as expected:
 5. Save settings.
 
 After enabling this option, pressing `t` in TuneTUI should hide the terminal window to the notification area (system tray).
+
+## Linux Tray Support
+
+Linux tray support uses the StatusNotifierItem/AppIndicator protocol. Pressing `t` creates a tray icon and keeps playback running while TuneTUI is collapsed.
+
+Supported environments depend on a tray host being available:
+
+- KDE Plasma: supported through Plasma's built-in tray.
+- Hyprland/Omarchy: supported when Waybar or another bar exposes a tray/StatusNotifier host. TuneTUI also moves the active terminal to a Hyprland special workspace named `tunetui` and restores it from the tray icon.
+- GNOME: install and enable an AppIndicator/KStatusNotifierItem extension.
+- Minimal window managers: install and run a tray host, otherwise TuneTUI will report that no Linux tray host was found.
+
+On non-Hyprland Linux desktops, TuneTUI asks the terminal to minimize using standard terminal window-control escape sequences. Terminal and compositor support varies, but the tray icon remains available for restore when the tray host accepts it.
 
 # SSH Audio Support (PulseAudio over SSH)
 
