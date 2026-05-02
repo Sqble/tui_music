@@ -428,6 +428,10 @@ impl TuneCore {
 
     pub fn add_selected_to_playlist(&mut self, name: &str) {
         let paths = self.selected_paths_for_playlist_action();
+        self.add_paths_to_playlist(name, paths);
+    }
+
+    pub fn add_paths_to_playlist(&mut self, name: &str, paths: Vec<PathBuf>) {
         if paths.is_empty() {
             self.set_status("Nothing selectable to add");
             return;

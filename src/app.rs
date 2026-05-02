@@ -751,10 +751,6 @@ fn duration_to_recorded_seconds(duration: Duration) -> u32 {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RootActionId {
-    AddSelectedToPlaylist,
-    AddNowPlayingToPlaylist,
-    AddSelectedToQueueEnd,
-    AddSelectedToQueueNext,
     RemoveSelectedFromQueue,
     MoveSelectedQueueItemToNext,
     PlaybackSettings,
@@ -772,11 +768,7 @@ enum RootActionId {
     ClosePanel,
 }
 
-const ROOT_ACTIONS: [RootActionId; 19] = [
-    RootActionId::AddSelectedToPlaylist,
-    RootActionId::AddNowPlayingToPlaylist,
-    RootActionId::AddSelectedToQueueEnd,
-    RootActionId::AddSelectedToQueueNext,
+const ROOT_ACTIONS: [RootActionId; 15] = [
     RootActionId::RemoveSelectedFromQueue,
     RootActionId::MoveSelectedQueueItemToNext,
     RootActionId::PlaybackSettings,
@@ -793,6 +785,20 @@ const ROOT_ACTIONS: [RootActionId; 19] = [
     RootActionId::ImportTxtToLyrics,
     RootActionId::ClosePanel,
 ];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuickActionId {
+    SelectedToPlaylist,
+    NowPlayingToPlaylist,
+    SelectedToQueueEnd,
+    SelectedToQueueNext,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaylistAddSource {
+    Selection,
+    NowPlaying,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RootVisibleAction {
@@ -875,10 +881,6 @@ impl AudioQualityPanelState {
 
 fn root_action_label(action: RootActionId) -> &'static str {
     match action {
-        RootActionId::AddSelectedToPlaylist => "Add selected item to playlist",
-        RootActionId::AddNowPlayingToPlaylist => "Add now playing song to playlist",
-        RootActionId::AddSelectedToQueueEnd => "Add selection to queue end",
-        RootActionId::AddSelectedToQueueNext => "Add selection to queue next",
         RootActionId::RemoveSelectedFromQueue => "Remove selected queue item",
         RootActionId::MoveSelectedQueueItemToNext => "Move selected queue item to next",
         RootActionId::PlaybackSettings => "Playback settings",
@@ -916,14 +918,10 @@ fn root_action_matches_query(action: RootActionId, query_lower: &str) -> bool {
 fn root_action_category(action: RootActionId) -> &'static str {
     match action {
         RootActionId::PlaybackSettings | RootActionId::AudioDriverSettings => "Settings",
-        RootActionId::AddSelectedToPlaylist
-        | RootActionId::AddNowPlayingToPlaylist
-        | RootActionId::RemoveSelectedFromPlaylist
-        | RootActionId::RemovePlaylist => "Playlist",
-        RootActionId::AddSelectedToQueueEnd
-        | RootActionId::AddSelectedToQueueNext
-        | RootActionId::RemoveSelectedFromQueue
-        | RootActionId::MoveSelectedQueueItemToNext => "Queue",
+        RootActionId::RemoveSelectedFromPlaylist | RootActionId::RemovePlaylist => "Playlist",
+        RootActionId::RemoveSelectedFromQueue | RootActionId::MoveSelectedQueueItemToNext => {
+            "Queue"
+        }
         RootActionId::RemoveDirectory
         | RootActionId::RescanLibrary
         | RootActionId::MetadataEditor
@@ -1090,6 +1088,11 @@ enum ActionPanelState {
         selected: usize,
         input: String,
     },
+    PlaylistCreateForAdd {
+        selected: usize,
+        input: String,
+        source: PlaylistAddSource,
+    },
     PlaylistRemove {
         selected: usize,
     },
@@ -1176,34 +1179,20 @@ impl ActionPanelState {
                     selected,
                 })
             }
-            Self::PlaylistAdd { selected } => {
-                let playlists = sorted_playlist_names(core);
-                Some(crate::ui::ActionPanelView {
-                    title: String::from("Add To Playlist"),
-                    hint: String::from("Enter add  Backspace back"),
-                    search_query: None,
-                    options: if playlists.is_empty() {
-                        vec![String::from("(no playlists)")]
-                    } else {
-                        playlists
-                    },
-                    selected: *selected,
-                })
-            }
-            Self::PlaylistAddNowPlaying { selected } => {
-                let playlists = sorted_playlist_names(core);
-                Some(crate::ui::ActionPanelView {
-                    title: String::from("Add Now Playing To Playlist"),
-                    hint: String::from("Enter add  Backspace back"),
-                    search_query: None,
-                    options: if playlists.is_empty() {
-                        vec![String::from("(no playlists)")]
-                    } else {
-                        playlists
-                    },
-                    selected: *selected,
-                })
-            }
+            Self::PlaylistAdd { selected } => Some(crate::ui::ActionPanelView {
+                title: String::from("Add To Playlist"),
+                hint: String::from("Enter add/create  Backspace back"),
+                search_query: None,
+                options: playlist_picker_options(core),
+                selected: *selected,
+            }),
+            Self::PlaylistAddNowPlaying { selected } => Some(crate::ui::ActionPanelView {
+                title: String::from("Add Now Playing To Playlist"),
+                hint: String::from("Enter add/create  Backspace back"),
+                search_query: None,
+                options: playlist_picker_options(core),
+                selected: *selected,
+            }),
             Self::PlaylistCreate { selected, input } => Some(crate::ui::ActionPanelView {
                 title: String::from("Create Playlist"),
                 hint: String::from("Type name + Enter  Backspace back"),
@@ -1238,6 +1227,19 @@ impl ActionPanelState {
                     String::from("Select output speaker"),
                     String::from("Back"),
                 ],
+                selected: *selected,
+            }),
+            Self::PlaylistCreateForAdd {
+                selected, input, ..
+            } => Some(crate::ui::ActionPanelView {
+                title: String::from("Create Playlist"),
+                hint: String::from("Type name + Enter create/add  Backspace back"),
+                search_query: None,
+                options: vec![if input.is_empty() {
+                    String::from("Name: ")
+                } else {
+                    format!("Name: {input}")
+                }],
                 selected: *selected,
             }),
             Self::AudioOutput { selected } => {
@@ -1961,6 +1963,16 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             }
 
             if handle_host_invite_modal_input(&mut core, key, &mut online_runtime) {
+                continue;
+            }
+
+            if handle_quick_action_key(
+                &mut core,
+                &mut *audio,
+                &mut action_panel,
+                &mut online_runtime,
+                key,
+            ) {
                 continue;
             }
 
@@ -4925,6 +4937,7 @@ fn handle_mouse_with_panel(
     apply_left_click(
         core,
         audio,
+        panel,
         online_runtime,
         target,
         mouse,
@@ -4937,6 +4950,7 @@ fn handle_mouse_with_panel(
 fn apply_left_click(
     core: &mut TuneCore,
     audio: &mut dyn AudioEngine,
+    panel: &mut ActionPanelState,
     online_runtime: &mut OnlineRuntime,
     target: crate::ui::HitTarget,
     mouse: MouseEvent,
@@ -4982,6 +4996,42 @@ fn apply_left_click(
             core.set_header_section(HeaderSection::Online);
             trigger_online_tab_entry(core, online_runtime);
             core.dirty = true;
+        }
+        HitTarget::QuickAddSelectedToPlaylist => {
+            apply_quick_action(
+                QuickActionId::SelectedToPlaylist,
+                core,
+                audio,
+                panel,
+                Some(online_runtime),
+            );
+        }
+        HitTarget::QuickAddNowPlayingToPlaylist => {
+            apply_quick_action(
+                QuickActionId::NowPlayingToPlaylist,
+                core,
+                audio,
+                panel,
+                Some(online_runtime),
+            );
+        }
+        HitTarget::QuickAddSelectedToQueueEnd => {
+            apply_quick_action(
+                QuickActionId::SelectedToQueueEnd,
+                core,
+                audio,
+                panel,
+                Some(online_runtime),
+            );
+        }
+        HitTarget::QuickAddSelectedToQueueNext => {
+            apply_quick_action(
+                QuickActionId::SelectedToQueueNext,
+                core,
+                audio,
+                panel,
+                Some(online_runtime),
+            );
         }
         HitTarget::ToggleOnlineMode => {
             if let Some(session) = core.online.session.as_ref() {
@@ -5359,6 +5409,7 @@ fn set_action_panel_selected(panel: &mut ActionPanelState, idx: usize) {
         | ActionPanelState::PlaylistAdd { selected }
         | ActionPanelState::PlaylistAddNowPlaying { selected }
         | ActionPanelState::PlaylistCreate { selected, .. }
+        | ActionPanelState::PlaylistCreateForAdd { selected, .. }
         | ActionPanelState::PlaylistRemove { selected }
         | ActionPanelState::AudioSettings { selected }
         | ActionPanelState::AudioOutput { selected }
@@ -5391,10 +5442,111 @@ fn sorted_playlist_names(core: &TuneCore) -> Vec<String> {
     names
 }
 
+fn playlist_picker_options(core: &TuneCore) -> Vec<String> {
+    let mut options = sorted_playlist_names(core);
+    options.push(String::from("[+] Create new playlist"));
+    options
+}
+
 fn sorted_folder_paths(core: &TuneCore) -> Vec<PathBuf> {
     let mut paths = core.folders.clone();
     paths.sort_by_cached_key(|path| path.to_string_lossy().to_ascii_lowercase());
     paths
+}
+
+fn apply_quick_action(
+    action: QuickActionId,
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    panel: &mut ActionPanelState,
+    online_runtime: Option<&mut OnlineRuntime>,
+) {
+    match action {
+        QuickActionId::SelectedToPlaylist => open_add_selected_to_playlist(core, panel),
+        QuickActionId::NowPlayingToPlaylist => open_add_now_playing_to_playlist(core, panel),
+        QuickActionId::SelectedToQueueEnd => {
+            add_selected_to_queue_end(core, audio, online_runtime);
+            panel.close();
+        }
+        QuickActionId::SelectedToQueueNext => {
+            add_selected_to_queue_next(core, audio, online_runtime);
+            panel.close();
+        }
+    }
+}
+
+fn open_add_selected_to_playlist(core: &mut TuneCore, panel: &mut ActionPanelState) {
+    *panel = ActionPanelState::PlaylistAdd { selected: 0 };
+    core.dirty = true;
+}
+
+fn open_add_now_playing_to_playlist(core: &mut TuneCore, panel: &mut ActionPanelState) {
+    *panel = ActionPanelState::PlaylistAddNowPlaying { selected: 0 };
+    core.dirty = true;
+}
+
+fn add_selected_to_queue_end(
+    core: &mut TuneCore,
+    audio: &dyn AudioEngine,
+    online_runtime: Option<&mut OnlineRuntime>,
+) {
+    if core.viewing_shared_queue() {
+        let added = core.add_selected_to_shared_queue_end();
+        if let Some(network) = online_runtime.and_then(|runtime| runtime.network.as_ref()) {
+            for item in added {
+                network.send_local_action(NetworkLocalAction::QueueAdd(item));
+            }
+        }
+    } else {
+        core.add_selected_to_local_queue_end();
+    }
+    auto_save_state(core, audio);
+}
+
+fn add_selected_to_queue_next(
+    core: &mut TuneCore,
+    audio: &dyn AudioEngine,
+    online_runtime: Option<&mut OnlineRuntime>,
+) {
+    if core.viewing_shared_queue() {
+        let added = core.add_selected_to_shared_queue_next();
+        if let Some(network) = online_runtime.and_then(|runtime| runtime.network.as_ref()) {
+            for item in added {
+                network.send_local_action(NetworkLocalAction::QueueInsertAt { index: 0, item });
+            }
+        }
+    } else {
+        core.add_selected_to_local_queue_next();
+    }
+    auto_save_state(core, audio);
+}
+
+fn quick_action_for_key(key: KeyEvent) -> Option<QuickActionId> {
+    if key_event_matches_ctrl_char(&key, 'p') {
+        Some(QuickActionId::SelectedToPlaylist)
+    } else if key_event_matches_ctrl_char(&key, 'o') {
+        Some(QuickActionId::NowPlayingToPlaylist)
+    } else if key_event_matches_ctrl_char(&key, 'u') {
+        Some(QuickActionId::SelectedToQueueEnd)
+    } else if key_event_matches_ctrl_char(&key, 'y') {
+        Some(QuickActionId::SelectedToQueueNext)
+    } else {
+        None
+    }
+}
+
+fn handle_quick_action_key(
+    core: &mut TuneCore,
+    audio: &mut dyn AudioEngine,
+    panel: &mut ActionPanelState,
+    online_runtime: &mut OnlineRuntime,
+    key: KeyEvent,
+) -> bool {
+    let Some(action) = quick_action_for_key(key) else {
+        return false;
+    };
+    apply_quick_action(action, core, audio, panel, Some(online_runtime));
+    true
 }
 
 fn open_selected_library_action(core: &TuneCore, panel: &mut ActionPanelState) -> bool {
@@ -5838,6 +5990,7 @@ fn update_panel_selection(panel: &mut ActionPanelState, option_count: usize, mov
         | ActionPanelState::PlaylistAdd { selected }
         | ActionPanelState::PlaylistAddNowPlaying { selected }
         | ActionPanelState::PlaylistCreate { selected, .. }
+        | ActionPanelState::PlaylistCreateForAdd { selected, .. }
         | ActionPanelState::PlaylistRemove { selected }
         | ActionPanelState::AudioSettings { selected }
         | ActionPanelState::AudioOutput { selected }
@@ -5932,6 +6085,25 @@ fn handle_action_panel_input_with_recent(
         }
     }
 
+    if let ActionPanelState::PlaylistCreateForAdd {
+        selected, input, ..
+    } = panel
+    {
+        match key {
+            KeyCode::Char(ch) if *selected == 0 => {
+                input.push(ch);
+                core.dirty = true;
+                return;
+            }
+            KeyCode::Backspace if *selected == 0 && !input.is_empty() => {
+                input.pop();
+                core.dirty = true;
+                return;
+            }
+            _ => {}
+        }
+    }
+
     if let ActionPanelState::OnlineNickname { selected, input } = panel {
         match key {
             KeyCode::Char(ch) if *selected == 0 => {
@@ -6010,10 +6182,13 @@ fn handle_action_panel_input_with_recent(
         ActionPanelState::Root { query, .. } => {
             root_visible_actions(query, recent_root_actions).len()
         }
-        ActionPanelState::PlaylistAdd { .. }
-        | ActionPanelState::PlaylistAddNowPlaying { .. }
-        | ActionPanelState::PlaylistRemove { .. } => sorted_playlist_names(core).len().max(1),
-        ActionPanelState::PlaylistCreate { .. } => 1,
+        ActionPanelState::PlaylistAdd { .. } | ActionPanelState::PlaylistAddNowPlaying { .. } => {
+            playlist_picker_options(core).len()
+        }
+        ActionPanelState::PlaylistRemove { .. } => sorted_playlist_names(core).len().max(1),
+        ActionPanelState::PlaylistCreate { .. } | ActionPanelState::PlaylistCreateForAdd { .. } => {
+            1
+        }
         ActionPanelState::AudioSettings { .. } => 3,
         ActionPanelState::AudioOutput { .. } => audio.available_outputs().len().saturating_add(1),
         ActionPanelState::PlaybackSettings { .. } => 11,
@@ -6060,21 +6235,15 @@ fn handle_action_panel_input_with_recent(
         }
         KeyCode::Left | KeyCode::Backspace => {
             *panel = match panel {
-                ActionPanelState::PlaylistAdd { .. } => ActionPanelState::Root {
-                    selected: root_selected_for_action(
-                        RootActionId::AddSelectedToPlaylist,
-                        recent_root_actions,
-                    ),
-                    query: String::new(),
-                },
-                ActionPanelState::PlaylistAddNowPlaying { .. } => ActionPanelState::Root {
-                    selected: root_selected_for_action(
-                        RootActionId::AddNowPlayingToPlaylist,
-                        recent_root_actions,
-                    ),
-                    query: String::new(),
-                },
+                ActionPanelState::PlaylistAdd { .. }
+                | ActionPanelState::PlaylistAddNowPlaying { .. } => ActionPanelState::Closed,
                 ActionPanelState::PlaylistCreate { .. } => ActionPanelState::Closed,
+                ActionPanelState::PlaylistCreateForAdd { source, .. } => match source {
+                    PlaylistAddSource::Selection => ActionPanelState::PlaylistAdd { selected: 0 },
+                    PlaylistAddSource::NowPlaying => {
+                        ActionPanelState::PlaylistAddNowPlaying { selected: 0 }
+                    }
+                },
                 ActionPanelState::PlaylistRemove { .. } => ActionPanelState::Root {
                     selected: root_selected_for_action(
                         RootActionId::RemovePlaylist,
@@ -6159,63 +6328,6 @@ fn handle_action_panel_input_with_recent(
                 update_recent_root_actions(recent_root_actions, selected_action);
 
                 match selected_action {
-                    RootActionId::AddSelectedToPlaylist => {
-                        if sorted_playlist_names(core).is_empty() {
-                            core.status = String::from("No playlists available");
-                            core.dirty = true;
-                            panel.close();
-                        } else {
-                            *panel = ActionPanelState::PlaylistAdd { selected: 0 };
-                            core.dirty = true;
-                        }
-                    }
-                    RootActionId::AddNowPlayingToPlaylist => {
-                        if sorted_playlist_names(core).is_empty() {
-                            core.status = String::from("No playlists available");
-                            core.dirty = true;
-                            panel.close();
-                        } else {
-                            *panel = ActionPanelState::PlaylistAddNowPlaying { selected: 0 };
-                            core.dirty = true;
-                        }
-                    }
-                    RootActionId::AddSelectedToQueueEnd => {
-                        if core.viewing_shared_queue() {
-                            let added = core.add_selected_to_shared_queue_end();
-                            if let Some(network) = online_runtime
-                                .as_deref()
-                                .and_then(|runtime| runtime.network.as_ref())
-                            {
-                                for item in added {
-                                    network.send_local_action(NetworkLocalAction::QueueAdd(item));
-                                }
-                            }
-                        } else {
-                            core.add_selected_to_local_queue_end();
-                        }
-                        auto_save_state(core, &*audio);
-                        panel.close();
-                    }
-                    RootActionId::AddSelectedToQueueNext => {
-                        if core.viewing_shared_queue() {
-                            let added = core.add_selected_to_shared_queue_next();
-                            if let Some(network) = online_runtime
-                                .as_deref()
-                                .and_then(|runtime| runtime.network.as_ref())
-                            {
-                                for item in added {
-                                    network.send_local_action(NetworkLocalAction::QueueInsertAt {
-                                        index: 0,
-                                        item,
-                                    });
-                                }
-                            }
-                        } else {
-                            core.add_selected_to_local_queue_next();
-                        }
-                        auto_save_state(core, &*audio);
-                        panel.close();
-                    }
                     RootActionId::RemoveSelectedFromQueue => {
                         if core.viewing_shared_queue() {
                             if let Some((index, expected_path)) =
@@ -6347,11 +6459,15 @@ fn handle_action_panel_input_with_recent(
                 if let Some(name) = playlists.get(selected) {
                     core.add_selected_to_playlist(name);
                     auto_save_state(core, &*audio);
+                    panel.close();
                 } else {
-                    core.status = String::from("No playlists available");
+                    *panel = ActionPanelState::PlaylistCreateForAdd {
+                        selected: 0,
+                        input: String::new(),
+                        source: PlaylistAddSource::Selection,
+                    };
                     core.dirty = true;
                 }
-                panel.close();
             }
             ActionPanelState::PlaylistAddNowPlaying { selected } => {
                 let playlists = sorted_playlist_names(core);
@@ -6359,15 +6475,20 @@ fn handle_action_panel_input_with_recent(
                     if let Some(path) = audio.current_track() {
                         core.add_track_to_playlist(name, path);
                         auto_save_state(core, &*audio);
+                        panel.close();
                     } else {
                         core.status = String::from("No track currently playing");
                         core.dirty = true;
+                        panel.close();
                     }
                 } else {
-                    core.status = String::from("No playlists available");
+                    *panel = ActionPanelState::PlaylistCreateForAdd {
+                        selected: 0,
+                        input: String::new(),
+                        source: PlaylistAddSource::NowPlaying,
+                    };
                     core.dirty = true;
                 }
-                panel.close();
             }
             ActionPanelState::PlaylistCreate { input, .. } => {
                 let name = input.trim();
@@ -6377,6 +6498,43 @@ fn handle_action_panel_input_with_recent(
                     return;
                 }
                 core.create_playlist(name);
+                auto_save_state(core, &*audio);
+                panel.close();
+            }
+            ActionPanelState::PlaylistCreateForAdd { input, source, .. } => {
+                let name = input.trim();
+                if name.is_empty() {
+                    core.status = String::from("Enter a playlist name");
+                    core.dirty = true;
+                    return;
+                }
+                if core.playlists.contains_key(name) {
+                    core.status = String::from("Playlist already exists");
+                    core.dirty = true;
+                    return;
+                }
+
+                match source {
+                    PlaylistAddSource::Selection => {
+                        let paths = core.selected_paths_for_browser_selection();
+                        if paths.is_empty() {
+                            core.status = String::from("Nothing selectable to add");
+                            core.dirty = true;
+                            return;
+                        }
+                        core.create_playlist(name);
+                        core.add_paths_to_playlist(name, paths);
+                    }
+                    PlaylistAddSource::NowPlaying => {
+                        let Some(path) = audio.current_track().map(Path::to_path_buf) else {
+                            core.status = String::from("No track currently playing");
+                            core.dirty = true;
+                            return;
+                        };
+                        core.create_playlist(name);
+                        core.add_track_to_playlist(name, &path);
+                    }
+                }
                 auto_save_state(core, &*audio);
                 panel.close();
             }
@@ -7846,6 +8004,10 @@ mod tests {
 
         for removed in [
             "Add directory",
+            "Add selected item to playlist",
+            "Add now playing song to playlist",
+            "Add selection to queue end",
+            "Add selection to queue next",
             "Open local queue",
             "Open shared queue",
             "Playback order and repeat",
@@ -7994,48 +8156,62 @@ mod tests {
     }
 
     #[test]
-    fn action_panel_playlist_add_requires_playlist() {
+    fn quick_playlist_add_opens_picker_without_playlists() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = NullAudioEngine::new();
-        let mut panel = ActionPanelState::Root {
-            selected: root_selected(RootActionId::AddSelectedToPlaylist),
-            query: String::new(),
-        };
+        let mut panel = ActionPanelState::Closed;
 
-        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        apply_quick_action(
+            QuickActionId::SelectedToPlaylist,
+            &mut core,
+            &mut audio,
+            &mut panel,
+            None,
+        );
 
-        assert_eq!(core.status, "No playlists available");
-        assert!(matches!(panel, ActionPanelState::Closed));
+        assert!(matches!(panel, ActionPanelState::PlaylistAdd { .. }));
+        let view = panel.to_view(&core, &audio, &[]).expect("picker view");
+        assert_eq!(view.options, vec![String::from("[+] Create new playlist")]);
     }
 
     #[test]
-    fn action_panel_now_playing_add_requires_playlist() {
+    fn quick_now_playing_add_opens_picker_without_playlists() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
         audio.current = Some(PathBuf::from("now.mp3"));
-        let mut panel = ActionPanelState::Root {
-            selected: root_selected(RootActionId::AddNowPlayingToPlaylist),
-            query: String::new(),
-        };
+        let mut panel = ActionPanelState::Closed;
 
-        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        apply_quick_action(
+            QuickActionId::NowPlayingToPlaylist,
+            &mut core,
+            &mut audio,
+            &mut panel,
+            None,
+        );
 
-        assert_eq!(core.status, "No playlists available");
-        assert!(matches!(panel, ActionPanelState::Closed));
+        assert!(matches!(
+            panel,
+            ActionPanelState::PlaylistAddNowPlaying { .. }
+        ));
+        let view = panel.to_view(&core, &audio, &[]).expect("picker view");
+        assert_eq!(view.options, vec![String::from("[+] Create new playlist")]);
     }
 
     #[test]
-    fn action_panel_adds_now_playing_track_to_playlist() {
+    fn quick_adds_now_playing_track_to_playlist() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         core.create_playlist("mix");
         let mut audio = TestAudioEngine::new();
         audio.current = Some(PathBuf::from("now.mp3"));
-        let mut panel = ActionPanelState::Root {
-            selected: root_selected(RootActionId::AddNowPlayingToPlaylist),
-            query: String::new(),
-        };
+        let mut panel = ActionPanelState::Closed;
 
-        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        apply_quick_action(
+            QuickActionId::NowPlayingToPlaylist,
+            &mut core,
+            &mut audio,
+            &mut panel,
+            None,
+        );
         assert!(matches!(
             panel,
             ActionPanelState::PlaylistAddNowPlaying { .. }
@@ -8046,6 +8222,84 @@ mod tests {
 
         let playlist = core.playlists.get("mix").expect("playlist exists");
         assert_eq!(playlist.tracks, vec![PathBuf::from("now.mp3")]);
+    }
+
+    #[test]
+    fn playlist_add_picker_can_create_playlist_and_add_selection() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.browser_entries = vec![crate::core::BrowserEntry {
+            kind: BrowserEntryKind::Track,
+            path: PathBuf::from("selected.mp3"),
+            label: String::from("selected"),
+        }];
+        core.selected_browser = 0;
+        let mut audio = NullAudioEngine::new();
+        let mut panel = ActionPanelState::PlaylistAdd { selected: 0 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(
+            panel,
+            ActionPanelState::PlaylistCreateForAdd { .. }
+        ));
+
+        for ch in "new mix".chars() {
+            handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Char(ch));
+        }
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        let playlist = core.playlists.get("new mix").expect("playlist exists");
+        assert_eq!(playlist.tracks, vec![PathBuf::from("selected.mp3")]);
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn now_playing_playlist_picker_can_create_playlist_and_add_track() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = TestAudioEngine::new();
+        audio.current = Some(PathBuf::from("now.mp3"));
+        let mut panel = ActionPanelState::PlaylistAddNowPlaying { selected: 0 };
+
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+        assert!(matches!(
+            panel,
+            ActionPanelState::PlaylistCreateForAdd { .. }
+        ));
+
+        for ch in "fresh".chars() {
+            handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Char(ch));
+        }
+        handle_action_panel_input(&mut core, &mut audio, &mut panel, KeyCode::Enter);
+
+        let playlist = core.playlists.get("fresh").expect("playlist exists");
+        assert_eq!(playlist.tracks, vec![PathBuf::from("now.mp3")]);
+        assert!(matches!(panel, ActionPanelState::Closed));
+    }
+
+    #[test]
+    fn quick_action_keys_map_to_four_selection_actions() {
+        let key = |ch| KeyEvent {
+            code: KeyCode::Char(ch),
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::empty(),
+        };
+
+        assert_eq!(
+            quick_action_for_key(key('p')),
+            Some(QuickActionId::SelectedToPlaylist)
+        );
+        assert_eq!(
+            quick_action_for_key(key('o')),
+            Some(QuickActionId::NowPlayingToPlaylist)
+        );
+        assert_eq!(
+            quick_action_for_key(key('u')),
+            Some(QuickActionId::SelectedToQueueEnd)
+        );
+        assert_eq!(
+            quick_action_for_key(key('y')),
+            Some(QuickActionId::SelectedToQueueNext)
+        );
     }
 
     #[test]

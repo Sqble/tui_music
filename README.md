@@ -21,7 +21,7 @@ Full documentation available at **https://tunetui.online**
 - Main library queue order uses metadata titles (not file names)
 - Queue scope follows where you start playback (folder, playlist, or All Songs)
 - Library root shortcuts for `[+] Add Directory` and `[+] New Playlist`
-- Queue tools in Library/actions: local/shared queue entries in the Library root plus add-to-end/next, remove item, and move item to next actions
+- Queue tools in Library: local/shared queue entries in the Library root plus quick add-to-end/next controls, remove item, and move item to next actions
 - Single-instance behavior on Windows (new launches focus/restore existing app)
 - Automatic track advance when a song ends, including while minimized to tray (Windows)
 - Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\.config\tunetui\state.json` on Windows)
@@ -71,6 +71,10 @@ Download `tune.exe` from releases and run. No installation required.
 | `=` `+` | Volume up |
 | `-` `_` | Volume down |
 | `/` | Open actions panel |
+| `Ctrl+p` | Add selected item to playlist |
+| `Ctrl+o` | Add now playing song to playlist |
+| `Ctrl+u` | Add selection to queue end |
+| `Ctrl+y` | Add selection to queue next |
 | `h` `j` `k` `l` | Switch pages (Library/Lyrics/Stats/Online) |
 | `Ctrl+f` | In Library, focus the search bar |
 | type | When search is focused, type to filter tracks globally |
@@ -79,7 +83,7 @@ Download `tune.exe` from releases and run. No installation required.
 | `Ctrl+l` | In Online tab, leave room |
 | `Ctrl+c` | Quit |
 
-Queue views are available as `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online) in the Library root. Queue edit tools remain in the categorized actions panel (`/`).
+Queue views are available as `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online) in the Library root. Quick playlist/queue add tools live in the Selection strip; playlist pickers include `[+] Create new playlist`; queue remove/move tools remain in the categorized actions panel (`/`).
 Use the actions panel entry "View audio quality + spectrograph" to run one-time analysis for the selected track (or now playing).
 
 ### Online / Listen Together

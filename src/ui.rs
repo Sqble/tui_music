@@ -29,6 +29,10 @@ pub enum HitTarget {
     ToggleShuffle,
     CycleRepeat,
     OpenOnline,
+    QuickAddSelectedToPlaylist,
+    QuickAddNowPlayingToPlaylist,
+    QuickAddSelectedToQueueEnd,
+    QuickAddSelectedToQueueNext,
     LibrarySearchBar,
     LibraryRow(usize),
     Prev,
@@ -320,6 +324,7 @@ pub fn library_rect(area: Rect) -> Rect {
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
+            Constraint::Length(3),
         ])
         .split(area);
 
@@ -351,6 +356,7 @@ pub fn draw(
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
+            Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
@@ -692,6 +698,18 @@ pub fn draw(
     frame.render_widget(control_block, vertical[3]);
     register_control_line_hits(vertical[3], 16);
 
+    let selection_block = Paragraph::new(selection_actions_line(&colors))
+        .block(panel_block(
+            "Selection",
+            colors.panel_bg,
+            colors.text,
+            colors.border,
+        ))
+        .alignment(Alignment::Left)
+        .wrap(Wrap { trim: true });
+    frame.render_widget(selection_block, vertical[4]);
+    register_selection_action_hits(vertical[4]);
+
     let key_hint = if core.header_section == HeaderSection::Stats {
         "Keys: Left/Right Focus, Enter Cycle, Type filters, Backspace Edit, Shift+Up Top"
     } else if core.header_section == HeaderSection::Lyrics {
@@ -712,7 +730,7 @@ pub fn draw(
         colors.text,
         colors.border,
     ));
-    frame.render_widget(footer, vertical[4]);
+    frame.render_widget(footer, vertical[5]);
 
     if let Some(panel) = action_panel {
         draw_action_panel(frame, panel, &colors);
@@ -2966,6 +2984,45 @@ fn register_timeline_control_hits(area: Rect, core: &TuneCore) {
     }
 }
 
+fn register_selection_action_hits(area: Rect) {
+    if area.width == 0 || area.height < 3 {
+        return;
+    }
+
+    let badges = selection_action_button_specs();
+    let total: u16 = badges
+        .iter()
+        .map(|spec| key_badge_width(spec.key, spec.label))
+        .sum::<u16>()
+        + badges.len().saturating_sub(1) as u16;
+    if total > area.width.saturating_sub(2) {
+        return;
+    }
+
+    let inner = area.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    let y = inner.y;
+    let mut x = inner.x;
+    for (idx, spec) in badges.iter().enumerate() {
+        if idx > 0 {
+            x = x.saturating_add(1);
+        }
+        let width = key_badge_width(spec.key, spec.label);
+        hit_map_push(
+            Rect {
+                x,
+                y,
+                width,
+                height: 1,
+            },
+            spec.target,
+        );
+        x = x.saturating_add(width);
+    }
+}
+
 fn key_badge_width(key: &str, label: &str) -> u16 {
     // "[" (1) + " " + key + " " + label + " " + "]" (1) = 5 + key + label
     (5 + key.chars().count() + label.chars().count()) as u16
@@ -3009,6 +3066,67 @@ fn timeline_controls_line(core: &TuneCore, colors: &ThemePalette) -> Line<'stati
         Color::Rgb(134, 255, 190),
         colors.text,
     );
+    Line::from(spans)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SelectionActionButtonSpec {
+    key: &'static str,
+    label: &'static str,
+    bg: Color,
+    border: Color,
+    target: HitTarget,
+}
+
+fn selection_action_button_specs() -> [SelectionActionButtonSpec; 4] {
+    [
+        SelectionActionButtonSpec {
+            key: "Ctrl+P",
+            label: "Sel->PL",
+            bg: Color::Rgb(95, 71, 138),
+            border: Color::Rgb(190, 164, 255),
+            target: HitTarget::QuickAddSelectedToPlaylist,
+        },
+        SelectionActionButtonSpec {
+            key: "Ctrl+O",
+            label: "Now->PL",
+            bg: Color::Rgb(43, 94, 122),
+            border: Color::Rgb(139, 220, 255),
+            target: HitTarget::QuickAddNowPlayingToPlaylist,
+        },
+        SelectionActionButtonSpec {
+            key: "Ctrl+U",
+            label: "Queue End",
+            bg: Color::Rgb(105, 76, 37),
+            border: Color::Rgb(255, 204, 128),
+            target: HitTarget::QuickAddSelectedToQueueEnd,
+        },
+        SelectionActionButtonSpec {
+            key: "Ctrl+Y",
+            label: "Queue Next",
+            bg: Color::Rgb(37, 105, 75),
+            border: Color::Rgb(134, 255, 190),
+            target: HitTarget::QuickAddSelectedToQueueNext,
+        },
+    ]
+}
+
+fn selection_actions_line(colors: &ThemePalette) -> Line<'static> {
+    let specs = selection_action_button_specs();
+    let mut spans = Vec::with_capacity(specs.len().saturating_mul(4).saturating_sub(1));
+    for (idx, spec) in specs.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(" "));
+        }
+        append_key_badge(
+            &mut spans,
+            spec.key,
+            spec.label,
+            spec.bg,
+            spec.border,
+            colors.text,
+        );
+    }
     Line::from(spans)
 }
 
@@ -4106,6 +4224,49 @@ mod tests {
                 HitTarget::ScrubFwd
             ]
         );
+    }
+
+    #[test]
+    fn selection_action_hits_cover_four_badges() {
+        let cell = hit_map_cell();
+        cell.lock().unwrap().clear();
+        register_selection_action_hits(Rect {
+            x: 0,
+            y: 10,
+            width: 90,
+            height: 3,
+        });
+        let entries: Vec<_> = cell
+            .lock()
+            .unwrap()
+            .entries()
+            .iter()
+            .map(|(_, t)| *t)
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                HitTarget::QuickAddSelectedToPlaylist,
+                HitTarget::QuickAddNowPlayingToPlaylist,
+                HitTarget::QuickAddSelectedToQueueEnd,
+                HitTarget::QuickAddSelectedToQueueNext,
+            ]
+        );
+    }
+
+    #[test]
+    fn selection_actions_line_shows_ctrl_keys() {
+        let colors = palette(Theme::Dark);
+        let text = selection_actions_line(&colors)
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert!(text.contains("Ctrl+P"));
+        assert!(text.contains("Ctrl+O"));
+        assert!(text.contains("Ctrl+U"));
+        assert!(text.contains("Ctrl+Y"));
     }
 
     #[test]
