@@ -4203,10 +4203,10 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(text, " Tracks 0   V Shuffle Off   M Repeat Off   OFFLINE ");
-        assert_eq!(line.spans[0].style.bg, Some(Color::Rgb(45, 72, 108)));
-        assert_eq!(line.spans[2].style.bg, Some(Color::Rgb(24, 87, 73)));
-        assert_eq!(line.spans[4].style.bg, Some(Color::Rgb(80, 60, 112)));
-        assert_eq!(line.spans[6].style.bg, Some(Color::Rgb(76, 69, 58)));
+        assert_eq!(line.spans[0].style.bg, Some(Color::Rgb(95, 71, 138)));
+        assert_eq!(line.spans[2].style.bg, Some(Color::Rgb(43, 94, 122)));
+        assert_eq!(line.spans[4].style.bg, Some(Color::Rgb(105, 76, 37)));
+        assert_eq!(line.spans[6].style.bg, Some(Color::Rgb(37, 105, 75)));
     }
 
     #[test]
