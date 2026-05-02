@@ -1501,6 +1501,37 @@ fn poll_library_scan(core: &mut TuneCore, library_runtime: &mut LibraryRuntime) 
     }
 }
 
+fn poll_selected_duration_lookup(core: &mut TuneCore, runtime: &mut DurationLookupRuntime) {
+    if let Some(task) = runtime.active.as_ref() {
+        match task.rx.try_recv() {
+            Ok(duration) => {
+                core.cache_duration_seconds_for_path(&task.path, duration);
+                runtime.active = None;
+                core.dirty = true;
+            }
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                runtime.active = None;
+            }
+        }
+    }
+
+    let Some(path) = core.selected_browser_track_path() else {
+        return;
+    };
+    if core.has_cached_duration_for_path(&path) {
+        return;
+    }
+
+    let worker_path = path.clone();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let duration = library::duration_seconds(&worker_path);
+        let _ = tx.send(duration);
+    });
+    runtime.active = Some(DurationLookupTask { path, rx });
+}
+
 fn request_library_rescan(core: &mut TuneCore, library_runtime: &mut LibraryRuntime) {
     start_full_library_scan(core, library_runtime, "Rescanning library in background...");
 }
@@ -1683,6 +1714,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
     let mut library_rect = ratatui::prelude::Rect::default();
     let mut hit_map = crate::ui::HitMap::default();
     let mut mouse_state = MouseState::default();
+    let mut duration_lookup_runtime = DurationLookupRuntime { active: None };
     let mut stats_enabled_last = core.stats_enabled;
     let mut online_runtime = OnlineRuntime {
         network: None,
@@ -1761,6 +1793,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
 
         pump_tray_events(&mut core);
         poll_library_scan(&mut core, &mut library_runtime);
+        poll_selected_duration_lookup(&mut core, &mut duration_lookup_runtime);
         drain_online_network_events(&mut core, &mut *audio, &mut online_runtime);
         audio.tick();
         maybe_publish_online_playback_sync(&core, &*audio, &mut online_runtime);
@@ -3285,9 +3318,7 @@ fn handle_online_inline_input(
         }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'o') => {
             if let Some(session) = core.online.session.as_ref() {
-                let is_host = session.local_participant().is_some_and(|p| p.is_host);
-                let mode = session.mode;
-                if is_host {
+                if let Some(mode) = next_room_mode_for_local_host(session) {
                     core.online_toggle_mode();
                     if let Some(network) = &online_runtime.network {
                         network.send_local_action(NetworkLocalAction::SetMode(mode));
@@ -3301,9 +3332,7 @@ fn handle_online_inline_input(
         }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'q') => {
             if let Some(session) = core.online.session.as_ref() {
-                let is_host = session.local_participant().is_some_and(|p| p.is_host);
-                let quality = session.quality;
-                if is_host {
+                if let Some(quality) = next_stream_quality_for_local_host(session) {
                     core.online_cycle_quality();
                     if let Some(network) = &online_runtime.network {
                         network.send_local_action(NetworkLocalAction::SetQuality(quality));
@@ -3341,6 +3370,20 @@ fn handle_online_inline_input(
         }
         _ => !online_tab_allows_global_shortcut(key.code),
     }
+}
+
+fn next_room_mode_for_local_host(session: &OnlineSession) -> Option<crate::online::OnlineRoomMode> {
+    session
+        .local_participant()
+        .is_some_and(|participant| participant.is_host)
+        .then(|| session.mode.toggle())
+}
+
+fn next_stream_quality_for_local_host(session: &OnlineSession) -> Option<StreamQuality> {
+    session
+        .local_participant()
+        .is_some_and(|participant| participant.is_host)
+        .then(|| session.quality.next())
 }
 
 fn handle_online_password_prompt_input(
@@ -4758,6 +4801,15 @@ struct MouseState {
     last_click: Option<(crate::ui::HitTarget, Instant)>,
 }
 
+struct DurationLookupRuntime {
+    active: Option<DurationLookupTask>,
+}
+
+struct DurationLookupTask {
+    path: PathBuf,
+    rx: Receiver<Option<u32>>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_mouse_with_panel(
     core: &mut TuneCore,
@@ -4933,9 +4985,7 @@ fn apply_left_click(
         }
         HitTarget::ToggleOnlineMode => {
             if let Some(session) = core.online.session.as_ref() {
-                let is_host = session.local_participant().is_some_and(|p| p.is_host);
-                let mode = session.mode;
-                if is_host {
+                if let Some(mode) = next_room_mode_for_local_host(session) {
                     core.online_toggle_mode();
                     if let Some(network) = &online_runtime.network {
                         network.send_local_action(NetworkLocalAction::SetMode(mode));
@@ -4948,9 +4998,7 @@ fn apply_left_click(
         }
         HitTarget::CycleStreamQuality => {
             if let Some(session) = core.online.session.as_ref() {
-                let is_host = session.local_participant().is_some_and(|p| p.is_host);
-                let quality = session.quality;
-                if is_host {
+                if let Some(quality) = next_stream_quality_for_local_host(session) {
                     core.online_cycle_quality();
                     if let Some(network) = &online_runtime.network {
                         network.send_local_action(NetworkLocalAction::SetQuality(quality));
@@ -7340,6 +7388,46 @@ mod tests {
             last_periodic_sync_at: Instant::now(),
             online_playback_source: OnlinePlaybackSource::LocalQueue,
         }
+    }
+
+    #[test]
+    fn online_mode_action_uses_post_toggle_value_for_host() {
+        let mut session = crate::online::OnlineSession::host("host");
+
+        assert_eq!(
+            next_room_mode_for_local_host(&session),
+            Some(crate::online::OnlineRoomMode::HostOnly)
+        );
+
+        session.mode = crate::online::OnlineRoomMode::HostOnly;
+        assert_eq!(
+            next_room_mode_for_local_host(&session),
+            Some(crate::online::OnlineRoomMode::Collaborative)
+        );
+    }
+
+    #[test]
+    fn online_quality_action_uses_post_cycle_value_for_host() {
+        let mut session = crate::online::OnlineSession::host("host");
+
+        assert_eq!(
+            next_stream_quality_for_local_host(&session),
+            Some(crate::online::StreamQuality::Balanced)
+        );
+
+        session.quality = crate::online::StreamQuality::Balanced;
+        assert_eq!(
+            next_stream_quality_for_local_host(&session),
+            Some(crate::online::StreamQuality::Lossless)
+        );
+    }
+
+    #[test]
+    fn online_mode_and_quality_actions_require_local_host() {
+        let session = crate::online::OnlineSession::join("ROOM22", "listener");
+
+        assert_eq!(next_room_mode_for_local_host(&session), None);
+        assert_eq!(next_stream_quality_for_local_host(&session), None);
     }
 
     #[test]

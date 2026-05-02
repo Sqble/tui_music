@@ -559,7 +559,7 @@ pub fn draw(
             .unwrap_or("-");
         let selected_length = selected_path
             .as_ref()
-            .and_then(|path| core.duration_seconds_for_path(path))
+            .and_then(|path| core.cached_duration_seconds_for_path(path))
             .map(|seconds| format_duration(Duration::from_secs(u64::from(seconds))))
             .unwrap_or_else(|| String::from("--:--"));
 
@@ -3064,7 +3064,7 @@ fn header_status_line(core: &TuneCore, colors: &ThemePalette) -> Line<'static> {
     let repeat_style = match core.repeat_mode {
         RepeatMode::Off => Style::default().fg(colors.muted).bg(repeat_bg),
         RepeatMode::All => Style::default()
-            .fg(colors.playlist)
+            .fg(colors.text)
             .bg(repeat_bg)
             .add_modifier(Modifier::BOLD),
         RepeatMode::One => Style::default()

@@ -1608,6 +1608,21 @@ impl TuneCore {
         duration
     }
 
+    pub fn cached_duration_seconds_for_path(&self, path: &Path) -> Option<u32> {
+        let key = normalized_path_key(path);
+        self.duration_lookup.borrow().get(&key).copied().flatten()
+    }
+
+    pub fn has_cached_duration_for_path(&self, path: &Path) -> bool {
+        let key = normalized_path_key(path);
+        self.duration_lookup.borrow().contains_key(&key)
+    }
+
+    pub fn cache_duration_seconds_for_path(&self, path: &Path, duration: Option<u32>) {
+        let key = normalized_path_key(path);
+        self.duration_lookup.borrow_mut().insert(key, duration);
+    }
+
     pub fn reload_track_metadata(&mut self, path: &Path) {
         let Some(idx) = self.track_index(path) else {
             return;
@@ -2405,6 +2420,24 @@ mod tests {
         assert_eq!(core.tracks[0].title, "new-title");
         assert_eq!(core.tracks[0].artist, None);
         assert_eq!(core.tracks[0].album, None);
+    }
+
+    #[test]
+    fn duration_cache_distinguishes_missing_from_unknown_duration() {
+        let core = TuneCore::from_persisted(PersistedState::default());
+        let known = Path::new("known.mp3");
+        let unknown = Path::new("unknown.mp3");
+
+        assert!(!core.has_cached_duration_for_path(known));
+        assert_eq!(core.cached_duration_seconds_for_path(known), None);
+
+        core.cache_duration_seconds_for_path(known, Some(123));
+        core.cache_duration_seconds_for_path(unknown, None);
+
+        assert!(core.has_cached_duration_for_path(known));
+        assert_eq!(core.cached_duration_seconds_for_path(known), Some(123));
+        assert!(core.has_cached_duration_for_path(unknown));
+        assert_eq!(core.cached_duration_seconds_for_path(unknown), None);
     }
 
     #[test]
