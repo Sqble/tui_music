@@ -165,7 +165,7 @@ impl OnlineSession {
     }
 
     pub fn join(room_code: &str, local_nickname: &str) -> Self {
-        let mut code = room_code.trim().to_ascii_uppercase();
+        let mut code = room_code.trim().to_string();
         if code.is_empty() {
             code = generate_room_code();
         }
@@ -323,6 +323,13 @@ mod tests {
         session.mode = OnlineRoomMode::HostOnly;
         assert!(!session.can_local_control_playback());
         assert!(session.is_local_listener_locked());
+    }
+
+    #[test]
+    fn join_session_preserves_room_name_casing() {
+        let session = OnlineSession::join("  My Room  ", "listener");
+
+        assert_eq!(session.room_code, "My Room");
     }
 
     #[test]

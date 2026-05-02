@@ -151,6 +151,12 @@ pub struct OnlinePasswordPromptView {
     pub continue_selected: bool,
 }
 
+pub struct OnlineRoomFieldView {
+    pub label: String,
+    pub value: String,
+    pub secret: bool,
+}
+
 pub struct JoinPromptModalView {
     pub invite_code: String,
     pub input_selected: bool,
@@ -174,6 +180,7 @@ pub struct OverlayViews<'a> {
     pub room_directory_view: Option<&'a OnlineRoomDirectoryModalView>,
     pub online_password_prompt: Option<&'a OnlinePasswordPromptView>,
     pub host_invite_modal: Option<&'a HostInviteModalView>,
+    pub online_room_field: Option<&'a OnlineRoomFieldView>,
     pub room_code_revealed: bool,
 }
 
@@ -1589,10 +1596,14 @@ fn draw_online_section(
         return;
     };
 
-    let code_display = if overlays.room_code_revealed {
-        session.room_code.clone()
-    } else {
+    let (room_field_label, room_field_value, room_field_secret) = overlays
+        .online_room_field
+        .map(|field| (field.label.as_str(), field.value.as_str(), field.secret))
+        .unwrap_or(("Room code", session.room_code.as_str(), true));
+    let code_display = if room_field_secret && !overlays.room_code_revealed {
         String::from("[hidden]")
+    } else {
+        room_field_value.to_string()
     };
     let code_width = code_display.chars().count() as u16;
 
@@ -1603,12 +1614,15 @@ fn draw_online_section(
 
     let mode_badge = format!(" O Mode: {} ", session.mode.label());
     let quality_badge = format!(" Q Stream Quality: {} ", session.quality.label());
-    let toggle_badge = if overlays.room_code_revealed {
-        " T Hide ".to_string()
-    } else {
-        " T Show ".to_string()
-    };
+    let toggle_badge = room_field_secret.then(|| {
+        if overlays.room_code_revealed {
+            " T Hide ".to_string()
+        } else {
+            " T Show ".to_string()
+        }
+    });
     let copy_badge = " 2 Copy ".to_string();
+    let room_field_label = format!("{room_field_label} ");
 
     let mut left_lines = vec![Line::from(vec![
         Span::styled(
@@ -1623,24 +1637,32 @@ fn draw_online_section(
     ])];
 
     left_lines.push(Line::from(vec![
-        Span::styled("Room code ", Style::default().fg(colors.muted)),
+        Span::styled(room_field_label.clone(), Style::default().fg(colors.muted)),
         Span::styled(
             code_display,
             Style::default()
                 .fg(colors.accent)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled("  ", Style::default().fg(colors.muted)),
-        Span::styled(
+    ]));
+    if let Some(toggle_badge) = &toggle_badge
+        && let Some(line) = left_lines.last_mut()
+    {
+        line.spans
+            .push(Span::styled("  ", Style::default().fg(colors.muted)));
+        line.spans.push(Span::styled(
             toggle_badge.clone(),
             Style::default().fg(colors.text).bg(toggle_bg),
-        ),
-        Span::styled("  ", Style::default().fg(colors.muted)),
-        Span::styled(
+        ));
+    }
+    if let Some(line) = left_lines.last_mut() {
+        line.spans
+            .push(Span::styled("  ", Style::default().fg(colors.muted)));
+        line.spans.push(Span::styled(
             copy_badge.clone(),
             Style::default().fg(colors.text).bg(copy_bg),
-        ),
-    ]));
+        ));
+    }
 
     left_lines.push(Line::from(Span::styled(
         format!(
@@ -1709,13 +1731,19 @@ fn draw_online_section(
         );
     }
 
-    let label_width = 10u16; // "Room code "
-    let toggle_width = toggle_badge.chars().count() as u16;
+    let label_width = room_field_label.chars().count() as u16;
+    let toggle_width = toggle_badge
+        .as_ref()
+        .map(|badge| badge.chars().count() as u16)
+        .unwrap_or(0);
     let copy_width = copy_badge.chars().count() as u16;
     let line1_total = label_width
         + code_width
-        + 2 // "  "
-        + toggle_width
+        + if toggle_badge.is_some() {
+            2 + toggle_width // "  " + badge
+        } else {
+            0
+        }
         + 2 // "  "
         + copy_width;
     if line1_total <= inner_width {
@@ -1731,17 +1759,19 @@ fn draw_online_section(
             HitTarget::ToggleRoomCodeReveal,
         );
         x = x.saturating_add(code_width);
-        x = x.saturating_add(2);
-        hit_map_push(
-            Rect {
-                x,
-                y: inner_y.saturating_add(1),
-                width: toggle_width,
-                height: 1,
-            },
-            HitTarget::ToggleRoomCodeReveal,
-        );
-        x = x.saturating_add(toggle_width);
+        if toggle_badge.is_some() {
+            x = x.saturating_add(2);
+            hit_map_push(
+                Rect {
+                    x,
+                    y: inner_y.saturating_add(1),
+                    width: toggle_width,
+                    height: 1,
+                },
+                HitTarget::ToggleRoomCodeReveal,
+            );
+            x = x.saturating_add(toggle_width);
+        }
         x = x.saturating_add(2);
         hit_map_push(
             Rect {

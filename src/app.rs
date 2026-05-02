@@ -174,6 +174,8 @@ struct OnlineRuntime {
     last_directory_refresh_at: Instant,
     pending_join_server_addr: String,
     pending_join_room_name: Option<String>,
+    active_room_name: Option<String>,
+    active_room_password: Option<String>,
     host_server_input: String,
     host_room_input: String,
     host_max_connections_input: String,
@@ -238,6 +240,8 @@ impl OnlineRuntime {
         self.join_directory_rooms.clear();
         self.pending_join_server_addr.clear();
         self.pending_join_room_name = None;
+        self.active_room_name = None;
+        self.active_room_password = None;
         self.join_prompt_mode = JoinPromptMode::Connect;
         self.host_server_input.clear();
         self.host_room_input.clear();
@@ -331,6 +335,24 @@ impl OnlineRuntime {
             ),
         })
     }
+
+    fn online_room_field_view(&self) -> Option<crate::ui::OnlineRoomFieldView> {
+        if let Some(password) = self.active_room_password.as_deref() {
+            return Some(crate::ui::OnlineRoomFieldView {
+                label: String::from("Room password"),
+                value: password.to_string(),
+                secret: true,
+            });
+        }
+
+        self.active_room_name
+            .as_deref()
+            .map(|room_name| crate::ui::OnlineRoomFieldView {
+                label: String::from("Room name"),
+                value: room_name.to_string(),
+                secret: false,
+            })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -369,6 +391,19 @@ enum JoinPromptMode {
     Connect,
     HostRoomName,
     NicknameForJoin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnlineRoomFieldKind {
+    Code,
+    Name,
+    Password,
+}
+
+struct OnlineRoomFieldData {
+    kind: OnlineRoomFieldKind,
+    value: String,
+    secret: bool,
 }
 
 impl JoinPromptButton {
@@ -420,6 +455,49 @@ fn join_prompt_input_status(mode: JoinPromptMode, input: &str) -> String {
         JoinPromptMode::Connect => format!("Enter server/link: {input}"),
         JoinPromptMode::HostRoomName => format!("Enter room name: {input}"),
         JoinPromptMode::NicknameForJoin => format!("Enter nickname: {input}"),
+    }
+}
+
+fn active_online_room_field(
+    online_runtime: &OnlineRuntime,
+    session: &OnlineSession,
+) -> OnlineRoomFieldData {
+    if let Some(password) = online_runtime.active_room_password.as_deref() {
+        return OnlineRoomFieldData {
+            kind: OnlineRoomFieldKind::Password,
+            value: password.to_string(),
+            secret: true,
+        };
+    }
+
+    if let Some(room_name) = online_runtime.active_room_name.as_deref() {
+        return OnlineRoomFieldData {
+            kind: OnlineRoomFieldKind::Name,
+            value: room_name.to_string(),
+            secret: false,
+        };
+    }
+
+    OnlineRoomFieldData {
+        kind: OnlineRoomFieldKind::Code,
+        value: session.room_code.clone(),
+        secret: true,
+    }
+}
+
+fn online_room_field_status_name(kind: OnlineRoomFieldKind) -> &'static str {
+    match kind {
+        OnlineRoomFieldKind::Code => "Room code",
+        OnlineRoomFieldKind::Name => "Room name",
+        OnlineRoomFieldKind::Password => "Room password",
+    }
+}
+
+fn online_room_field_copy_name(kind: OnlineRoomFieldKind) -> &'static str {
+    match kind {
+        OnlineRoomFieldKind::Code => "room code",
+        OnlineRoomFieldKind::Name => "room name",
+        OnlineRoomFieldKind::Password => "room password",
     }
 }
 
@@ -1757,6 +1835,8 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
         last_directory_refresh_at: Instant::now(),
         pending_join_server_addr: String::new(),
         pending_join_room_name: None,
+        active_room_name: None,
+        active_room_password: None,
         host_server_input: String::new(),
         host_room_input: String::new(),
         host_max_connections_input: String::new(),
@@ -1868,6 +1948,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                 let room_directory_modal = online_runtime.room_directory_view();
                 let host_invite_modal = online_runtime.host_invite_modal_view();
                 let password_prompt_modal = online_runtime.password_prompt_view();
+                let online_room_field = online_runtime.online_room_field_view();
                 let stats_snapshot = (core.header_section == HeaderSection::Stats).then(|| {
                     stats_store.query(
                         &crate::stats::StatsQuery {
@@ -1891,6 +1972,7 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
                         room_directory_view: room_directory_modal.as_ref(),
                         online_password_prompt: password_prompt_modal.as_ref(),
                         host_invite_modal: host_invite_modal.as_ref(),
+                        online_room_field: online_room_field.as_ref(),
                         room_code_revealed: online_runtime.room_code_revealed,
                     },
                 )
@@ -3363,20 +3445,30 @@ fn handle_online_inline_input(
             true
         }
         KeyCode::Char(ch) if ch.eq_ignore_ascii_case(&'t') => {
-            online_runtime.room_code_revealed = !online_runtime.room_code_revealed;
-            core.status = if online_runtime.room_code_revealed {
-                String::from("Room code shown")
-            } else {
-                String::from("Room code hidden")
+            let Some(session) = core.online.session.as_ref() else {
+                return true;
             };
+            let field = active_online_room_field(online_runtime, session);
+            if field.secret {
+                online_runtime.room_code_revealed = !online_runtime.room_code_revealed;
+                let name = online_room_field_status_name(field.kind);
+                core.status = if online_runtime.room_code_revealed {
+                    format!("{name} shown")
+                } else {
+                    format!("{name} hidden")
+                };
+            } else {
+                core.status = format!("{} visible", online_room_field_status_name(field.kind));
+            }
             core.dirty = true;
             true
         }
         KeyCode::Char('2') => {
             if let Some(session) = core.online.session.as_ref() {
-                match copy_invite_to_clipboard(&session.room_code) {
+                let field = active_online_room_field(online_runtime, session);
+                match copy_invite_to_clipboard(&field.value) {
                     Ok(()) => {
-                        core.status = String::from("Copied room code");
+                        core.status = format!("Copied {}", online_room_field_copy_name(field.kind));
                     }
                     Err(err) => {
                         core.status = format!("Clipboard copy failed: {err}");
@@ -3961,6 +4053,11 @@ fn join_home_room(
 
     match joined_network {
         Some(network) => {
+            online_runtime.active_room_name = Some(resolved.room_name.clone());
+            online_runtime.active_room_password = resolved
+                .locked
+                .then(|| password.trim().to_string())
+                .filter(|value| !value.is_empty());
             online_runtime.home_server_addr = server_addr;
             online_runtime.home_server_connected = true;
             online_runtime.network = Some(network);
@@ -5066,19 +5163,29 @@ fn apply_left_click(
             core.dirty = true;
         }
         HitTarget::ToggleRoomCodeReveal => {
-            online_runtime.room_code_revealed = !online_runtime.room_code_revealed;
-            core.status = if online_runtime.room_code_revealed {
-                String::from("Room code shown")
-            } else {
-                String::from("Room code hidden")
+            let Some(session) = core.online.session.as_ref() else {
+                return;
             };
+            let field = active_online_room_field(online_runtime, session);
+            if field.secret {
+                online_runtime.room_code_revealed = !online_runtime.room_code_revealed;
+                let name = online_room_field_status_name(field.kind);
+                core.status = if online_runtime.room_code_revealed {
+                    format!("{name} shown")
+                } else {
+                    format!("{name} hidden")
+                };
+            } else {
+                core.status = format!("{} visible", online_room_field_status_name(field.kind));
+            }
             core.dirty = true;
         }
         HitTarget::CopyRoomCode => {
             if let Some(session) = core.online.session.as_ref() {
-                match copy_invite_to_clipboard(&session.room_code) {
+                let field = active_online_room_field(online_runtime, session);
+                match copy_invite_to_clipboard(&field.value) {
                     Ok(()) => {
-                        core.status = String::from("Copied room code");
+                        core.status = format!("Copied {}", online_room_field_copy_name(field.kind));
                     }
                     Err(err) => {
                         core.status = format!("Clipboard copy failed: {err}");
@@ -7904,6 +8011,8 @@ mod tests {
             last_directory_refresh_at: Instant::now(),
             pending_join_server_addr: String::new(),
             pending_join_room_name: None,
+            active_room_name: None,
+            active_room_password: None,
             host_server_input: String::new(),
             host_room_input: String::new(),
             host_max_connections_input: String::new(),
@@ -11360,6 +11469,31 @@ mod tests {
         assert_eq!(runtime.join_prompt_mode, JoinPromptMode::Connect);
         assert_eq!(runtime.join_prompt_button, JoinPromptButton::Join);
         assert!(runtime.join_code_input.is_empty());
+    }
+
+    #[test]
+    fn online_room_field_view_shows_room_name_for_unlocked_rooms() {
+        let mut runtime = test_online_runtime();
+        runtime.active_room_name = Some(String::from("My Room"));
+
+        let view = runtime.online_room_field_view().expect("room field");
+
+        assert_eq!(view.label, "Room name");
+        assert_eq!(view.value, "My Room");
+        assert!(!view.secret);
+    }
+
+    #[test]
+    fn online_room_field_view_shows_password_for_locked_rooms() {
+        let mut runtime = test_online_runtime();
+        runtime.active_room_name = Some(String::from("My Room"));
+        runtime.active_room_password = Some(String::from("PassWord"));
+
+        let view = runtime.online_room_field_view().expect("room field");
+
+        assert_eq!(view.label, "Room password");
+        assert_eq!(view.value, "PassWord");
+        assert!(view.secret);
     }
 
     #[test]

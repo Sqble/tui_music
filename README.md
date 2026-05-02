@@ -41,7 +41,7 @@ Full documentation available at **https://tunetui.online**
 - Linux TUI sessions suppress backend stderr splash and bias output buffering toward underrun-resistant playback
 - Volume level persists across launches
 - Playback settings: loudness normalization, crossfade, scrub length, stats tracking, top songs rows, missing-cover fallback template, themes including terminal/system colors on Linux
-- Online tab: TCP host/client room sync, room-code handshake, collaborative/host-only modes, shared queue, password-encrypted invite codes
+- Online tab: TCP host/client room sync, homeserver room names/passwords, collaborative/host-only modes, shared queue, password-encrypted invite codes
 - Clipboard fallback to OSC 52 for SSH
 - Auto-save on state-changing actions
 
@@ -101,7 +101,7 @@ A public server is available at **tunetui.online** — anyone can use it to host
 1. Press `l` for Online page  
 2. Press Enter on `[ Show Public Servers ]`, or select `Server / Link` to type a custom server/link
 3. Select a room from the directory
-4. Enter invite code (and password if needed)
+4. Enter the room password if needed
 
 Homeserver, room creation, and password prompts stay embedded in the Online page; use `h`/`j`/`k`/`l` to switch pages.
 

@@ -668,7 +668,7 @@ fn start_home_server_with_logging(
                                 }
                             } else {
                                 let mut session = OnlineSession::host(&owner_nickname);
-                                session.room_code = name.to_ascii_uppercase();
+                                session.room_code = name.to_string();
                                 session.participants.clear();
                                 match start_room_host_for_home_server(
                                     bind,
@@ -692,7 +692,7 @@ fn start_home_server_with_logging(
                                             name.to_ascii_lowercase(),
                                             HostedRoom {
                                                 room_name: name.to_string(),
-                                                room_code: name.to_ascii_uppercase(),
+                                                room_code: name.to_string(),
                                                 room_server_port: room_port,
                                                 network,
                                                 max_connections,
@@ -1912,7 +1912,7 @@ fn handle_inbound(
             password,
             stream,
         } => {
-            if room_code.to_ascii_uppercase() != session.room_code {
+            if !room_code.trim().eq_ignore_ascii_case(&session.room_code) {
                 host_log(
                     log_events,
                     HostLogLevel::Warn,
@@ -5233,7 +5233,9 @@ mod tests {
 
         verify_home_server(&home_addr).expect("verify home server");
         let room =
-            create_home_room(&home_addr, "roomname", "hoster", None, 8).expect("create room");
+            create_home_room(&home_addr, "RoomName", "hoster", None, 8).expect("create room");
+        assert_eq!(room.room_name, "RoomName");
+        assert_eq!(room.room_code, "RoomName");
         let client =
             OnlineNetwork::start_client(&room.room_server_addr, &room.room_code, "hoster", None)
                 .expect("join created room");
