@@ -110,7 +110,7 @@ p{margin-bottom:16px;color:var(--f)}
                 </div>
                 <p class="tagline">Performance-oriented terminal music player</p>
                 <div class="cta-group">
-                    <a href="https://github.com/Sqble/tui_music/releases/download/alpha-3/tune.exe" class="btn btn-primary">
+                    <a href="https://github.com/Sqble/tui_music/releases" class="btn btn-primary">
                         <span class="btn-arrow btn-arrow-download">▼</span> Download .exe
                     </a>
                     <a href="#getting-started" class="btn btn-secondary">
@@ -150,16 +150,15 @@ cargo build --release</code></pre>
 
             <h2><span class="prompt">›</span> Adding Your Music</h2>
             <ol>
-                <li>Press <kbd>Tab</kbd> to switch to the <strong>Library</strong> tab</li>
-                <li>Press <kbd>/</kbd> to open the actions panel</li>
-                <li>Select <strong>"Add directory"</strong></li>
+                <li>Press <kbd>h</kbd> to switch to the <strong>Library</strong> page</li>
+                <li>Select <strong>[+] Add Directory</strong> and press <kbd>Enter</kbd></li>
                 <li>Choose your music folder (or type the path)</li>
             </ol>
 
             <h2><span class="prompt">›</span> Basic Playback</h2>
             <ul>
                 <li><kbd>↑</kbd> / <kbd>↓</kbd> — Navigate through your tracks</li>
-                <li><kbd>Enter</kbd> — Play the selected track</li>
+                <li><kbd>Enter</kbd> — Open or play the selected item</li>
                 <li><kbd>Space</kbd> — Pause / Resume</li>
                 <li><kbd>n</kbd> — Next track</li>
                 <li><kbd>b</kbd> — Previous track</li>
@@ -168,10 +167,10 @@ cargo build --release</code></pre>
             <h2><span class="prompt">›</span> Want to Listen with Friends?</h2>
             <p>TuneTUI supports real-time listen-together via the Online tab. The public server at <strong>tunetui.online</strong> is already running and available for anyone to use.</p>
             <ol>
-                <li>Press <kbd>Tab</kbd> until you reach the <strong>Online</strong> tab</li>
-                <li>Press <kbd>h</kbd> to host a room, or <kbd>j</kbd> to join</li>
-                <li>For joining, enter <code>tunetui.online</code> as the server address</li>
-                <li>Share the invite code with friends!</li>
+                <li>Press <kbd>l</kbd> to open the <strong>Online</strong> page</li>
+                <li>Set a nickname if prompted</li>
+                <li>Press <kbd>Enter</kbd> on <strong>[ Show Public Servers ]</strong></li>
+                <li>Select a room to join, or select <strong>[+] Create Room</strong> to host</li>
             </ol>
             <div class="callout callout-info">
                 <span class="prompt">$</span> First time? You'll be prompted to enter a nickname. This is saved for next time.
@@ -194,10 +193,12 @@ cargo build --release</code></pre>
             
             <h2><span class="prompt">›</span> Navigation</h2>
             <div class="keybindings">
-                <div class="keybind"><kbd>↑</kbd> <kbd>↓</kbd> <span>Select track up/down</span></div>
-                <div class="keybind"><kbd>Enter</kbd> <span>Play selected track</span></div>
-                <div class="keybind"><kbd>Backspace</kbd> <span>Go back in library (folder navigation)</span></div>
-                <div class="keybind"><kbd>Tab</kbd> <span>Cycle through tabs (Library → Lyrics → Stats → Online)</span></div>
+                <div class="keybind"><kbd>↑</kbd> <kbd>↓</kbd> <span>Select item up/down</span></div>
+                <div class="keybind"><kbd>Enter</kbd> <span>Open or play selected item</span></div>
+                <div class="keybind"><kbd>Backspace</kbd> <kbd>←</kbd> <span>Edit/clear search, otherwise go back</span></div>
+                <div class="keybind"><kbd>h</kbd> <kbd>j</kbd> <kbd>k</kbd> <kbd>l</kbd> <span>Switch pages: Library, Lyrics, Stats, Online</span></div>
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>f</kbd> <span>Focus Library search</span></div>
+                <div class="keybind"><kbd>Esc</kbd> <span>Clear Library search</span></div>
             </div>
 
             <h2><span class="prompt">›</span> Playback</h2>
@@ -218,8 +219,12 @@ cargo build --release</code></pre>
             <div class="keybindings">
                 <div class="keybind"><kbd>/</kbd> <span>Open actions panel (search & commands)</span></div>
                 <div class="keybind"><kbd>r</kbd> <span>Rescan music folders</span></div>
-                <div class="keybind"><kbd>s</kbd> <span>Save current state</span></div>
-                <div class="keybind"><kbd>t</kbd> <span>Minimize to system tray (Windows only)</span></div>
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>p</kbd> <span>Add selected item to playlist</span></div>
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>o</kbd> <span>Add now playing song to playlist</span></div>
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>u</kbd> <span>Add selection to queue end</span></div>
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>y</kbd> <span>Add selection to queue next</span></div>
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>s</kbd> <span>Add selection to Online shared queue</span></div>
+                <div class="keybind"><kbd>t</kbd> <span>Minimize/collapse to tray</span></div>
             </div>
 
             <h2><span class="prompt">›</span> Actions Panel</h2>
@@ -228,7 +233,7 @@ cargo build --release</code></pre>
                 <div class="keybind"><kbd>Enter</kbd> <span>Execute selected action</span></div>
                 <div class="keybind"><kbd>Esc</kbd> <span>Close actions panel</span></div>
                 <div class="keybind"><kbd>Type</kbd> <span>Filter actions by text</span></div>
-                <div class="keybind"><kbd>Backspace</kbd> <span>Clear filter</span></div>
+                <div class="keybind"><kbd>Backspace</kbd> <span>Edit search filter</span></div>
             </div>
 
             <h2><span class="prompt">›</span> Lyrics Tab</h2>
@@ -244,16 +249,18 @@ cargo build --release</code></pre>
                 <div class="keybind"><kbd>←</kbd> <kbd>→</kbd> <span>Move filter focus (range/sort)</span></div>
                 <div class="keybind"><kbd>Enter</kbd> <span>Cycle focused filter</span></div>
                 <div class="keybind"><kbd>Type</kbd> <span>Live filter by artist/album/search</span></div>
-                <div class="keybind"><kbd>Backspace</kbd> <span>Clear filter</span></div>
+                <div class="keybind"><kbd>Backspace</kbd> <span>Edit focused text filter</span></div>
                 <div class="keybind"><kbd>Shift</kbd>+<kbd>↑</kbd> <span>Jump back to top filters</span></div>
             </div>
 
             <h2><span class="prompt">›</span> Online Tab</h2>
             <div class="keybindings">
-                <div class="keybind"><kbd>l</kbd> <span>Leave current room</span></div>
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>n</kbd> <span>Start shared queue / next shared item</span></div>
+                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>l</kbd> <span>Leave current room</span></div>
                 <div class="keybind"><kbd>o</kbd> <span>Toggle room mode — host only (collaborative / host-only)</span></div>
                 <div class="keybind"><kbd>q</kbd> <span>Cycle stream quality — host only (Lossless / Balanced)</span></div>
-                <div class="keybind"><kbd>Ctrl</kbd>+<kbd>s</kbd> <span>Add selected to shared queue (Library tab only)</span></div>
+                <div class="keybind"><kbd>t</kbd> <span>Show/hide room code or room link</span></div>
+                <div class="keybind"><kbd>2</kbd> <span>Copy active room link/code</span></div>
             </div>
             <div class="callout callout-warning">
                 <span class="prompt">!</span> <strong>Host-only mode:</strong> In this mode, listeners cannot control playback. Only the host can play/pause/skip.
@@ -286,6 +293,7 @@ cargo build --release</code></pre>
             <h2><span class="prompt">›</span> Files</h2>
             <ul>
                 <li><code>state.json</code> — Playback state, library folders, playlists, settings</li>
+                <li><code>library_index.json</code> — Cached library metadata/fingerprints for faster startup</li>
                 <li><code>stats.json</code> — Listen history and statistics</li>
                 <li><code>lyrics/</code> — LRC sidecar files (one per track)</li>
             </ul>
@@ -304,9 +312,10 @@ cargo build --release</code></pre>
             </ul>
 
             <h2><span class="prompt">›</span> Themes</h2>
-            <p>Available themes (actions panel → Playback settings → Theme):</p>
+            <p>Available themes (actions panel → Theme):</p>
             <ul>
                 <li>Dark (default)</li>
+                <li>System / Terminal</li>
                 <li>Pitch Black</li>
                 <li>Galaxy</li>
                 <li>Matrix</li>
@@ -315,7 +324,7 @@ cargo build --release</code></pre>
             </ul>
 
             <h2><span class="prompt">›</span> Audio Output</h2>
-            <p>Select your audio output device via actions panel → <strong>"Output speaker"</strong>. The selection persists across launches.</p>
+            <p>Select your audio output device via actions panel → <strong>"Audio driver settings"</strong> → <strong>"Select output speaker"</strong>. The selection persists across launches.</p>
 
             <h2><span class="prompt">›</span> Lyrics</h2>
             <p>TuneTUI looks for lyrics in this order:</p>
@@ -324,7 +333,7 @@ cargo build --release</code></pre>
                 <li>Embedded lyrics in audio file metadata</li>
             </ol>
             <p>Sidecar files are named based on track path and stored in <code>lyrics/</code>. If no lyrics exist, the Lyrics tab offers to create a new sidecar.</p>
-            <p>To import plain <code>.txt</code> lyrics: actions panel → <strong>"Import .txt to .lrc"</strong></p>
+            <p>To import plain <code>.txt</code> lyrics: actions panel → <strong>"Import TXT to lyrics"</strong></p>
 
             <h2><span class="prompt">›</span> Metadata Editor</h2>
             <p>Actions panel → <strong>"Edit selected track metadata"</strong> to edit:</p>
@@ -352,19 +361,19 @@ cargo build --release</code></pre>
 
             <h2><span class="prompt">›</span> Hosting a Room</h2>
             <ol>
-                <li>Press <kbd>Tab</kbd> to reach the <strong>Online</strong> tab</li>
-                <li>If not connected to a server, enter <code>tunetui.online</code> (or your own server)</li>
-                <li>Enter a room name</li>
-                <li>Optional: Set a password (lock icon in directory = password protected)</li>
-                <li>Friends connect to the same server to see your room in the directory</li>
+                <li>Press <kbd>l</kbd> to reach the <strong>Online</strong> page</li>
+                <li>Set a nickname if prompted</li>
+                <li>Show public servers, or type a custom homeserver/link in <strong>Server / Link</strong></li>
+                <li>Select <strong>[+] Create Room</strong>, then enter room name and optional password</li>
+                <li>Friends connect to the same server or use the copied room link/code</li>
             </ol>
 
             <h2><span class="prompt">›</span> Joining a Room</h2>
             <ol>
-                <li>Press <kbd>Tab</kbd> to reach the <strong>Online</strong> tab</li>
-                <li>If not connected to a server, enter <code>tunetui.online</code> (or your own server)</li>
-                <li>Browse the room directory for available rooms</li>
-                <li>Select a room to join</li>
+                <li>Press <kbd>l</kbd> to reach the <strong>Online</strong> page</li>
+                <li>Set a nickname if prompted</li>
+                <li>Show public servers, or type a custom homeserver/link in <strong>Server / Link</strong></li>
+                <li>Search or browse the inline room directory and select a room</li>
                 <li>If password-protected, enter the password</li>
             </ol>
 
@@ -387,7 +396,7 @@ cargo build --release</code></pre>
                 <li>In Library tab, select tracks and press <kbd>Ctrl</kbd>+<kbd>s</kbd> to add to shared queue</li>
                 <li>You can add individual tracks, folders, playlists, or all songs</li>
                 <li>The queue is FIFO — tracks play in order and are removed when played</li>
-                <li>Auto-start when idle: the queue begins playing automatically</li>
+                <li>Press <kbd>Ctrl</kbd>+<kbd>n</kbd> in Online to start the shared queue now or jump to the next item</li>
             </ul>
 
             <h2><span class="prompt">›</span> Sync Mechanics</h2>
@@ -454,7 +463,7 @@ cargo build --release</code></pre>
             </div>
 
             <h2><span class="prompt">›</span> Room Port Range</h2>
-            <p>The range determines how many simultaneous rooms can exist. Default is 100 ports (9000-9100). Adjust with <code>--room-port-range</code> if you need more or fewer rooms.</p>
+            <p>The range determines how many simultaneous rooms can exist. Default is <strong>9000-9100</strong>. Adjust with <code>--room-port-range</code> if needed.</p>
             <footer class="section-footer">
                 <a href="#online-sync" class="btn btn-secondary nav-page">
                     <span class="btn-arrow">←</span> Back: Online Sync
@@ -471,7 +480,7 @@ cargo build --release</code></pre>
             <h2><span class="prompt">›</span> No Audio Output</h2>
             <ol>
                 <li>Open actions panel (<kbd>/</kbd>)</li>
-                <li>Select <strong>"Output speaker"</strong></li>
+                <li>Select <strong>"Audio driver settings"</strong> → <strong>"Select output speaker"</strong></li>
                 <li>Choose a valid audio device</li>
             </ol>
 

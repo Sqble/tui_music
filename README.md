@@ -26,7 +26,7 @@ Full documentation available at **https://tunetui.online**
 - Automatic track advance when a song ends, including while minimized to tray (Windows and Linux desktops with a tray host)
 - Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\.config\tunetui\state.json` on Windows)
 - Stats sidecar in config dir with metadata-keyed listen events/aggregates
-- Keyboard-driven TUI with color-coded categorized actions panel search, recent actions, and overflow scrollbar
+- Keyboard/mouse-driven TUI with color-coded categorized actions panel search, recent actions, and overflow scrollbar
 - Right-aligned status tabs with direct page keys (`h` Library, `j` Lyrics, `k` Stats, `l` Online)
 - Song Info panel renders now-playing embedded album art as cached Unicode color raster
 - Stats tab with totals, ASCII charts, and range-filtered recent listen log
@@ -41,7 +41,7 @@ Full documentation available at **https://tunetui.online**
 - Linux TUI sessions suppress backend stderr splash and bias output buffering toward underrun-resistant playback
 - Volume level persists across launches
 - Playback settings: loudness normalization, crossfade, scrub length, stats tracking, top songs rows, missing-cover fallback template, themes including terminal/system colors on Linux
-- Online tab: TCP host/client room sync, homeserver room names/passwords, collaborative/host-only modes, shared queue, password-encrypted invite codes
+- Online tab: TCP host/client room sync, inline homeserver room directory, collaborative/host-only modes, shared queue, password-encrypted invite codes
 - Clipboard fallback to OSC 52 for SSH
 - Auto-save on state-changing actions
 
@@ -60,7 +60,7 @@ Download `tune.exe` from releases and run. No installation required.
 | Key | Action |
 |-----|--------|
 | `↑` `↓` | Navigate tracks |
-| `Enter` | Play selected track |
+| `Enter` | Open/play selected item |
 | `Space` | Pause/Resume |
 | `n` | Next track |
 | `b` | Previous track |
@@ -68,6 +68,7 @@ Download `tune.exe` from releases and run. No installation required.
 | `a` | Seek backward |
 | `m` | Cycle repeat mode |
 | `v` | Toggle shuffle |
+| `r` | Rescan library |
 | `=` `+` | Volume up |
 | `-` `_` | Volume down |
 | `/` | Open actions panel |
@@ -75,16 +76,18 @@ Download `tune.exe` from releases and run. No installation required.
 | `Ctrl+o` | Add now playing song to playlist |
 | `Ctrl+u` | Add selection to queue end |
 | `Ctrl+y` | Add selection to queue next |
+| `Ctrl+s` | In Library, add selection to Online shared queue |
 | `h` `j` `k` `l` | Switch pages (Library/Lyrics/Stats/Online) |
 | `t` | Minimize/collapse to tray |
 | `Ctrl+f` | In Library, focus the search bar |
-| type | When search is focused, type to filter tracks globally |
-| `Esc` / `Backspace` | Clear search filter (or navigate back when empty) |
+| type | When Library search is focused, filter tracks globally |
+| `Esc` | Clear Library search |
+| `Backspace` / `←` | Edit/clear search, otherwise navigate back |
 | `Ctrl+n` | In Online tab, start shared queue playback / next shared item |
 | `Ctrl+l` | In Online tab, leave room |
 | `Ctrl+c` | Quit |
 
-Queue views are available as `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online) in the Library root. Quick playlist/queue add tools live in the Selection strip; playlist pickers include `[+] Create new playlist`; queue remove/move tools remain in the categorized actions panel (`/`).
+Queue views are available as `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online) in the Library root. Quick add tools live in the Selection strip; playlist pickers include `[+] Create new playlist`; queue remove/move tools remain in the categorized actions panel (`/`).
 Use the actions panel entry "View audio quality + spectrograph" to run one-time analysis for the selected track (or now playing).
 
 ### Online / Listen Together
@@ -93,20 +96,22 @@ A public server is available at **tunetui.online** — anyone can use it to host
 
 **Host a room:**
 1. Press `l` for Online page
-2. Select `[+] Create Room`
-3. Enter room name and optional password
-4. Share invite code
+2. Set a nickname if prompted
+3. Show public servers or enter a homeserver/link, then select `[+] Create Room`
+4. Enter room name and optional password
+5. Share invite code
 
 **Join a room:**
 1. Press `l` for Online page  
-2. Press Enter on `[ Show Public Servers ]`, or select `Server / Link` to type a custom server/link
-3. Select a room from the directory
-4. Enter the room password if needed
+2. Set a nickname if prompted
+3. Press Enter on `[ Show Public Servers ]`, or select `Server / Link` to type a custom server/link
+4. Select a room from the directory
+5. Enter the room password if needed
 
-Homeserver, room creation, and password prompts stay embedded in the Online page; use `h`/`j`/`k`/`l` to switch pages.
+Homeserver, room creation, room search, and password prompts stay embedded in the Online page; use `h`/`j`/`k`/`l` to switch pages.
 
-**Online quick control:**
-- In Online tab, `Ctrl+n` starts shared queue playback immediately (or jumps to the next shared item)
+**Online quick controls:**
+- `Ctrl+n` starts shared queue playback immediately (or jumps to the next shared item); `o` toggles room mode, `q` cycles stream quality, `t` shows/hides room codes, and `2` copies the active room link/code.
 
 Remote users can stream to each other through the room host connection; only the host server ports need to be exposed.
 
