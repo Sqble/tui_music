@@ -1,185 +1,195 @@
 # TuneTUI
 
-page visits count:
+[![ci](https://img.shields.io/github/actions/workflow/status/Sqble/tui_music/ci.yml?branch=master&label=ci&logo=githubactions)](https://github.com/Sqble/tui_music/actions/workflows/ci.yml)
+[![deploy](https://img.shields.io/github/actions/workflow/status/Sqble/tui_music/deploy.yml?branch=master&label=deploy&logo=githubactions)](https://github.com/Sqble/tui_music/actions/workflows/deploy.yml)
+[![docs](https://img.shields.io/website?url=https%3A%2F%2Ftunetui.online&label=docs)](https://tunetui.online)
+![rust](https://img.shields.io/badge/rust-1.93.1-orange)
+[![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
+TuneTUI is a fast terminal music player for people who want a real desktop music workflow without leaving the terminal. Point it at your music folder, build playlists, follow synced lyrics, inspect audio quality, and even listen together with friends from the Online tab.
+
+visitor count:
 
 ![visitor count](https://count.getloli.com/@:tunetui)
 
-Performance-oriented terminal music player for desktop terminal workflows.
-
 ## Documentation
 
-Full documentation available at **https://tunetui.online**
+Full documentation is available at **https://tunetui.online**.
 
-## Features
+## Why TuneTUI?
 
-- Minimal redraw strategy (renders only on dirty state or timed tick)
-- Folder-based music library with recursive scan
-- Background library scan on startup/add-folder/rescan so the TUI opens without waiting for full tag parsing
-- Persistent library index cache in config dir (`library_index.json`) for warm-start metadata reuse
-- Playlist create/add/play flows
-- Independent shuffle and repeat controls (repeat off, playlist, or single track)
-- Main library queue order uses metadata titles (not file names)
-- Queue scope follows where you start playback (folder, playlist, or All Songs)
-- Library root shortcuts for `[+] Add Directory` and `[+] New Playlist`
-- Queue tools in Library: local/shared queue entries in the Library root plus quick add-to-end/next controls, remove item, and move item to next actions
-- Single-instance behavior on Windows (new launches focus/restore existing app)
-- Automatic track advance when a song ends, including while minimized to tray (Windows and Linux desktops with a tray host)
-- Persistent state in config dir (`$XDG_CONFIG_HOME/tunetui/state.json` on Linux, `%USERPROFILE%\.config\tunetui\state.json` on Windows)
-- Stats sidecar in config dir with metadata-keyed listen events/aggregates
-- Keyboard/mouse-driven TUI with color-coded categorized actions panel search, recent actions, and overflow scrollbar
-- Right-aligned status tabs with direct page keys (`h` Library, `j` Lyrics, `k` Stats, `l` Online)
-- Song Info panel renders now-playing embedded album art as cached Unicode color raster
-- Stats tab with totals, ASCII charts, and range-filtered recent listen log
-- Lyrics tab with live line sync from `.lrc` sidecars or embedded metadata
-- Lyrics sidecars stored in config dir (`lyrics/`)
-- Split-pane lyrics editor (`Ctrl+e` toggle) with per-line timestamp stamping
-- `.txt` to `.lrc` import with fixed-interval timestamp seeding
-- Metadata editor for title/artist/album with cover-art copy flows
-- Audio quality inspector action with static spectrograph and bitrate-based rating (Unavailable/Red/Yellow/Green/Gold*)
-- Audio driver recovery and output speaker selection
-- Selected output speaker persists across launches with fallback to default
-- Linux TUI sessions suppress backend stderr splash and bias output buffering toward underrun-resistant playback
-- Volume level persists across launches
-- Playback settings: loudness normalization, crossfade, scrub length, stats tracking, top songs rows, missing-cover fallback template, themes including terminal/system colors on Linux
-- Online tab: TCP host/client room sync, inline homeserver room directory, collaborative/host-only modes, shared queue, password-encrypted invite codes
-- Clipboard fallback to OSC 52 for SSH
-- Auto-save on state-changing actions
+- **Built for local libraries:** recursively scan folders, cache metadata for fast startup, search across your library, and keep queue order based on track metadata instead of raw file names.
+- **Comfortable playback controls:** shuffle, repeat, seek, persistent volume, automatic track advance, output device selection, crossfade, and loudness normalization.
+- **Playlists and queues:** create playlists, add tracks quickly, queue items next or at the end, and manage local or shared queues from the Library page.
+- **Lyrics:** use embedded lyrics or `.lrc` sidecars, edit timestamps in a split-pane lyrics editor, and import plain text lyrics into timestamped files.
+- **Useful listening context:** view listen stats, recent plays, time listening, now-playing metadata, ascii album art, and an audio quality spectrograph.
+- **Listen together:** host or join rooms, use a shared queue, share password-protected invite codes, and stream through a public or self-hosted server.
+- **Terminal-first polish:** keyboard and mouse support, categorized action search, direct page shortcuts, multiple themes, SSH compatibility, and tray minimize support on desktop environments with a tray host.
 
 ## Quick Start
 
-Download `tune.exe` from releases and run. No installation required.
+Download `tune.exe` from releases and run it. No installer is required.
 
-### Adding Music
-
-1. Press `h` to switch to Library page
-2. Select `[+] Add Directory`
-3. Choose your music folder or type its path
-
-### Basic Controls
-
-| Key | Action |
-|-----|--------|
-| `↑` `↓` | Navigate tracks |
-| `Enter` | Open/play selected item |
-| `Space` | Pause/Resume |
-| `n` | Next track |
-| `b` | Previous track |
-| `d` | Seek forward |
-| `a` | Seek backward |
-| `m` | Cycle repeat mode |
-| `v` | Toggle shuffle |
-| `r` | Rescan library |
-| `=` `+` | Volume up |
-| `-` `_` | Volume down |
-| `/` | Open actions panel |
-| `Ctrl+p` | Add selected item to playlist |
-| `Ctrl+o` | Add now playing song to playlist |
-| `Ctrl+u` | Add selection to queue end |
-| `Ctrl+y` | Add selection to queue next |
-| `Ctrl+s` | In Library, add selection to Online shared queue |
-| `h` `j` `k` `l` | Switch pages (Library/Lyrics/Stats/Online) |
-| `t` | Minimize/collapse to tray |
-| `Ctrl+f` | In Library, focus the search bar |
-| type | When Library search is focused, filter tracks globally |
-| `Esc` | Clear Library search |
-| `Backspace` / `←` | Edit/clear search, otherwise navigate back |
-| `Ctrl+n` | In Online tab, start shared queue playback / next shared item |
-| `Ctrl+l` | In Online tab, leave room |
-| `Ctrl+c` | Quit |
-
-Queue views are available as `[QUEUE] Local Queue` and `[QUEUE] Shared Queue` (when online) in the Library root. Quick add tools live in the Selection strip; playlist pickers include `[+] Create new playlist`; queue remove/move tools remain in the categorized actions panel (`/`).
-Use the actions panel entry "View audio quality + spectrograph" to run one-time analysis for the selected track (or now playing).
-
-### Online / Listen Together
-
-A public server is available at **tunetui.online** — anyone can use it to host or join rooms.
-
-**Host a room:**
-1. Press `l` for Online page
-2. Set a nickname if prompted
-3. Show public servers or enter a homeserver/link, then select `[+] Create Room`
-4. Enter room name and optional password
-5. Share invite code
-
-**Join a room:**
-1. Press `l` for Online page  
-2. Set a nickname if prompted
-3. Press Enter on `[ Show Public Servers ]`, or select `Server / Link` to type a custom server/link
-4. Select a room from the directory
-5. Enter the room password if needed
-
-Homeserver, room creation, room search, and password prompts stay embedded in the Online page; use `h`/`j`/`k`/`l` to switch pages.
-
-**Online quick controls:**
-- `Ctrl+n` starts shared queue playback immediately (or jumps to the next shared item); `o` toggles room mode, `q` cycles stream quality, `t` shows/hides room codes, and `2` copies the active room link/code.
-
-Remote users can stream to each other through the room host connection; only the host server ports need to be exposed.
-
-### Lyrics
-
-- `.lrc` sidecar files in config `lyrics/` folder take precedence over embedded
-- `Ctrl+e` toggles split-pane editor
-- `Ctrl+t` stamps selected line with current playback time
-
-## Run
+You can also build and run from source:
 
 ```bash
 cargo run --release
 ```
 
-Or run the built binary:
+After installing locally, the binary is named `tune`:
+
 ```bash
-./tune
+cargo install --path .
+tune
 ```
 
-On SSH sessions, TuneTUI auto-sets `TERM=xterm-256color` when `TERM` is missing/`dumb`.
-If `TUNETUI_CONFIG_DIR` is not set and `USERPROFILE` is unavailable, TuneTUI auto-falls back to `$HOME/.config/tunetui`.
-On Linux, TuneTUI uses a larger output buffer when the device exposes a safe range and suppresses runtime backend stderr while the TUI is active so ALSA underrun recovery messages do not draw over the screen.
+## Add Music
 
-## Hosting Your Own Server
+1. Press `h` to open the Library page.
+2. Select `[+] Add Directory`.
+3. Choose your music folder or type its path.
 
-**Headless server:**
-```bash
-tune --host --host-ip 0.0.0.0
-```
-- Default port: **7878**
-- Room port range: **9000-9100** (default)
-- `--host-ip` is the address the server binds to. Use `0.0.0.0` to listen on all IPv4 interfaces.
-- Headless `--host` writes timestamped server logs to stderr for startup, room creation/cleanup, joins, disconnects, rejected requests, queue/control actions, and stream requests. `--host --app` keeps the TUI path quiet.
+TuneTUI scans in the background, so the interface opens quickly while metadata continues loading. The library cache is reused on later launches.
 
-**Server + app in one process:**
-```bash
-tune --host --app --host-ip 0.0.0.0
-```
+## Everyday Controls
 
-**Custom port/range:**
-```bash
-tune --host --host-ip 0.0.0.0:9000 --room-port-range 9000-9100
-```
+| Key | Action |
+|-----|--------|
+| `h` `j` `k` `l` | Switch pages: Library, Lyrics, Stats, Online |
+| `↑` `↓` | Navigate |
+| `Enter` | Open or play the selected item |
+| `Space` | Pause or resume |
+| `n` / `b` | Next or previous track |
+| `d` / `a` | Seek forward or backward |
+| `m` | Cycle repeat mode |
+| `v` | Toggle shuffle |
+| `r` | Rescan library |
+| `=` `+` / `-` `_` | Volume up or down |
+| `/` | Open the actions panel |
+| `Ctrl+f` | Focus Library search |
+| `Esc` | Clear Library search |
+| `t` | Minimize or collapse to tray |
+| `Ctrl+c` | Quit |
 
-**Connect to a server:**
-```bash
-tune --ip 192.168.1.100   # defaults to port 7878
-tune --ip 192.168.1.100:9000
-```
-- `--ip` is the server address the app connects to.
+Playlist and queue shortcuts:
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+p` | Add selected item to a playlist |
+| `Ctrl+o` | Add now playing song to a playlist |
+| `Ctrl+u` | Add selection to queue end |
+| `Ctrl+y` | Add selection to queue next |
+| `Ctrl+s` | Add selection to the Online shared queue |
+
+Queue views appear in the Library root as `[QUEUE] Local Queue` and, when online, `[QUEUE] Shared Queue`. The actions panel also includes queue remove/move tools and the audio quality spectrograph action.
+
+## Listen Together
+
+A public server is available at **tunetui.online**. You can use it to host or join rooms without running your own server.
+
+To host a room:
+
+1. Press `l` to open the Online page.
+2. Set a nickname if prompted.
+3. Show public servers or enter a homeserver/link, then select `[+] Create Room`.
+4. Enter a room name and optional password.
+5. Share the invite code.
+
+To join a room:
+
+1. Press `l` to open the Online page.
+2. Set a nickname if prompted.
+3. Press Enter on `[ Show Public Servers ]`, or select `Server / Link` to type a custom server or invite link.
+4. Select a room from the directory.
+5. Enter the room password if needed.
+
+Online quick controls:
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+n` | Start shared queue playback or jump to the next shared item |
+| `Ctrl+l` | Leave the room |
+| `o` | Toggle room mode |
+| `q` | Cycle stream quality |
+| `t` | Show or hide room codes |
+| `2` | Copy the active room link/code |
+
+Remote users can stream to each other through the room host connection; only the host server ports need to be exposed.
+
+## Lyrics
+
+TuneTUI reads synced lyrics from `.lrc` sidecars or embedded metadata. Sidecar lyrics are stored in the config directory under `lyrics/` and take precedence over embedded lyrics.
+
+| Key | Action |
+|-----|--------|
+| `Ctrl+e` | Toggle the split-pane lyrics editor |
+| `Ctrl+t` | Stamp the selected line with the current playback time |
+
+Plain `.txt` lyrics can be imported into `.lrc` with fixed-interval timestamp seeding, giving you a quick starting point for synced lyrics.
 
 ## Configuration
 
 Config directory:
-- **Linux:** `$XDG_CONFIG_HOME/tunetui/` (default `~/.config/tunetui/`)
-- **Windows:** `%USERPROFILE%\.config\tunetui\`
-- Override: `TUNETUI_CONFIG_DIR` env var
 
-Files:
-- `state.json` — Playback state, library, playlists
-- `library_index.json` — Cached library metadata/fingerprints used to warm-start the library
-- `stats.json` — Listen history and statistics
-- `lyrics/` — LRC sidecar files
+| Platform | Default path |
+|----------|--------------|
+| Linux | `$XDG_CONFIG_HOME/tunetui/`, or `~/.config/tunetui/` |
+| Windows | `%USERPROFILE%\.config\tunetui\` |
 
-Themes (actions panel → Theme): Dark, System / Terminal, Pitch Black, Galaxy, Matrix, Demonic, Cotton Candy
+Set `TUNETUI_CONFIG_DIR` to override the config directory.
 
-The System / Terminal theme uses terminal ANSI/default colors, so Linux desktops that theme the terminal palette, including Omarchy/Hyprland setups, can make TuneTUI follow the active desktop theme without TuneTUI parsing desktop-specific files.
+Important files:
+
+| File | Purpose |
+|------|---------|
+| `state.json` | Playback state, library roots, and playlists |
+| `library_index.json` | Cached metadata and fingerprints for warm startup |
+| `stats.json` | Listen history and aggregate statistics |
+| `lyrics/` | LRC sidecar files |
+
+Themes are available from the actions panel: Dark, System / Terminal, Pitch Black, Galaxy, Matrix, Demonic, and Cotton Candy. The System / Terminal theme uses terminal ANSI/default colors, so themed terminal palettes can make TuneTUI follow your desktop theme.
+
+On SSH sessions, TuneTUI auto-sets `TERM=xterm-256color` when `TERM` is missing or `dumb`.
+
+## Host Your Own Server
+
+Run a headless home server:
+
+```bash
+tune --host --host-ip 0.0.0.0
+```
+
+Defaults:
+
+| Setting | Value |
+|---------|-------|
+| Home server port | `7878` |
+| Room port range | `9000-9100` |
+
+Run the server and app in one process:
+
+```bash
+tune --host --app --host-ip 0.0.0.0
+```
+
+Use a custom bind port or room range:
+
+```bash
+tune --host --host-ip 0.0.0.0:9000 --room-port-range 9000-9100
+```
+
+Connect directly to a server:
+
+```bash
+tune --ip 192.168.1.100
+tune --ip 192.168.1.100:9000
+```
+
+Headless `--host` writes timestamped server logs to stderr for startup, room creation/cleanup, joins, disconnects, rejected requests, queue/control actions, and stream requests. `--host --app` keeps the TUI path quiet.
+
+## Audio And Format Notes
+
+TuneTUI uses Symphonia with support for AAC, ADPCM, FLAC, MP3, Ogg/Vorbis, PCM, WAV, and MP4/ISOBMFF audio. On Linux, it uses a larger output buffer when the device exposes a safe range and suppresses runtime backend stderr while the TUI is active so ALSA underrun recovery messages do not draw over the screen.
 
 ## Fuzzing
 
@@ -188,30 +198,12 @@ cargo install cargo-fuzz
 cargo fuzz run playback_commands
 ```
 
-## Binary Name
-
-The crate binary is `tune`, so after installing:
-
-```bash
-cargo install --path .
-tune
-```
-
 ## Contributor Workflow
 
 - Agent/developer contract: `AGENTS.md`
 - Contribution checklist: `CONTRIBUTING.md`
-- One-command local verification (Windows):
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts/verify.ps1
-```
-
-- One-command local verification (Linux/macOS):
-
-```bash
-bash scripts/verify.sh
-```
+- One-command local verification on Linux/macOS: `bash scripts/verify.sh`
+- One-command local verification on Windows: `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1`
 
 ## License
 
