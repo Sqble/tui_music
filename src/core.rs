@@ -136,6 +136,7 @@ pub struct TuneCore {
     pub lyrics_selected_line: usize,
     pub lyrics_missing_prompt: bool,
     pub lyrics_creation_declined: bool,
+    pub lyrics_preview_expanded: bool,
     pub online: OnlineState,
     duration_lookup: RefCell<HashMap<String, Option<u32>>>,
     cover_art_lookup: RefCell<HashMap<String, Option<Arc<[u8]>>>>,
@@ -200,6 +201,7 @@ impl TuneCore {
             lyrics_selected_line: 0,
             lyrics_missing_prompt: false,
             lyrics_creation_declined: false,
+            lyrics_preview_expanded: false,
             online: OnlineState::default(),
             duration_lookup: RefCell::new(HashMap::new()),
             cover_art_lookup: RefCell::new(HashMap::new()),
@@ -763,6 +765,15 @@ impl TuneCore {
     pub fn set_header_section(&mut self, section: HeaderSection) {
         self.header_section = section;
         self.set_status(&format!("Section: {}", self.header_section.label()));
+    }
+
+    pub fn toggle_lyrics_preview(&mut self) {
+        self.lyrics_preview_expanded = !self.lyrics_preview_expanded;
+        self.set_status(if self.lyrics_preview_expanded {
+            "Lyrics preview shown"
+        } else {
+            "Lyrics preview hidden"
+        });
     }
 
     pub fn cycle_stats_range(&mut self) {

@@ -22,6 +22,8 @@ use time::{OffsetDateTime, UtcOffset};
 
 const APP_TITLE: &str = "TuneTUI";
 const APP_VERSION: &str = "v1.0.0-alpha-3";
+const SONG_INFO_PREVIEW_HINT_LINE: u16 = 10;
+const LYRICS_PREVIEW_TOGGLE_BADGE: &str = " Ctrl+J ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitTarget {
@@ -43,6 +45,7 @@ pub enum HitTarget {
     VolumeUp,
     VolumeBar { x: u16, width: u16 },
     TimelineBar { x: u16, width: u16 },
+    ToggleLyricsPreview,
     ActionRow(usize),
     ActionPanelBackground,
     ActionPanelInside,
@@ -325,22 +328,26 @@ fn palette(theme: Theme) -> ThemePalette {
 pub fn library_rect(area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(20)])
+        .split(area);
+
+    let columns = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
+        .split(vertical[1]);
+
+    let left = Layout::default()
+        .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
             Constraint::Min(8),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Length(3),
         ])
-        .split(area);
+        .split(columns[0]);
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
-        .split(vertical[1]);
-
-    body[0]
+    left[0]
 }
 
 pub fn draw(
@@ -409,6 +416,34 @@ pub fn draw(
     frame.render_widget(Clear, body[1]);
 
     if core.header_section == HeaderSection::Library {
+        let content = Rect {
+            x: vertical[1].x,
+            y: vertical[1].y,
+            width: vertical[1].width,
+            height: vertical[1]
+                .height
+                .saturating_add(vertical[2].height)
+                .saturating_add(vertical[3].height)
+                .saturating_add(vertical[4].height)
+                .saturating_add(vertical[5].height),
+        };
+        let columns = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(66), Constraint::Percentage(34)])
+            .split(content);
+        let left_stack = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(8),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(3),
+            ])
+            .split(columns[0]);
+        let library_area = left_stack[0];
+        let song_column_area = columns[1];
+
         let list_items: Vec<ListItem> = core
             .browser_entries
             .iter()
@@ -463,9 +498,9 @@ pub fn draw(
             colors.text,
             colors.border,
         );
-        frame.render_widget(block, body[0]);
+        frame.render_widget(block, library_area);
 
-        let library_inner = body[0].inner(Margin {
+        let library_inner = library_area.inner(Margin {
             vertical: 1,
             horizontal: 1,
         });
@@ -539,7 +574,7 @@ pub fn draw(
             let mut scrollbar_state = ScrollbarState::new(total_library_rows)
                 .position(state.offset())
                 .viewport_content_length(library_viewport_lines);
-            frame.render_stateful_widget(scrollbar, body[0], &mut scrollbar_state);
+            frame.render_stateful_widget(scrollbar, library_area, &mut scrollbar_state);
         }
 
         let now_playing = audio.current_track().or_else(|| core.current_path());
@@ -631,7 +666,22 @@ pub fn draw(
                 format!("Length  {selected_length}"),
                 Style::default().fg(colors.muted),
             )),
+            Line::from(""),
+            song_info_lyrics_preview_hint_line(&colors),
         ];
+
+        let right_chunks = if core.lyrics_preview_expanded {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(8), Constraint::Length(4)])
+                .split(song_column_area)
+        } else {
+            Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Percentage(100)])
+                .split(song_column_area)
+        };
+        let song_info_area = right_chunks[0];
 
         frame.render_widget(
             panel_block(
@@ -640,15 +690,15 @@ pub fn draw(
                 colors.text,
                 colors.border,
             ),
-            body[1],
+            song_info_area,
         );
 
-        let info_inner = body[1].inner(Margin {
+        let info_inner = song_info_area.inner(Margin {
             vertical: 1,
             horizontal: 1,
         });
         if info_inner.width > 0 && info_inner.height > 0 {
-            let details_height = info_inner.height.min(9);
+            let details_height = info_inner.height.min(11);
             let cover_height = info_inner.height.saturating_sub(details_height);
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -672,11 +722,65 @@ pub fn draw(
 
             if chunks[1].height > 0 {
                 frame.render_widget(
-                    Paragraph::new(info_text).wrap(Wrap { trim: true }),
+                    Paragraph::new(info_text).wrap(Wrap { trim: false }),
                     chunks[1],
                 );
+                register_lyrics_preview_toggle_hint(chunks[1]);
             }
         }
+
+        if core.lyrics_preview_expanded && right_chunks.len() > 1 {
+            let preview = Paragraph::new(lyric_preview_lines(core, audio.position(), &colors))
+                .block(panel_block(
+                    "Lyric Preview",
+                    colors.content_panel_bg,
+                    colors.text,
+                    colors.border,
+                ))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(preview, right_chunks[1]);
+        }
+
+        draw_timeline_panel(frame, left_stack[1], core, audio, &colors);
+
+        let control_block = Paragraph::new(control_line(audio, 16, &colors))
+            .block(panel_block(
+                "Control",
+                colors.panel_bg,
+                colors.text,
+                colors.border,
+            ))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(control_block, left_stack[2]);
+        register_control_line_hits(left_stack[2], 16);
+
+        let selection_block = Paragraph::new(selection_actions_line(&colors))
+            .block(panel_block(
+                "Selection",
+                colors.panel_bg,
+                colors.text,
+                colors.border,
+            ))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: true });
+        frame.render_widget(selection_block, left_stack[3]);
+        register_selection_action_hits(left_stack[3]);
+
+        let footer = Paragraph::new(Line::from(vec![
+            Span::styled(
+                "Keys: Enter Play, Backspace Back, Ctrl+F Search, / Actions, T Tray, Ctrl+C Quit",
+                Style::default().fg(colors.muted),
+            ),
+            Span::styled("  |  ", Style::default().fg(colors.muted)),
+            Span::styled(core.status.as_str(), Style::default().fg(colors.text)),
+        ]))
+        .block(panel_block(
+            "Message",
+            colors.panel_bg,
+            colors.text,
+            colors.border,
+        ));
+        frame.render_widget(footer, left_stack[4]);
     } else {
         match core.header_section {
             HeaderSection::Library => {}
@@ -690,54 +794,52 @@ pub fn draw(
                 draw_online_section(frame, &body, colors, core, &overlays);
             }
         }
+
+        draw_timeline_panel(frame, vertical[2], core, audio, &colors);
+
+        let control_block = Paragraph::new(control_line(audio, 16, &colors))
+            .block(panel_block(
+                "Control",
+                colors.panel_bg,
+                colors.text,
+                colors.border,
+            ))
+            .wrap(Wrap { trim: true });
+        frame.render_widget(control_block, vertical[3]);
+        register_control_line_hits(vertical[3], 16);
+
+        let selection_block = Paragraph::new(selection_actions_line(&colors))
+            .block(panel_block(
+                "Selection",
+                colors.panel_bg,
+                colors.text,
+                colors.border,
+            ))
+            .alignment(Alignment::Left)
+            .wrap(Wrap { trim: true });
+        frame.render_widget(selection_block, vertical[4]);
+        register_selection_action_hits(vertical[4]);
+
+        let key_hint = if core.header_section == HeaderSection::Stats {
+            "Keys: Left/Right Focus, Enter Cycle, Type filters, Backspace Edit, Shift+Up Top"
+        } else if core.header_section == HeaderSection::Lyrics {
+            "Keys: Ctrl+E Edit/view, Up/Down Line, Enter New line, Ctrl+T Timestamp, / Actions"
+        } else {
+            "Keys: Enter Select/join, Ctrl+N Shared now, Ctrl+L Leave room"
+        };
+        let footer = Paragraph::new(Line::from(vec![
+            Span::styled(key_hint, Style::default().fg(colors.muted)),
+            Span::styled("  |  ", Style::default().fg(colors.muted)),
+            Span::styled(core.status.as_str(), Style::default().fg(colors.text)),
+        ]))
+        .block(panel_block(
+            "Message",
+            colors.panel_bg,
+            colors.text,
+            colors.border,
+        ));
+        frame.render_widget(footer, vertical[5]);
     }
-
-    draw_timeline_panel(frame, vertical[2], core, audio, &colors);
-
-    let control_block = Paragraph::new(control_line(audio, 16, &colors))
-        .block(panel_block(
-            "Control",
-            colors.panel_bg,
-            colors.text,
-            colors.border,
-        ))
-        .wrap(Wrap { trim: true });
-    frame.render_widget(control_block, vertical[3]);
-    register_control_line_hits(vertical[3], 16);
-
-    let selection_block = Paragraph::new(selection_actions_line(&colors))
-        .block(panel_block(
-            "Selection",
-            colors.panel_bg,
-            colors.text,
-            colors.border,
-        ))
-        .alignment(Alignment::Left)
-        .wrap(Wrap { trim: true });
-    frame.render_widget(selection_block, vertical[4]);
-    register_selection_action_hits(vertical[4]);
-
-    let key_hint = if core.header_section == HeaderSection::Stats {
-        "Keys: Left/Right Focus, Enter Cycle, Type filters, Backspace Edit, Shift+Up Top"
-    } else if core.header_section == HeaderSection::Lyrics {
-        "Keys: Ctrl+E Edit/view, Up/Down Line, Enter New line, Ctrl+T Timestamp, / Actions"
-    } else if core.header_section == HeaderSection::Online {
-        "Keys: Enter Select/join, Ctrl+N Shared now, Ctrl+L Leave room"
-    } else {
-        "Keys: Enter Play, Backspace Back, Ctrl+F Search, / Actions, T Tray, Ctrl+C Quit"
-    };
-    let footer = Paragraph::new(Line::from(vec![
-        Span::styled(key_hint, Style::default().fg(colors.muted)),
-        Span::styled("  |  ", Style::default().fg(colors.muted)),
-        Span::styled(core.status.as_str(), Style::default().fg(colors.text)),
-    ]))
-    .block(panel_block(
-        "Message",
-        colors.panel_bg,
-        colors.text,
-        colors.border,
-    ));
-    frame.render_widget(footer, vertical[5]);
 
     if let Some(panel) = action_panel {
         draw_action_panel(frame, panel, &colors);
@@ -1505,7 +1607,7 @@ fn register_header_tab_hits(area: Rect) {
         return;
     }
     // Right-aligned: tabs start at area.x + (area.width - total).
-    let mut x = area.x + (area.width - total);
+    let mut x = area.x;
     let sections = [
         HeaderSection::Library,
         HeaderSection::Lyrics,
@@ -2097,6 +2199,82 @@ fn draw_lyrics_section(
         ))
         .wrap(Wrap { trim: true });
     frame.render_widget(right, horizontal[1]);
+}
+
+fn lyric_preview_lines(
+    core: &TuneCore,
+    position: Option<Duration>,
+    colors: &ThemePalette,
+) -> Vec<Line<'static>> {
+    let Some(doc) = core.lyrics.as_ref() else {
+        return vec![
+            Line::from(Span::styled(
+                "Lyrics were not detected.",
+                Style::default().fg(colors.text),
+            )),
+            Line::from(Span::styled(
+                "Press J to open Lyrics and add them.",
+                Style::default().fg(colors.muted),
+            )),
+        ];
+    };
+
+    if doc.lines.is_empty() {
+        return vec![Line::from(Span::styled(
+            "Lyrics loaded, but no lines are available.",
+            Style::default().fg(colors.muted),
+        ))];
+    }
+
+    let Some(active_idx) = core.active_lyric_line_for_position(position) else {
+        return vec![Line::from(Span::styled(
+            "Lyrics loaded. Waiting for synced line...",
+            Style::default().fg(colors.muted),
+        ))];
+    };
+
+    let text = doc
+        .lines
+        .get(active_idx)
+        .map(|line| line.text.trim())
+        .filter(|text| !text.is_empty())
+        .unwrap_or("(blank lyric line)");
+
+    vec![Line::from(Span::styled(
+        text.to_string(),
+        Style::default()
+            .fg(colors.accent)
+            .add_modifier(Modifier::BOLD),
+    ))]
+}
+
+fn song_info_lyrics_preview_hint_line(colors: &ThemePalette) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            LYRICS_PREVIEW_TOGGLE_BADGE,
+            Style::default()
+                .fg(colors.text)
+                .bg(Color::Rgb(95, 71, 138))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" toggles Lyric Preview", Style::default().fg(colors.muted)),
+    ])
+}
+
+fn register_lyrics_preview_toggle_hint(area: Rect) {
+    let y = area.y.saturating_add(SONG_INFO_PREVIEW_HINT_LINE);
+    if y >= area.y.saturating_add(area.height) {
+        return;
+    }
+    hit_map_push(
+        Rect {
+            x: area.x,
+            y,
+            width: LYRICS_PREVIEW_TOGGLE_BADGE.chars().count() as u16,
+            height: 1,
+        },
+        HitTarget::ToggleLyricsPreview,
+    );
 }
 
 fn centered_scroll_top(focused: usize, viewport_height: usize) -> u16 {
@@ -2915,10 +3093,13 @@ fn draw_timeline_panel(
     let controls = timeline_controls_line(core, colors);
     let controls_width = (controls.width() as u16).min(inner.width);
     let gap_width = u16::from(controls_width > 0 && controls_width < inner.width);
-    let timeline_width = inner.width.saturating_sub(controls_width + gap_width);
+    let timeline_available = inner.width.saturating_sub(controls_width + gap_width);
+    let timeline_bar_width = usize::from(timeline_available.saturating_sub(16)).clamp(8, 42);
+    let timeline_width = (timeline_bar_width as u16)
+        .saturating_add(16)
+        .min(timeline_available);
 
     if timeline_width > 0 {
-        let timeline_bar_width = usize::from(timeline_width.saturating_sub(18)).clamp(8, 42);
         let timeline_area = Rect {
             x: inner.x,
             y: inner.y,
@@ -2936,15 +3117,15 @@ fn draw_timeline_panel(
 
     if controls_width > 0 {
         let controls_area = Rect {
-            x: inner.x + inner.width.saturating_sub(controls_width),
+            x: inner
+                .x
+                .saturating_add(timeline_width)
+                .saturating_add(gap_width),
             y: inner.y,
             width: controls_width,
             height: inner.height,
         };
-        frame.render_widget(
-            Paragraph::new(controls).alignment(Alignment::Right),
-            controls_area,
-        );
+        frame.render_widget(Paragraph::new(controls), controls_area);
         register_timeline_control_hits(controls_area, core);
     }
 
@@ -4119,6 +4300,60 @@ mod tests {
     #[test]
     fn editor_scroll_top_includes_header_offset() {
         assert_eq!(editor_scroll_top(30, 10, 5), 30);
+    }
+
+    #[test]
+    fn lyric_preview_shows_current_timed_line() {
+        let mut core = TuneCore::from_persisted(crate::model::PersistedState::default());
+        core.lyrics = Some(crate::lyrics::LyricsDocument {
+            lines: vec![
+                crate::lyrics::LyricLine {
+                    timestamp_ms: Some(1_000),
+                    text: String::from("first line"),
+                },
+                crate::lyrics::LyricLine {
+                    timestamp_ms: Some(2_000),
+                    text: String::from("current line"),
+                },
+            ],
+            source: crate::lyrics::LyricsSource::Sidecar,
+            precision: crate::lyrics::LyricsTimingPrecision::Line,
+        });
+        let colors = palette(Theme::Dark);
+
+        let text = lyric_preview_lines(&core, Some(Duration::from_millis(2_100)), &colors)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter())
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+
+        assert_eq!(text, "current line");
+    }
+
+    #[test]
+    fn lyric_preview_missing_lyrics_points_to_lyrics_page() {
+        let core = TuneCore::from_persisted(crate::model::PersistedState::default());
+        let colors = palette(Theme::Dark);
+
+        let text = lyric_preview_lines(&core, Some(Duration::from_millis(2_100)), &colors)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter())
+            .map(|span| span.content.into_owned())
+            .collect::<String>();
+
+        assert!(text.contains("Lyrics were not detected."));
+        assert!(text.contains("Press J to open Lyrics and add them."));
+    }
+
+    #[test]
+    fn song_info_lyrics_preview_hint_colors_only_key_badge() {
+        let colors = palette(Theme::Dark);
+        let line = song_info_lyrics_preview_hint_line(&colors);
+
+        assert_eq!(line.spans[0].content.as_ref(), " Ctrl+J ");
+        assert!(line.spans[0].style.bg.is_some());
+        assert_eq!(line.spans[1].content.as_ref(), " toggles Lyric Preview");
+        assert!(line.spans[1].style.bg.is_none());
     }
 
     #[test]

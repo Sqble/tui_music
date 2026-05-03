@@ -56,6 +56,7 @@ TuneTUI scans in the background, so the interface opens quickly while metadata c
 | Key | Action |
 |-----|--------|
 | `h` `j` `k` `l` | Switch pages: Library, Lyrics, Stats, Online |
+| `Ctrl+j` | Toggle the Lyric Preview box under Song Info |
 | `↑` `↓` | Navigate |
 | `Enter` | Open or play the selected item |
 | `Space` | Pause or resume |
@@ -119,6 +120,8 @@ Remote users can stream to each other through the room host connection; only the
 ## Lyrics
 
 TuneTUI reads synced lyrics from `.lrc` sidecars or embedded metadata. Sidecar lyrics are stored in the config directory under `lyrics/` and take precedence over embedded lyrics.
+
+The Library page can show a collapsible Lyric Preview under Song Info. If lyrics are not detected, the preview points you to press `j` and add them from the Lyrics page.
 
 | Key | Action |
 |-----|--------|

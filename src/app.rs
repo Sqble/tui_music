@@ -2079,6 +2079,9 @@ pub fn run_with_startup(startup: AppStartupOptions) -> Result<()> {
             if handle_stats_inline_input(&mut core, key) {
                 continue;
             }
+            if handle_lyrics_preview_shortcut(&mut core, key) {
+                continue;
+            }
             if handle_lyrics_inline_input(&mut core, &*audio, key) {
                 continue;
             }
@@ -2894,6 +2897,15 @@ fn handle_stats_inline_input(core: &mut TuneCore, key: KeyEvent) -> bool {
         }
         _ => false,
     }
+}
+
+fn handle_lyrics_preview_shortcut(core: &mut TuneCore, key: KeyEvent) -> bool {
+    if !key_event_matches_ctrl_char(&key, 'j') {
+        return false;
+    }
+
+    core.toggle_lyrics_preview();
+    true
 }
 
 fn handle_lyrics_inline_input(core: &mut TuneCore, audio: &dyn AudioEngine, key: KeyEvent) -> bool {
@@ -5263,6 +5275,9 @@ fn apply_left_click(
         }
         HitTarget::TimelineBar { x, width } => {
             seek_from_x(core, audio, online_runtime, mouse.column, x, width);
+        }
+        HitTarget::ToggleLyricsPreview => {
+            core.toggle_lyrics_preview();
         }
         HitTarget::LibrarySearchBar => {
             if core.header_section == HeaderSection::Library {
@@ -9293,6 +9308,48 @@ mod tests {
     }
 
     #[test]
+    fn mouse_left_click_on_lyrics_preview_hint_toggles() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let mut audio = TestAudioEngine::new();
+        let mut panel = ActionPanelState::Closed;
+        let mut recent_root_actions = Vec::new();
+        let mut online_runtime = test_online_runtime();
+
+        let mut hit_map = crate::ui::HitMap::default();
+        hit_map.push(
+            ratatui::prelude::Rect {
+                x: 4,
+                y: 8,
+                width: 8,
+                height: 1,
+            },
+            crate::ui::HitTarget::ToggleLyricsPreview,
+        );
+
+        let mut mouse_state = MouseState::default();
+        let mut pending_scrub_delta: i64 = 0;
+        handle_mouse_with_panel(
+            &mut core,
+            &mut audio,
+            &mut panel,
+            &mut recent_root_actions,
+            &mut online_runtime,
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 7,
+                row: 8,
+                modifiers: KeyModifiers::NONE,
+            },
+            ratatui::prelude::Rect::default(),
+            &hit_map,
+            &mut mouse_state,
+            &mut pending_scrub_delta,
+        );
+
+        assert!(core.lyrics_preview_expanded);
+    }
+
+    #[test]
     fn mouse_left_click_on_volume_up_raises_volume() {
         let mut core = TuneCore::from_persisted(PersistedState::default());
         let mut audio = TestAudioEngine::new();
@@ -11036,6 +11093,34 @@ mod tests {
         assert_eq!(
             header_section_shortcut(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL)),
             None
+        );
+    }
+
+    #[test]
+    fn ctrl_j_toggles_lyrics_preview_without_changing_page() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.header_section = HeaderSection::Library;
+
+        assert!(handle_lyrics_preview_shortcut(
+            &mut core,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL)
+        ));
+
+        assert!(core.lyrics_preview_expanded);
+        assert_eq!(core.header_section, HeaderSection::Library);
+    }
+
+    #[test]
+    fn plain_j_remains_lyrics_page_shortcut() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+
+        assert!(!handle_lyrics_preview_shortcut(
+            &mut core,
+            KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)
+        ));
+        assert_eq!(
+            header_section_shortcut(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE)),
+            Some(HeaderSection::Lyrics)
         );
     }
 
