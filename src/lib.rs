@@ -7,5 +7,6 @@ pub mod lyrics;
 pub mod model;
 pub mod online;
 pub mod online_net;
+pub mod screenshots;
 pub mod stats;
 pub mod ui;

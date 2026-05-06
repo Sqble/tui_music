@@ -125,6 +125,13 @@ p{margin-bottom:16px;color:var(--f)}
             <p class="hero-overview">
                 TuneTUI uses a folder-based library—add your music directories and browse as you would in a file manager. Listen together with friends over the public server at tunetui.online. Stats tracking records your listening history, and lyrics stay in sync with playback.
             </p>
+            <figure class="screenshot-frame hero-screenshot">
+                <picture>
+                    <source media="(max-width: 768px)" srcset="assets/screenshots/tunetui-library-90x30-scale100.svg">
+                    <img src="assets/screenshots/tunetui-library-120x36-scale100.svg" alt="TuneTUI Library page with playback controls, queue actions, and song info" loading="lazy">
+                </picture>
+                <figcaption>Library, now playing, queue shortcuts, and playback controls in one terminal view.</figcaption>
+            </figure>
             <footer class="section-footer">
                 <span></span>
                 <a href="#getting-started" class="btn btn-secondary nav-page">
@@ -229,6 +236,13 @@ cargo build --release</code></pre>
 
             <h2><span class="prompt">›</span> Actions Panel</h2>
             <p>Press <kbd>/</kbd> to open. Type to filter actions. Use <kbd>↑</kbd> / <kbd>↓</kbd> to navigate, <kbd>Enter</kbd> to select.</p>
+            <figure class="screenshot-frame">
+                <picture>
+                    <source media="(max-width: 768px)" srcset="assets/screenshots/tunetui-actions-90x30-scale100.svg">
+                    <img src="assets/screenshots/tunetui-actions-120x36-scale100.svg" alt="TuneTUI actions panel filtered to quality, theme, and queue commands" loading="lazy">
+                </picture>
+                <figcaption>The actions panel gives searchable access to themes, audio tools, queues, and settings.</figcaption>
+            </figure>
             <div class="keybindings">
                 <div class="keybind"><kbd>Enter</kbd> <span>Execute selected action</span></div>
                 <div class="keybind"><kbd>Esc</kbd> <span>Close actions panel</span></div>
@@ -245,6 +259,13 @@ cargo build --release</code></pre>
             </div>
 
             <h2><span class="prompt">›</span> Stats Tab</h2>
+            <figure class="screenshot-frame">
+                <picture>
+                    <source media="(max-width: 768px)" srcset="assets/screenshots/tunetui-stats-90x30-scale100.svg">
+                    <img src="assets/screenshots/tunetui-stats-120x36-scale100.svg" alt="TuneTUI stats page with listening trend and recent play log" loading="lazy">
+                </picture>
+                <figcaption>Stats summarize listening time, plays, trends, filters, and recent history.</figcaption>
+            </figure>
             <div class="keybindings">
                 <div class="keybind"><kbd>←</kbd> <kbd>→</kbd> <span>Move filter focus (range/sort)</span></div>
                 <div class="keybind"><kbd>Enter</kbd> <span>Cycle focused filter</span></div>
@@ -328,6 +349,13 @@ cargo build --release</code></pre>
 
             <h2><span class="prompt">›</span> Lyrics</h2>
             <p>TuneTUI looks for lyrics in this order:</p>
+            <figure class="screenshot-frame">
+                <picture>
+                    <source media="(max-width: 768px)" srcset="assets/screenshots/tunetui-lyrics-90x30-scale100.svg">
+                    <img src="assets/screenshots/tunetui-lyrics-120x36-scale100.svg" alt="TuneTUI lyrics page with synced lines and editor mode" loading="lazy">
+                </picture>
+                <figcaption>Synced lyrics can be viewed, edited, timestamped, and saved as sidecar LRC files.</figcaption>
+            </figure>
             <ol>
                 <li><code>.lrc</code> sidecar file in the config lyrics folder</li>
                 <li>Embedded lyrics in audio file metadata</li>
@@ -358,6 +386,13 @@ cargo build --release</code></pre>
             
             <h2><span class="prompt">›</span> Using the Public Server</h2>
             <p>The server at <strong>tunetui.online</strong> is already running and available for anyone to use. No setup required.</p>
+            <figure class="screenshot-frame">
+                <picture>
+                    <source media="(max-width: 768px)" srcset="assets/screenshots/tunetui-online-90x30-scale100.svg">
+                    <img src="assets/screenshots/tunetui-online-120x36-scale100.svg" alt="TuneTUI Online page with room controls, participants, and shared queue" loading="lazy">
+                </picture>
+                <figcaption>Online rooms show participants, stream quality, room codes, drift, and the shared queue.</figcaption>
+            </figure>
 
             <h2><span class="prompt">›</span> Hosting a Room</h2>
             <ol>

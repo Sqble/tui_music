@@ -25,6 +25,9 @@ jobs:
       - name: Build release binary
         run: cargo build --release
 
+      - name: Generate docs screenshots
+        run: bash scripts/generate-screenshots.sh --no-build --output-dir docs/assets/screenshots
+
       - name: Copy binary to VPS
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -34,6 +37,15 @@ jobs:
           source: target/release/tune
           target: /tmp/tune-deploy
           strip_components: 2
+
+      - name: Copy docs screenshots to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: docs/assets/screenshots
+          target: /tmp/tune-doc-assets
 
       - name: Deploy to VPS via SSH
         uses: appleboy/ssh-action@v1.2.0
@@ -47,6 +59,10 @@ jobs:
             git pull origin master
             mkdir -p /home/test_env/tui_music/target/release
             install -m 755 /tmp/tune-deploy/tune /home/test_env/tui_music/target/release/tune
+            mkdir -p /home/test_env/tui_music/docs/assets/screenshots
+            rm -f /home/test_env/tui_music/docs/assets/screenshots/tunetui-*.svg
+            rm -f /home/test_env/tui_music/docs/assets/screenshots/tunetui-screenshots-manifest.txt
+            cp -a /tmp/tune-doc-assets/docs/assets/screenshots/. /home/test_env/tui_music/docs/assets/screenshots/
             systemctl daemon-reload
             systemctl restart tune
             sleep 1

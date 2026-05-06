@@ -8,10 +8,24 @@ struct CliArgs {
     ip: Option<String>,
     host_ip: Option<String>,
     room_port_range: Option<(u16, u16)>,
+    screenshots: bool,
+    screenshot_pages: Vec<String>,
+    screenshot_sizes: Vec<(u16, u16)>,
+    screenshot_font_scale: Option<f32>,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = parse_args(std::env::args().skip(1).collect())?;
+    if args.screenshots {
+        return tune::screenshots::generate_to_executable_dir(
+            tune::screenshots::ScreenshotOptions {
+                pages: args.screenshot_pages,
+                sizes: args.screenshot_sizes,
+                font_scale: args.screenshot_font_scale.unwrap_or(1.0),
+            },
+        );
+    }
+
     let ip_provided = args.ip.is_some();
     let host_addr = args
         .host_ip
@@ -89,6 +103,39 @@ fn parse_args(args: Vec<String>) -> anyhow::Result<CliArgs> {
                 };
                 out.room_port_range = Some(parse_port_range(value)?);
             }
+            "--screenshots" => out.screenshots = true,
+            "--screenshot-pages" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    anyhow::bail!("--screenshot-pages requires comma-separated page names");
+                };
+                out.screenshot_pages = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+            "--screenshot-size" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    anyhow::bail!("--screenshot-size requires COLSxROWS value");
+                };
+                out.screenshot_sizes.push(parse_screenshot_size(value)?);
+            }
+            "--screenshot-font-scale" => {
+                index += 1;
+                let Some(value) = args.get(index) else {
+                    anyhow::bail!("--screenshot-font-scale requires a positive number");
+                };
+                let scale = value
+                    .parse::<f32>()
+                    .map_err(|_| anyhow::anyhow!("invalid screenshot font scale"))?;
+                if !scale.is_finite() || scale <= 0.0 {
+                    anyhow::bail!("--screenshot-font-scale must be positive");
+                }
+                out.screenshot_font_scale = Some(scale);
+            }
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -102,6 +149,16 @@ fn parse_args(args: Vec<String>) -> anyhow::Result<CliArgs> {
     }
     if out.room_port_range.is_some() && !out.host {
         anyhow::bail!("--room-port-range requires --host");
+    }
+    if !out.screenshots
+        && (!out.screenshot_pages.is_empty()
+            || !out.screenshot_sizes.is_empty()
+            || out.screenshot_font_scale.is_some())
+    {
+        anyhow::bail!("screenshot options require --screenshots");
+    }
+    if out.screenshots && (out.host || out.app || out.ip.is_some() || out.host_ip.is_some()) {
+        anyhow::bail!("--screenshots cannot be combined with app or host options");
     }
     if out.host && out.host_ip.is_some() && out.ip.is_some() {
         anyhow::bail!(
@@ -127,6 +184,14 @@ fn print_help() {
         "  --room-port-range start-end   Room port range for host mode (default {}-{})",
         DEFAULT_ROOM_PORT_RANGE.0, DEFAULT_ROOM_PORT_RANGE.1
     );
+    println!(
+        "  --screenshots       Generate seeded documentation screenshots beside this executable"
+    );
+    println!(
+        "  --screenshot-pages pages   Comma-separated pages: library,lyrics,stats,online,actions,all"
+    );
+    println!("  --screenshot-size COLSxROWS   Terminal capture size; may be repeated");
+    println!("  --screenshot-font-scale N     SVG terminal font scale (default 1.0)");
 }
 
 fn normalize_home_server_addr(raw: &str) -> String {
@@ -177,10 +242,30 @@ fn parse_port_range(raw: &str) -> anyhow::Result<(u16, u16)> {
     Ok((start, end))
 }
 
+fn parse_screenshot_size(raw: &str) -> anyhow::Result<(u16, u16)> {
+    let trimmed = raw.trim();
+    let Some((cols_raw, rows_raw)) = trimmed.split_once(['x', 'X']) else {
+        anyhow::bail!("screenshot size must be COLSxROWS");
+    };
+    let cols = cols_raw
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| anyhow::anyhow!("invalid screenshot columns"))?;
+    let rows = rows_raw
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| anyhow::anyhow!("invalid screenshot rows"))?;
+    if cols < 60 || rows < 20 {
+        anyhow::bail!("screenshot size must be at least 60x20");
+    }
+    Ok((cols, rows))
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         local_home_target_from_bind_addr, normalize_home_server_addr, parse_args, parse_port_range,
+        parse_screenshot_size,
     };
 
     fn args(values: &[&str]) -> Vec<String> {
@@ -213,6 +298,17 @@ mod tests {
         assert!(parse_port_range("9100-9000").is_err());
         assert!(parse_port_range("abc-def").is_err());
         assert!(parse_port_range("0-10").is_err());
+    }
+
+    #[test]
+    fn parse_screenshot_size_accepts_cols_by_rows() {
+        assert_eq!(parse_screenshot_size("120x36").unwrap(), (120, 36));
+        assert_eq!(parse_screenshot_size("90X30").unwrap(), (90, 30));
+    }
+
+    #[test]
+    fn screenshot_options_require_screenshot_mode() {
+        assert!(parse_args(args(&["--screenshot-size", "120x36"])).is_err());
     }
 
     #[test]
@@ -263,6 +359,25 @@ mod tests {
         assert!(!parsed.host);
         assert_eq!(parsed.ip.as_deref(), Some("192.168.1.100:7878"));
         assert_eq!(parsed.host_ip, None);
+    }
+
+    #[test]
+    fn parse_args_accepts_screenshot_mode() {
+        let parsed = parse_args(args(&[
+            "--screenshots",
+            "--screenshot-pages",
+            "library,stats",
+            "--screenshot-size",
+            "120x36",
+            "--screenshot-font-scale",
+            "1.2",
+        ]))
+        .unwrap();
+
+        assert!(parsed.screenshots);
+        assert_eq!(parsed.screenshot_pages, ["library", "stats"]);
+        assert_eq!(parsed.screenshot_sizes, [(120, 36)]);
+        assert_eq!(parsed.screenshot_font_scale, Some(1.2));
     }
 
     #[test]

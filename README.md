@@ -8,6 +8,13 @@
 
 TuneTUI is a fast terminal music player for people who want a real desktop music workflow without leaving the terminal. Point it at your music folder, build playlists, follow synced lyrics, inspect audio quality, and even listen together with friends from the Online tab.
 
+<p align="center">
+  <picture>
+    <source media="(max-width: 700px)" srcset="https://tunetui.online/assets/screenshots/tunetui-library-90x30-scale100.svg">
+    <img src="https://tunetui.online/assets/screenshots/tunetui-library-120x36-scale100.svg" alt="TuneTUI library page with seeded playback, queue, and controls" width="900">
+  </picture>
+</p>
+
 visitor count:
 
 ![visitor count](https://count.getloli.com/@:tunetui)
@@ -207,6 +214,22 @@ cargo fuzz run playback_commands
 - Contribution checklist: `CONTRIBUTING.md`
 - One-command local verification on Linux/macOS: `bash scripts/verify.sh`
 - One-command local verification on Windows: `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1`
+
+## Screenshot Automation
+
+Generate deterministic seeded SVG screenshots for README/docs assets:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/generate-screenshots.ps1
+```
+
+```bash
+bash scripts/generate-screenshots.sh
+```
+
+The scripts build `tune`, render the real TUI off-screen, and write images beside the executable in `target/release/`. The default set covers the README hero Library view plus Lyrics, Stats, Online, and Actions views for docs. Use `-Pages` / `--pages`, `-Resolution` / `--resolution`, and `-FontScale` / `--font-scale` to customize captures.
+
+On deploy, `.github/workflows/deploy.yml` regenerates screenshots, copies them to `docs/assets/screenshots`, uploads them to the VPS, and installs them under the served docs directory. README images use the stable `https://tunetui.online/assets/screenshots/` URLs, so the deployed screenshots stay current automatically.
 
 ## License
 
