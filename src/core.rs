@@ -2013,8 +2013,9 @@ impl TuneCore {
 
     fn refresh_browser_entries(&mut self) {
         let mut entries = Vec::with_capacity(self.tracks.len().max(self.folders.len()));
+        let showing_library_search = !self.library_search_query.is_empty();
 
-        if !self.library_search_query.is_empty() {
+        if showing_library_search {
             let query_lower = self.library_search_query.to_ascii_lowercase();
             let queue = self.metadata_sorted_library_queue();
             entries.reserve_exact(queue.len());
@@ -2210,7 +2211,7 @@ impl TuneCore {
         }
 
         self.browser_entries = entries;
-        if self.browser_entries.is_empty() {
+        if showing_library_search || self.browser_entries.is_empty() {
             self.selected_browser = 0;
         } else {
             self.selected_browser = self.selected_browser.min(self.browser_entries.len() - 1);
@@ -3499,6 +3500,53 @@ mod tests {
         core.refresh_browser_entries();
         assert_eq!(core.browser_entries.len(), 1);
         assert_eq!(core.browser_entries[0].label, "Two");
+    }
+
+    #[test]
+    fn adding_search_result_to_queue_does_not_keep_pre_search_selection_index() {
+        let mut core = TuneCore::from_persisted_with_tracks(
+            PersistedState::default(),
+            vec![
+                Track {
+                    path: PathBuf::from("alpha.mp3"),
+                    title: String::from("Alpha Song"),
+                    artist: None,
+                    album: None,
+                },
+                Track {
+                    path: PathBuf::from("beta.mp3"),
+                    title: String::from("Beta Song"),
+                    artist: None,
+                    album: None,
+                },
+                Track {
+                    path: PathBuf::from("gamma.mp3"),
+                    title: String::from("Gamma Song"),
+                    artist: None,
+                    album: None,
+                },
+            ],
+        );
+        core.browser_all_songs = true;
+        core.refresh_browser_entries();
+
+        // Simulate the user hovering Beta before Ctrl+F. All-songs has a Back row,
+        // so Beta is selected at browser index 2 before search mode rebuilds rows.
+        core.selected_browser = 2;
+        assert_eq!(
+            core.browser_entries[core.selected_browser].label,
+            "Beta Song"
+        );
+
+        core.library_search_focused = true;
+        core.library_search_query = String::from("song");
+        core.refresh_browser_view();
+
+        core.queue.clear();
+        core.add_selected_to_local_queue_end();
+
+        assert_eq!(core.queue, vec![0]);
+        assert_eq!(core.selected_browser, 0);
     }
 
     #[test]
