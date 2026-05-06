@@ -4,7 +4,7 @@ use crate::lyrics::{LyricLine, LyricsDocument, LyricsSource, LyricsTimingPrecisi
 use crate::model::{PersistedState, Playlist, RepeatMode, Theme, Track};
 use crate::online::{OnlineRoomMode, OnlineSession, Participant, QueueDelivery, SharedQueueItem};
 use crate::stats::{ListenSessionRecord, StatsQuery, StatsRange, StatsSort, StatsStore};
-use crate::ui::{ActionPanelView, OverlayViews};
+use crate::ui::{ActionPanelView, OnlineRoomFieldView, OverlayViews};
 use anyhow::{Context, Result};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -166,6 +166,11 @@ fn render_page_svg(page: ScreenshotPage, size: (u16, u16), font_scale: f32) -> R
         )
     });
     let action_panel = (page == ScreenshotPage::Actions).then(seeded_action_panel);
+    let online_room_field = (page == ScreenshotPage::Online).then(|| OnlineRoomFieldView {
+        label: String::from("Room name"),
+        value: String::from("docs-listening-lounge"),
+        secret: false,
+    });
 
     terminal.draw(|frame| {
         crate::ui::draw(
@@ -179,7 +184,7 @@ fn render_page_svg(page: ScreenshotPage, size: (u16, u16), font_scale: f32) -> R
                 room_directory_view: None,
                 online_password_prompt: None,
                 host_invite_modal: None,
-                online_room_field: None,
+                online_room_field: online_room_field.as_ref(),
                 room_code_revealed: page == ScreenshotPage::Online,
             },
         );
@@ -483,17 +488,30 @@ fn seeded_action_panel() -> ActionPanelView {
     ActionPanelView {
         title: String::from("Actions"),
         hint: String::from("Type to filter. Enter runs the selected action."),
-        search_query: Some(String::from("quality theme queue")),
-        selected: 1,
+        search_query: Some(String::new()),
+        selected: 7,
         options: vec![
-            String::from("Open audio quality spectrograph"),
-            String::from("Theme: Galaxy"),
-            String::from("Add selected to queue next"),
-            String::from("Add selected to Online shared queue"),
-            String::from("Cycle stream quality: Lossless"),
-            String::from("Toggle lyric preview"),
-            String::from("Reload audio driver"),
-            String::from("Show public online rooms"),
+            String::from("Recent"),
+            String::from("  View audio quality + spectrograph"),
+            String::from("  Theme"),
+            String::from("Settings"),
+            String::from("  Playback settings"),
+            String::from("  Audio driver settings"),
+            String::from("Queue"),
+            String::from("  Move selected queue item to next"),
+            String::from("  Remove selected queue item"),
+            String::from("Library"),
+            String::from("  Edit selected track metadata"),
+            String::from("  View audio quality + spectrograph"),
+            String::from("  Rescan library"),
+            String::from("Appearance"),
+            String::from("  Theme"),
+            String::from("Stats"),
+            String::from("  Clear listen history (backup)"),
+            String::from("Lyrics"),
+            String::from("  Import TXT to lyrics"),
+            String::from("Actions"),
+            String::from("  Close panel"),
         ],
     }
 }
