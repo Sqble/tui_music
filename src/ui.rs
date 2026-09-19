@@ -1939,7 +1939,7 @@ fn draw_online_section(
     }
     if session.shared_queue.is_empty() {
         right_lines.push(Line::from(Span::styled(
-            "Queue empty. Press Ctrl+s in Library to add selected.",
+            "Queue empty. Press Ctrl+u in Library to add selected.",
             Style::default().fg(colors.muted),
         )));
     }
