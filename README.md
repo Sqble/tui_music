@@ -89,7 +89,7 @@ Playlist and queue shortcuts:
 | `Ctrl+y` | Add selection to queue next |
 | `Ctrl+s` | Add selection to the Online shared queue |
 
-Queue views appear in the Library root as `[QUEUE] Local Queue` and, when online, `[QUEUE] Shared Queue`. The actions panel also includes queue remove/move tools and the audio quality spectrograph action.
+Queue views appear in the Library root as `[QUEUE] Local Queue` and, when online, `[QUEUE] Shared Queue`. Inside an online room the local queue is removed entirely: only `[QUEUE] Shared Queue` appears, and the normal queue shortcuts (`Ctrl+u`/`Ctrl+y`) add to the shared queue. The actions panel also includes queue remove/move tools and the audio quality spectrograph action.
 
 ## Listen Together
 
