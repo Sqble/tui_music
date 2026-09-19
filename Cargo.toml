@@ -3,6 +3,12 @@ name = "tune"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "A fast terminal music player with playlists, synced lyrics, and online listening rooms"
+repository = "https://github.com/Sqble/tui_music"
+homepage = "https://tunetui.online"
+keywords = ["music", "player", "tui", "terminal", "audio"]
+categories = ["command-line-utilities", "multimedia"]
+exclude = ["docs/assets/screenshots/*"]
 
 [dependencies]
 anyhow = "1.0.102"
