@@ -4347,6 +4347,11 @@ fn drain_online_network_events(
                     );
                 }
                 core.online.session = Some(session);
+                if core.browser_local_queue {
+                    // A room appeared via network sync while the local queue
+                    // view was open: the local queue is removed in a room.
+                    core.close_local_queue_view();
+                }
                 core.dirty = true;
             }
         }
@@ -5613,12 +5618,19 @@ fn open_add_now_playing_to_playlist(core: &mut TuneCore, panel: &mut ActionPanel
     core.dirty = true;
 }
 
+/// Queue management targets the shared room queue whenever the user is in an
+/// online room: the local queue is removed there, so the normal add-to-queue
+/// controls operate on the shared queue directly.
+fn queue_actions_target_shared_queue(core: &TuneCore) -> bool {
+    core.viewing_shared_queue() || core.in_online_room()
+}
+
 fn add_selected_to_queue_end(
     core: &mut TuneCore,
     audio: &dyn AudioEngine,
     online_runtime: Option<&mut OnlineRuntime>,
 ) {
-    if core.viewing_shared_queue() {
+    if queue_actions_target_shared_queue(core) {
         let added = core.add_selected_to_shared_queue_end();
         if let Some(network) = online_runtime.and_then(|runtime| runtime.network.as_ref()) {
             for item in added {
@@ -5636,7 +5648,7 @@ fn add_selected_to_queue_next(
     audio: &dyn AudioEngine,
     online_runtime: Option<&mut OnlineRuntime>,
 ) {
-    if core.viewing_shared_queue() {
+    if queue_actions_target_shared_queue(core) {
         let added = core.add_selected_to_shared_queue_next();
         if let Some(network) = online_runtime.and_then(|runtime| runtime.network.as_ref()) {
             for item in added {
@@ -6457,7 +6469,7 @@ fn handle_action_panel_input_with_recent(
 
                 match selected_action {
                     RootActionId::RemoveSelectedFromQueue => {
-                        if core.viewing_shared_queue() {
+                        if queue_actions_target_shared_queue(core) {
                             if let Some((index, expected_path)) =
                                 core.remove_selected_from_shared_queue()
                                 && let Some(network) = online_runtime
@@ -6476,7 +6488,7 @@ fn handle_action_panel_input_with_recent(
                         panel.close();
                     }
                     RootActionId::MoveSelectedQueueItemToNext => {
-                        if core.viewing_shared_queue() {
+                        if queue_actions_target_shared_queue(core) {
                             if let Some((from_index, to_index, expected_path)) =
                                 core.move_selected_shared_queue_item_to_next()
                                 && let Some(network) = online_runtime
@@ -7941,6 +7953,7 @@ fn linux_tray_icon_pixmap() -> Vec<ksni::Icon> {
 mod tests {
     use super::*;
     use crate::audio::AudioEngine;
+    use crate::core::BrowserEntry;
     use crate::model::PersistedState;
     use crate::model::Track;
     use std::path::{Path, PathBuf};
@@ -10553,6 +10566,87 @@ mod tests {
             runtime.online_playback_source,
             OnlinePlaybackSource::LocalQueue
         );
+    }
+
+    fn online_room_core_with_selected_track() -> TuneCore {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.tracks = vec![Track {
+            path: PathBuf::from("a.mp3"),
+            title: String::from("a"),
+            artist: None,
+            album: None,
+        }];
+        core.browser_entries = vec![BrowserEntry {
+            kind: BrowserEntryKind::Track,
+            path: PathBuf::from("a.mp3"),
+            label: String::from("a"),
+        }];
+        core.selected_browser = 0;
+        core
+    }
+
+    fn shared_queue_paths(core: &TuneCore) -> Vec<PathBuf> {
+        core.online
+            .session
+            .as_ref()
+            .expect("online session")
+            .shared_queue
+            .iter()
+            .map(|item| item.path.clone())
+            .collect()
+    }
+
+    #[test]
+    fn queue_actions_target_shared_queue_only_in_online_room() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        assert!(!queue_actions_target_shared_queue(&core));
+
+        core.online_host_room("host");
+        assert!(queue_actions_target_shared_queue(&core));
+    }
+
+    #[test]
+    fn add_to_queue_end_routes_to_shared_queue_in_online_room() {
+        let mut core = online_room_core_with_selected_track();
+        core.online_host_room("host");
+
+        let audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        add_selected_to_queue_end(&mut core, &audio, Some(&mut runtime));
+
+        assert!(
+            core.queue.is_empty(),
+            "local queue must stay untouched in an online room"
+        );
+        assert_eq!(shared_queue_paths(&core), vec![PathBuf::from("a.mp3")]);
+    }
+
+    #[test]
+    fn add_to_queue_next_routes_to_shared_queue_in_online_room() {
+        let mut core = online_room_core_with_selected_track();
+        core.online_host_room("host");
+
+        let audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        add_selected_to_queue_next(&mut core, &audio, Some(&mut runtime));
+
+        assert!(
+            core.queue.is_empty(),
+            "local queue must stay untouched in an online room"
+        );
+        assert_eq!(shared_queue_paths(&core), vec![PathBuf::from("a.mp3")]);
+    }
+
+    #[test]
+    fn add_to_queue_end_still_uses_local_queue_outside_room() {
+        let mut core = online_room_core_with_selected_track();
+
+        let audio = NullAudioEngine::new();
+        let mut runtime = test_online_runtime();
+        add_selected_to_queue_end(&mut core, &audio, Some(&mut runtime));
+
+        assert_eq!(core.queue, vec![0]);
+        assert!(core.online.session.is_none());
     }
 
     #[test]
