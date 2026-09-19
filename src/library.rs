@@ -558,6 +558,42 @@ fn replace_cover_picture(tag: &mut Tag, image_data: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Embeds lyrics text (LRC format) into the audio file's metadata.
+///
+/// MP3 files get a USLT frame; other formats use their native
+/// unsynchronized-lyrics field. Existing lyric frames are replaced, never
+/// duplicated. Sidecar `.lrc` files keep precedence on load, so this is purely
+/// additive: it makes in-app lyric edits visible to other players without
+/// changing TuneTUI's own loading behavior.
+pub fn write_embedded_lyrics(path: &Path, lyrics_text: &str) -> Result<()> {
+    validate_tag_edit_target(path)?;
+    let stripped = crate::config::strip_windows_verbatim_prefix(path);
+
+    let mut tagged_file = Probe::open(&stripped)
+        .with_context(|| format!("failed to open {}", stripped.display()))?
+        .read()
+        .with_context(|| format!("failed to parse tags for {}", stripped.display()))?;
+
+    let tag_type = preferred_tag_type_for_path(&stripped).unwrap_or(tagged_file.primary_tag_type());
+
+    if tagged_file.tag_mut(tag_type).is_none() {
+        tagged_file.insert_tag(Tag::new(tag_type));
+    }
+    let tag = tagged_file
+        .tag_mut(tag_type)
+        .context("failed to access primary tag")?;
+    // Drop existing lyric frames first so a re-save replaces instead of
+    // duplicating them.
+    tag.remove_key(ItemKey::UnsyncLyrics);
+    if !lyrics_text.trim().is_empty() {
+        tag.insert_text(ItemKey::UnsyncLyrics, lyrics_text.to_string());
+    }
+
+    tagged_file
+        .save_to_path(&stripped, WriteOptions::default())
+        .with_context(|| format!("failed to write lyrics for {}", stripped.display()))
+}
+
 fn apply_metadata_edit_to_tag(tag: &mut Tag, edit: &MetadataEdit) {
     set_tag_text(tag, ItemKey::TrackTitle, edit.title.as_deref());
     set_tag_text(tag, ItemKey::TrackArtist, edit.artist.as_deref());
@@ -1385,6 +1421,19 @@ mod tests {
         fs::write(&file, b"x").expect("write text");
 
         let err = write_embedded_cover_art(&file, b"not-image").expect_err("error");
+        assert!(
+            err.to_string().contains("unsupported audio format"),
+            "unexpected error: {err:#}"
+        );
+    }
+
+    #[test]
+    fn lyrics_embed_rejects_non_audio_paths() {
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("note.txt");
+        fs::write(&file, b"x").expect("write text");
+
+        let err = write_embedded_lyrics(&file, "[00:01.00]hi\n").expect_err("error");
         assert!(
             err.to_string().contains("unsupported audio format"),
             "unexpected error: {err:#}"
