@@ -373,6 +373,11 @@ impl TuneCore {
 
     fn invalidate_library_caches(&self) {
         *self.sorted_library_queue_cache.borrow_mut() = None;
+        // Duration and cover-art lookups are keyed by path, so they would keep
+        // serving data for files that were replaced at the same path unless we
+        // clear them with the rest of the library state.
+        self.duration_lookup.borrow_mut().clear();
+        self.cover_art_lookup.borrow_mut().clear();
     }
 
     pub fn add_folder(&mut self, input: &Path) {
@@ -2454,6 +2459,36 @@ mod tests {
         assert_eq!(core.cached_duration_seconds_for_path(known), Some(123));
         assert!(core.has_cached_duration_for_path(unknown));
         assert_eq!(core.cached_duration_seconds_for_path(unknown), None);
+    }
+
+    #[test]
+    fn library_refresh_invalidates_duration_and_cover_art_caches() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        let path = PathBuf::from("song.mp3");
+        core.cache_duration_seconds_for_path(&path, Some(200));
+        core.cover_art_lookup.borrow_mut().insert(
+            normalized_path_key(&path),
+            Some(Arc::<[u8]>::from(&b"old-art"[..])),
+        );
+        assert!(core.has_cached_duration_for_path(&path));
+
+        // Full library refresh (e.g. after the file at `path` was replaced on
+        // disk) must not keep serving the old duration or cover art.
+        core.replace_library_tracks(vec![Track {
+            path: path.clone(),
+            title: String::from("Song"),
+            artist: None,
+            album: None,
+        }]);
+
+        assert!(!core.has_cached_duration_for_path(&path));
+        assert_eq!(core.cached_duration_seconds_for_path(&path), None);
+        assert!(
+            core.cover_art_lookup
+                .borrow()
+                .get(&normalized_path_key(&path))
+                .is_none()
+        );
     }
 
     #[test]
