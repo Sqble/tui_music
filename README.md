@@ -33,24 +33,46 @@ Full documentation is available at **https://tunetui.online**.
 - **Listen together:** host or join rooms, use a shared queue, share password-protected invite codes, and stream through a public or self-hosted server.
 - **Terminal-first polish:** keyboard and mouse support, categorized action search, direct page shortcuts, multiple themes, SSH compatibility, and tray minimize support on desktop environments with a tray host.
 
-## Quick Start
+## Installation
 
-Download `tune.exe` from releases and run it. No installer is required.
+### From a release (recommended)
 
-You can also build and run from source:
+Download the latest release from the [releases page](https://github.com/Sqble/tui_music/releases):
+
+- **Windows:** `tune.exe` — no installer required, just run it.
+- **Linux:** `tune` — make it executable (`chmod +x tune`) and run it.
+
+### From crates.io (coming soon)
 
 ```bash
-cargo run --release
+cargo install tunetui
 ```
 
-After installing locally, the binary is named `tune`:
+crates.io publishing is still in progress (see [#26](https://github.com/Sqble/tui_music/issues/26)).
+
+### From source
+
+You need Rust 1.93.1 or newer. On Linux, install the audio dependencies first:
+
+```bash
+# Debian/Ubuntu
+sudo apt-get install pkg-config libasound2-dev
+```
+
+Then install:
 
 ```bash
 cargo install --path .
 tune
 ```
 
-## Add Music
+Or run without installing:
+
+```bash
+cargo run --release
+```
+
+## Quick Start
 
 1. Press `h` to open the Library page.
 2. Select `[+] Add Directory`.
