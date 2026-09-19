@@ -570,6 +570,10 @@ impl TuneCore {
                 None
             }
             BrowserEntryKind::QueueLocal => {
+                if self.in_online_room() {
+                    self.set_status("Local queue is unavailable in an online room");
+                    return None;
+                }
                 self.browser_path = None;
                 self.browser_playlist = None;
                 self.browser_all_songs = false;
@@ -795,6 +799,7 @@ impl TuneCore {
 
     pub fn online_host_room(&mut self, nickname: &str) {
         self.online.host_room(nickname);
+        self.close_local_queue_view();
         self.refresh_browser_entries();
         if let Some(session) = self.online.session.as_ref() {
             self.set_status(&format!("Hosting room {}", session.room_code));
@@ -803,6 +808,7 @@ impl TuneCore {
 
     pub fn online_join_room(&mut self, room_code: &str, nickname: &str) {
         self.online.join_room(room_code, nickname);
+        self.close_local_queue_view();
         self.refresh_browser_entries();
         if let Some(session) = self.online.session.as_ref() {
             self.set_status(&format!("Joined room {}", session.room_code));
@@ -1273,11 +1279,22 @@ impl TuneCore {
         self.browser_local_queue
     }
 
+    /// True while hosting or joined to an online room. Inside a room the
+    /// local queue is removed entirely: all queue management targets the
+    /// shared room queue instead.
+    pub fn in_online_room(&self) -> bool {
+        self.online.session.is_some()
+    }
+
     pub fn viewing_shared_queue(&self) -> bool {
         self.browser_shared_queue
     }
 
     pub fn open_local_queue_view(&mut self) {
+        if self.in_online_room() {
+            self.set_status("Local queue is unavailable in an online room");
+            return;
+        }
         self.browser_path = None;
         self.browser_playlist = None;
         self.browser_all_songs = false;
@@ -1286,6 +1303,16 @@ impl TuneCore {
         self.selected_browser = 0;
         self.refresh_browser_entries();
         self.set_status("Opened local queue");
+    }
+
+    /// Closes the local queue view if it is open, refreshing the browser.
+    /// Used when entering an online room, where the local queue is removed.
+    pub fn close_local_queue_view(&mut self) {
+        if self.browser_local_queue {
+            self.browser_local_queue = false;
+            self.selected_browser = 0;
+            self.refresh_browser_entries();
+        }
     }
 
     pub fn open_shared_queue_view(&mut self) {
@@ -2175,11 +2202,15 @@ impl TuneCore {
                 label: String::from("[ALL] All Songs"),
             });
 
-            entries.push(BrowserEntry {
-                kind: BrowserEntryKind::QueueLocal,
-                path: PathBuf::new(),
-                label: String::from("[QUEUE] Local Queue"),
-            });
+            // The local queue is removed while in an online room: queue
+            // management targets the shared queue only.
+            if !self.in_online_room() {
+                entries.push(BrowserEntry {
+                    kind: BrowserEntryKind::QueueLocal,
+                    path: PathBuf::new(),
+                    label: String::from("[QUEUE] Local Queue"),
+                });
+            }
 
             if self.online.session.is_some() {
                 entries.push(BrowserEntry {
@@ -2609,6 +2640,61 @@ mod tests {
                 .iter()
                 .any(|entry| entry.kind == BrowserEntryKind::QueueShared)
         );
+    }
+
+    #[test]
+    fn online_room_hides_local_queue_browser_entry() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online_host_room("dj");
+
+        assert!(
+            !core
+                .browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::QueueLocal),
+            "local queue must be removed while in an online room"
+        );
+        assert!(
+            core.browser_entries
+                .iter()
+                .any(|entry| entry.kind == BrowserEntryKind::QueueShared)
+        );
+    }
+
+    #[test]
+    fn open_local_queue_view_is_refused_in_online_room() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.online_host_room("dj");
+
+        core.open_local_queue_view();
+
+        assert!(!core.browser_local_queue);
+        assert!(!core.viewing_local_queue());
+        assert_eq!(core.status, "Local queue is unavailable in an online room");
+    }
+
+    #[test]
+    fn hosting_room_closes_open_local_queue_view() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.open_local_queue_view();
+        assert!(core.viewing_local_queue());
+
+        core.online_host_room("dj");
+
+        assert!(!core.browser_local_queue);
+        assert!(!core.viewing_local_queue());
+    }
+
+    #[test]
+    fn joining_room_closes_open_local_queue_view() {
+        let mut core = TuneCore::from_persisted(PersistedState::default());
+        core.open_local_queue_view();
+        assert!(core.viewing_local_queue());
+
+        core.online_join_room("ROOM22", "listener");
+
+        assert!(!core.browser_local_queue);
+        assert!(!core.viewing_local_queue());
     }
 
     #[test]
