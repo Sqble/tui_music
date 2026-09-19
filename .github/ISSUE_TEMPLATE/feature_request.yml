@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest an idea for TuneTUI
+labels: [enhancement]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What should it do?
+      description: A clear description of the feature you'd like.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why is it useful?
+      description: What problem does it solve, or what workflow does it improve?
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Any other way you thought about solving it.
