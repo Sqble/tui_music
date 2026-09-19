@@ -490,6 +490,13 @@ pub fn audio_quality_snapshot(path: &Path) -> AudioQualitySnapshot {
     }
 }
 
+fn tag_write_options() -> WriteOptions {
+    // ID3v2.3 is the de-facto compatibility standard. lofty defaults to
+    // v2.4, which many players and OS integrations mishandle, making covers
+    // and metadata edits invisible outside this app (issue #36).
+    WriteOptions::new().use_id3v23(true)
+}
+
 pub fn write_embedded_metadata(path: &Path, edit: &MetadataEdit) -> Result<()> {
     validate_tag_edit_target(path)?;
     let stripped = crate::config::strip_windows_verbatim_prefix(path);
@@ -512,7 +519,7 @@ pub fn write_embedded_metadata(path: &Path, edit: &MetadataEdit) -> Result<()> {
     apply_metadata_edit_to_tag(tag, edit);
 
     tagged_file
-        .save_to_path(&stripped, WriteOptions::default())
+        .save_to_path(&stripped, tag_write_options())
         .with_context(|| format!("failed to write metadata for {}", stripped.display()))
 }
 
@@ -541,7 +548,7 @@ pub fn write_embedded_cover_art(path: &Path, image_data: &[u8]) -> Result<()> {
     replace_cover_picture(tag, image_data)?;
 
     tagged_file
-        .save_to_path(&stripped, WriteOptions::default())
+        .save_to_path(&stripped, tag_write_options())
         .with_context(|| format!("failed to write cover art for {}", stripped.display()))
 }
 
@@ -550,6 +557,11 @@ fn replace_cover_picture(tag: &mut Tag, image_data: &[u8]) -> Result<()> {
     let mut picture = Picture::from_reader(&mut cursor)
         .context("cover art bytes are not in a supported image format")?;
     picture.set_pic_type(PictureType::CoverFront);
+    // An explicitly empty description (rather than none) forces lofty to write
+    // a spec-compliant UTF-16 null terminator. With `None`, lofty writes a
+    // single 0x00, which strict readers misparse, eating the start of the
+    // image data as "description" (issue #36).
+    picture.set_description(Some(String::new()));
 
     while !tag.pictures().is_empty() {
         let _ = tag.remove_picture(0);
@@ -1389,6 +1401,57 @@ mod tests {
             err.to_string().contains("unsupported audio format"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn cover_art_is_written_as_id3v23_for_app_compatibility() {
+        // Issue #36: covers saved as ID3v2.4 are not recognized by other apps.
+        // ID3v2.3 is the de-facto compatibility standard, so MP3 tag writes
+        // must stay on v2.3.
+        let dir = tempdir().expect("tempdir");
+        let file = dir.path().join("track.mp3");
+        fs::write(&file, synthetic_mp3_bytes()).expect("write mp3");
+
+        write_embedded_cover_art(&file, &tiny_png_bytes()).expect("write cover art");
+
+        let bytes = fs::read(&file).expect("read mp3");
+        assert!(
+            bytes.starts_with(b"ID3"),
+            "expected an ID3 tag at the start of the file"
+        );
+        assert_eq!(
+            bytes[3], 3,
+            "expected ID3v2.3 for maximum app compatibility (issue #36), got v2.{}",
+            bytes[3]
+        );
+
+        // The cover must still round-trip through the app's own reader.
+        let cover = embedded_cover_art(&file).expect("cover readable by app");
+        assert_eq!(cover, tiny_png_bytes());
+    }
+
+    /// Minimal MPEG-1 Layer III audio: frames of 128kbps/44.1kHz silence.
+    /// Enough for format probing; not intended to be audible.
+    fn synthetic_mp3_bytes() -> Vec<u8> {
+        const FRAME_HEADER: [u8; 4] = [0xFF, 0xFB, 0x90, 0x00];
+        const FRAME_LEN: usize = 417; // 144 * 128000 / 44100
+        let mut bytes = Vec::with_capacity(8 * FRAME_LEN);
+        for _ in 0..8 {
+            bytes.extend_from_slice(&FRAME_HEADER);
+            bytes.resize(bytes.len() + FRAME_LEN - FRAME_HEADER.len(), 0);
+        }
+        bytes
+    }
+
+    /// Minimal valid 1x1 red PNG.
+    fn tiny_png_bytes() -> Vec<u8> {
+        vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00,
+            0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92,
+            0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        ]
     }
 
     #[test]
