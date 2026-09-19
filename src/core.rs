@@ -1072,8 +1072,18 @@ impl TuneCore {
             self.set_status("No lyrics loaded");
             return;
         };
+        let lrc = lyrics::to_lrc(doc);
         match lyrics::write_sidecar(&path, doc) {
-            Ok(saved) => self.set_status(&format!("Saved {}", saved.display())),
+            Ok(saved) => match library::write_embedded_lyrics(&path, &lrc) {
+                Ok(()) => self.set_status(&format!(
+                    "Saved {} (lyrics embedded in file)",
+                    saved.display()
+                )),
+                Err(err) => self.set_status(&format!(
+                    "Saved {} (metadata embed failed: {err})",
+                    saved.display()
+                )),
+            },
             Err(err) => self.set_status(&format!("Lyrics save failed: {err}")),
         }
     }
