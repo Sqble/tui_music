@@ -126,7 +126,7 @@ Remote users can stream to each other through the room host connection; only the
 
 ## Lyrics
 
-TuneTUI reads synced lyrics from `.lrc` sidecars or embedded metadata. Sidecar lyrics are stored in the config directory under `lyrics/` and take precedence over embedded lyrics.
+TuneTUI reads synced lyrics from `.lrc` sidecars or embedded metadata. Sidecar lyrics are stored in the config directory under `lyrics/` and take precedence over embedded lyrics. Edits made in the lyrics editor are saved to the `.lrc` sidecar and also embedded into the audio file's metadata (a USLT frame for MP3), so other players can see the synced lyrics too.
 
 The Library page can show a collapsible Lyric Preview under Song Info. If lyrics are not detected, the preview points you to press `j` and add them from the Lyrics page.
 
